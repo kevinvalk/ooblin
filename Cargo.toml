@@ -1,0 +1,5 @@
+[workspace]
+members = ["crates/amt-core", "crates/amt-console"]
+# The app needs a built UI to compile, so plain `cargo test` sticks to the library.
+default-members = ["crates/amt-core"]
+resolver = "3"

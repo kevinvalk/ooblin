@@ -1,0 +1,23 @@
+[package]
+name = "amt-core"
+version = "0.1.0"
+edition = "2024"
+license = "Apache-2.0"
+
+[dependencies]
+digest_auth = "0.3"
+reqwest = { version = "0.13", default-features = false, features = ["rustls"] }
+roxmltree = "0.21"
+rustls = "0.23"
+serde = { version = "1", features = ["derive"] }
+sha2 = "0.10"
+thiserror = "2"
+
+[dev-dependencies]
+http-body-util = "0.1"
+hyper = { version = "1", features = ["server", "http1"] }
+hyper-util = { version = "0.1", features = ["tokio"] }
+md-5 = "0.10"
+rcgen = "0.14"
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "net"] }
+tokio-rustls = "0.26"

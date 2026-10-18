@@ -1,0 +1,155 @@
+:root {
+  color-scheme: light dark;
+  --bg: #f5f5f7;
+  --surface: #fff;
+  --border: rgb(0 0 0 / 0.1);
+  --text: #1d1d1f;
+  --muted: #6e6e73;
+  --accent: #0a84ff;
+  --danger: #d70015;
+  font: 13px/1.45 -apple-system, BlinkMacSystemFont, system-ui, sans-serif;
+  -webkit-font-smoothing: antialiased;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #1c1c1e;
+    --surface: #2c2c2e;
+    --border: rgb(255 255 255 / 0.1);
+    --text: #f5f5f7;
+    --muted: #98989d;
+    --danger: #ff453a;
+  }
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  cursor: default;
+  user-select: none;
+}
+
+/* Room for the traffic lights of the overlay title bar, and something to drag the window by. */
+header {
+  height: 38px;
+}
+
+h1 {
+  margin: 0 0 16px;
+  font-size: 20px;
+  font-weight: 600;
+}
+
+[hidden] {
+  display: none !important;
+}
+
+#connect {
+  display: grid;
+  gap: 12px;
+  width: 300px;
+  margin: 40px auto;
+}
+
+#device {
+  max-width: 560px;
+  margin: 8px auto;
+  padding: 0 24px;
+}
+
+label {
+  display: grid;
+  gap: 4px;
+  font-size: 11px;
+  font-weight: 500;
+  color: var(--muted);
+}
+
+input,
+button {
+  height: 30px;
+  border-radius: 7px;
+  font: inherit;
+}
+
+input {
+  padding: 0 9px;
+  border: 1px solid var(--border);
+  background: var(--surface);
+  color: var(--text);
+  user-select: text;
+}
+
+input:focus {
+  outline: 3px solid rgb(10 132 255 / 0.35);
+  border-color: var(--accent);
+}
+
+button {
+  padding: 0 16px;
+  border: 0;
+  background: var(--accent);
+  color: #fff;
+  font-weight: 500;
+}
+
+button.secondary {
+  border: 1px solid var(--border);
+  background: var(--surface);
+  color: var(--text);
+}
+
+button.danger {
+  background: var(--danger);
+}
+
+[inert] {
+  opacity: 0.6;
+}
+
+output {
+  color: var(--danger);
+  user-select: text;
+}
+
+.tags span {
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: rgb(10 132 255 / 0.15);
+  color: var(--accent);
+  font-size: 11px;
+  font-weight: 500;
+}
+
+dl {
+  display: grid;
+  grid-template-columns: max-content 1fr;
+  gap: 8px 20px;
+  margin: 20px 0;
+  padding: 16px 0;
+  border-block: 1px solid var(--border);
+}
+
+dd {
+  grid-column: 2;
+  margin: 0;
+  user-select: text;
+}
+
+dt {
+  color: var(--muted);
+}
+
+code {
+  font: 11.5px/1.5 ui-monospace, "SF Mono", Menlo, monospace;
+  white-space: pre;
+}
+
+output dl {
+  color: var(--text);
+}

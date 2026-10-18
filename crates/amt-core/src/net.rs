@@ -1,0 +1,236 @@
+//! Our whole egress surface: nothing outside this file may touch the network (`tests/net_boundary.rs`). AMT 19 is
+//! TLS-only, so there is deliberately no plaintext path.
+
+use std::error::Error as _;
+use std::fmt;
+use std::str::FromStr;
+use std::sync::{Arc, OnceLock};
+use std::time::Duration;
+
+use digest_auth::{AuthContext, WwwAuthenticateHeader};
+use reqwest::StatusCode;
+use reqwest::header::{AUTHORIZATION, CONTENT_TYPE, WWW_AUTHENTICATE};
+use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
+use rustls::crypto::{WebPkiSupportedAlgorithms, aws_lc_rs};
+use rustls::pki_types::{CertificateDer, ServerName, UnixTime};
+use rustls::{CertificateError, ClientConfig, DigitallySignedStruct, SignatureScheme};
+use sha2::{Digest, Sha256};
+
+use crate::{Error, Result, Target, wsman};
+
+pub const WSMAN_PORT: u16 = 16993;
+
+/// A keep-alive HTTPS connection to `/wsman`. AMT answers parallel requests with 503s, so `&mut self` it is.
+pub struct Connection {
+    http: reqwest::Client,
+    url: String,
+    user: String,
+    password: String,
+    challenge: Option<WwwAuthenticateHeader>,
+    pin: Arc<Pin>,
+}
+
+impl Connection {
+    /// Without a `pin` we pin whatever certificate we see first, so it can't change under us mid-session.
+    pub fn new(target: &Target, pin: Option<Fingerprint>) -> Result<Self> {
+        let pin = Arc::new(Pin {
+            pinned: pin.map(OnceLock::from).unwrap_or_default(),
+            rejected: OnceLock::new(),
+            algorithms: aws_lc_rs::default_provider().signature_verification_algorithms,
+        });
+        let tls = ClientConfig::builder()
+            .dangerous()
+            .with_custom_certificate_verifier(pin.clone())
+            .with_no_client_auth();
+        let http = reqwest::Client::builder()
+            .use_preconfigured_tls(tls)
+            .pool_max_idle_per_host(1)
+            .connect_timeout(Duration::from_secs(10))
+            .timeout(Duration::from_secs(60))
+            .build()
+            .map_err(transport)?;
+
+        Ok(Self {
+            http,
+            url: format!("https://{}:{}/wsman", target.host, target.port),
+            user: target.user.clone(),
+            password: target.password.clone(),
+            challenge: None,
+            pin,
+        })
+    }
+
+    /// The pinned certificate, known once the first connection was made.
+    pub fn fingerprint(&self) -> Option<Fingerprint> {
+        self.pin.pinned.get().copied()
+    }
+
+    /// We keep answering the last Digest challenge, so only a fresh (or stale) nonce costs an extra round trip.
+    pub async fn post(&mut self, envelope: String) -> Result<String> {
+        let mut response = self.send(&envelope).await?;
+        if response.status() == StatusCode::UNAUTHORIZED {
+            let challenge = response
+                .headers()
+                .get(WWW_AUTHENTICATE)
+                .and_then(|value| value.to_str().ok());
+            self.challenge = Some(digest_auth::parse(challenge.unwrap_or_default()).map_err(protocol)?);
+            response = self.send(&envelope).await?;
+        }
+
+        let status = response.status();
+        let body = response.text().await.map_err(transport)?;
+        match status {
+            StatusCode::UNAUTHORIZED => Err(Error::Unauthorized),
+            status if status.is_success() => Ok(body),
+            status => Err(wsman::fault(&body).map_or(Error::Http(status.as_u16()), Error::Fault)),
+        }
+    }
+
+    async fn send(&mut self, envelope: &str) -> Result<reqwest::Response> {
+        let mut request = self
+            .http
+            .post(&self.url)
+            .header(CONTENT_TYPE, "application/soap+xml;charset=UTF-8")
+            .body(envelope.to_owned());
+        if let Some(challenge) = &mut self.challenge {
+            let context = AuthContext::new_post(&self.user, &self.password, "/wsman", None::<&[u8]>);
+            request = request.header(
+                AUTHORIZATION,
+                challenge.respond(&context).map_err(protocol)?.to_header_string(),
+            );
+        }
+        request
+            .send()
+            .await
+            .map_err(|error| match (self.pin.pinned.get(), self.pin.rejected.get()) {
+                (Some(&expected), Some(&actual)) => Error::PinMismatch { expected, actual },
+                _ => transport(error),
+            })
+    }
+}
+
+/// reqwest's own message is just "error sending request", the actual reason lives in the source chain.
+fn transport(error: reqwest::Error) -> Error {
+    let mut message = error.to_string();
+    let mut source = error.source();
+    while let Some(cause) = source {
+        message = format!("{message}: {cause}");
+        source = cause.source();
+    }
+    Error::Transport(message)
+}
+
+fn protocol(error: digest_auth::Error) -> Error {
+    Error::Protocol(error.to_string())
+}
+
+/// AMT certificates are self-signed, so instead of a CA we trust the SHA-256 of the leaf certificate.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub struct Fingerprint([u8; 32]);
+
+impl Fingerprint {
+    pub fn of(der: &[u8]) -> Self {
+        Self(Sha256::digest(der).into())
+    }
+}
+
+impl fmt::Display for Fingerprint {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let hex: Vec<String> = self.0.iter().map(|byte| format!("{byte:02X}")).collect();
+        f.write_str(&hex.join(":"))
+    }
+}
+
+impl fmt::Debug for Fingerprint {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fmt::Display::fmt(self, f)
+    }
+}
+
+impl FromStr for Fingerprint {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        let bytes: Option<Vec<u8>> = s.split(':').map(|byte| u8::from_str_radix(byte, 16).ok()).collect();
+        bytes
+            .and_then(|bytes| bytes.try_into().ok())
+            .map(Self)
+            .ok_or_else(|| format!("not a SHA-256 fingerprint: {s}"))
+    }
+}
+
+impl serde::Serialize for Fingerprint {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.collect_str(self)
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for Fingerprint {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        String::deserialize(deserializer)?
+            .parse()
+            .map_err(serde::de::Error::custom)
+    }
+}
+
+/// Handshake signatures are still verified, so the peer must actually hold the pinned certificate's key.
+#[derive(Debug)]
+struct Pin {
+    pinned: OnceLock<Fingerprint>,
+    rejected: OnceLock<Fingerprint>,
+    algorithms: WebPkiSupportedAlgorithms,
+}
+
+impl ServerCertVerifier for Pin {
+    fn verify_server_cert(
+        &self,
+        end_entity: &CertificateDer<'_>,
+        _intermediates: &[CertificateDer<'_>],
+        _server_name: &ServerName<'_>,
+        _ocsp_response: &[u8],
+        _now: UnixTime,
+    ) -> Result<ServerCertVerified, rustls::Error> {
+        let presented = Fingerprint::of(end_entity);
+        if *self.pinned.get_or_init(|| presented) == presented {
+            return Ok(ServerCertVerified::assertion());
+        }
+        let _ = self.rejected.set(presented);
+        Err(rustls::Error::InvalidCertificate(
+            CertificateError::ApplicationVerificationFailure,
+        ))
+    }
+
+    fn verify_tls12_signature(
+        &self,
+        message: &[u8],
+        cert: &CertificateDer<'_>,
+        dss: &DigitallySignedStruct,
+    ) -> Result<HandshakeSignatureValid, rustls::Error> {
+        rustls::crypto::verify_tls12_signature(message, cert, dss, &self.algorithms)
+    }
+
+    fn verify_tls13_signature(
+        &self,
+        message: &[u8],
+        cert: &CertificateDer<'_>,
+        dss: &DigitallySignedStruct,
+    ) -> Result<HandshakeSignatureValid, rustls::Error> {
+        rustls::crypto::verify_tls13_signature(message, cert, dss, &self.algorithms)
+    }
+
+    fn supported_verify_schemes(&self) -> Vec<SignatureScheme> {
+        self.algorithms.supported_schemes()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Fingerprint;
+
+    #[test]
+    fn fingerprint_round_trips() {
+        let fingerprint = Fingerprint::of(b"certificate");
+        assert_eq!(fingerprint.to_string().parse(), Ok(fingerprint));
+        assert!("AB:CD".parse::<Fingerprint>().is_err());
+    }
+}
