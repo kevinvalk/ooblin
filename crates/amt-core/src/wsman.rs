@@ -41,6 +41,12 @@ pub fn pull(class: &str, context: &str, message_id: u32) -> String {
     envelope(PULL, class, message_id, &body)
 }
 
+/// A method call, `input` being the `<h:{method}_INPUT>` element from go-wsman-messages.
+pub fn invoke(class: &str, method: &str, input: &str, message_id: u32) -> String {
+    let action = format!("{}/{method}", resource_uri(class));
+    envelope(&action, class, message_id, &format!("<Body>{input}</Body>"))
+}
+
 fn envelope(action: &str, class: &str, message_id: u32, body: &str) -> String {
     let uri = resource_uri(class);
     format!(
@@ -48,7 +54,8 @@ fn envelope(action: &str, class: &str, message_id: u32, body: &str) -> String {
     )
 }
 
-/// A CIM instance with its properties in document order, array properties appear once per element.
+/// A CIM instance with its properties in document order, array properties appear once per element. Values are trimmed
+/// (AMT pads part numbers) and nested values like `<ReleaseDate><Datetime>` collapse to their text.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Instance {
     pub class: String,
@@ -56,11 +63,13 @@ pub struct Instance {
 }
 
 impl Instance {
+    /// The property's value, empty when the instance doesn't have it.
+    pub fn text(&self, name: &str) -> String {
+        self.get(name).unwrap_or_default().to_owned()
+    }
+
     pub fn get(&self, name: &str) -> Option<&str> {
-        self.properties
-            .iter()
-            .find(|(key, _)| key == name)
-            .map(|(_, value)| value.as_str())
+        self.properties.iter().find(|(key, _)| key == name).map(|(_, value)| value.as_str())
     }
 
     fn from_node(node: Node) -> Self {
@@ -68,10 +77,9 @@ impl Instance {
             class: node.tag_name().name().to_owned(),
             properties: elements(node)
                 .map(|property| {
-                    (
-                        property.tag_name().name().to_owned(),
-                        property.text().unwrap_or_default().to_owned(),
-                    )
+                    let mut texts = property.descendants().filter_map(|node| node.text()).map(str::trim);
+                    let value = texts.find(|text| !text.is_empty()).unwrap_or_default();
+                    (property.tag_name().name().to_owned(), value.to_owned())
                 })
                 .collect(),
         }
@@ -83,7 +91,7 @@ pub struct Page {
     pub next: Option<String>,
 }
 
-pub fn parse_get(xml: &str) -> Result<Instance> {
+pub fn parse_instance(xml: &str) -> Result<Instance> {
     let doc = parse(xml)?;
     let instance = elements(body(&doc)?).next().ok_or_else(|| missing("instance"))?;
     Ok(Instance::from_node(instance))
@@ -101,14 +109,9 @@ pub fn parse_pull(xml: &str) -> Result<Page> {
     let items = descendant(body, "Items").map(|items| elements(items).map(Instance::from_node).collect());
     let next = match descendant(body, "EndOfSequence") {
         Some(_) => None,
-        None => descendant(body, "EnumerationContext")
-            .and_then(|context| context.text())
-            .map(str::to_owned),
+        None => descendant(body, "EnumerationContext").and_then(|context| context.text()).map(str::to_owned),
     };
-    Ok(Page {
-        items: items.unwrap_or_default(),
-        next,
-    })
+    Ok(Page { items: items.unwrap_or_default(), next })
 }
 
 /// The SOAP fault of an error response as `<subcode>: <reason>`.
@@ -116,10 +119,7 @@ pub fn fault(xml: &str) -> Option<String> {
     let doc = Document::parse(xml).ok()?;
     let fault = descendant(doc.root_element(), "Fault")?;
     let text = |name| descendant(fault, name).and_then(|node| node.text()).map(str::trim);
-    let code = fault
-        .descendants()
-        .rfind(|node| node.has_tag_name("Value"))
-        .and_then(|node| node.text());
+    let code = fault.descendants().rfind(|node| node.has_tag_name("Value")).and_then(|node| node.text());
     Some(match (code, text("Text")) {
         (Some(code), Some(reason)) => format!("{code}: {reason}"),
         (code, reason) => code.or(reason).unwrap_or("unspecified").to_owned(),
@@ -131,9 +131,7 @@ fn parse(xml: &str) -> Result<Document<'_>> {
 }
 
 fn body<'a>(doc: &'a Document) -> Result<Node<'a, 'a>> {
-    elements(doc.root_element())
-        .find(|node| node.has_tag_name("Body"))
-        .ok_or_else(|| missing("Body"))
+    elements(doc.root_element()).find(|node| node.has_tag_name("Body")).ok_or_else(|| missing("Body"))
 }
 
 fn elements<'a>(node: Node<'a, 'a>) -> impl Iterator<Item = Node<'a, 'a>> {
@@ -152,7 +150,7 @@ fn missing(what: &str) -> Error {
 mod tests {
     use super::*;
 
-    const FIXTURES: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures");
+    const FIXTURES: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../fixtures/go-wsman-messages/wsman");
 
     fn fixture(name: &str) -> String {
         std::fs::read_to_string(format!("{FIXTURES}/{name}")).unwrap()
@@ -176,28 +174,19 @@ mod tests {
 
     #[test]
     fn parses_a_get_response() {
-        let settings = parse_get(&fixture("amt_general_settings_get.xml")).unwrap();
+        let settings = parse_instance(&fixture("AMT_GeneralSettings.Get.xml")).unwrap();
         assert_eq!(settings.class, "AMT_GeneralSettings");
         assert_eq!(settings.get("HostName"), Some("Test Host Name"));
-        assert_eq!(
-            settings.get("DigestRealm"),
-            Some("Digest:F3EB554784E729164447A89F60B641C5")
-        );
+        assert_eq!(settings.get("DigestRealm"), Some("Digest:F3EB554784E729164447A89F60B641C5"));
     }
 
     #[test]
     fn parses_an_enumeration() {
-        assert_eq!(
-            parse_enumerate(&fixture("cim_software_identity_enumerate.xml")).unwrap(),
-            "E2020000-0000-0000-0000-000000000000"
-        );
-        let page = parse_pull(&fixture("cim_software_identity_pull.xml")).unwrap();
+        let enumerated = r#"<a:Envelope xmlns:a="http://www.w3.org/2003/05/soap-envelope" xmlns:g="http://schemas.xmlsoap.org/ws/2004/09/enumeration"><a:Body><g:EnumerateResponse><g:EnumerationContext>E2020000-0000-0000-0000-000000000000</g:EnumerationContext></g:EnumerateResponse></a:Body></a:Envelope>"#;
+        assert_eq!(parse_enumerate(enumerated).unwrap(), "E2020000-0000-0000-0000-000000000000");
+        let page = parse_pull(&fixture("CIM_SoftwareIdentity.Pull.xml")).unwrap();
         assert!(page.next.is_none());
-        let amt = page
-            .items
-            .iter()
-            .find(|item| item.get("InstanceID") == Some("AMT"))
-            .unwrap();
+        let amt = page.items.iter().find(|item| item.get("InstanceID") == Some("AMT")).unwrap();
         assert_eq!(amt.get("VersionString"), Some("12.0.67"));
     }
 
@@ -208,6 +197,6 @@ mod tests {
             fault(xml).unwrap(),
             "c:DestinationUnreachable: No route can be determined to reach the destination role defined by the WSAddressing To."
         );
-        assert!(fault(&fixture("amt_general_settings_get.xml")).is_none());
+        assert!(fault(&fixture("AMT_GeneralSettings.Get.xml")).is_none());
     }
 }

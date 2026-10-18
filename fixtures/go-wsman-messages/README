@@ -1,0 +1,2 @@
+Intel's sample responses from go-wsman-messages (pkg/wsman/wsmantesting/responses), Copyright Intel Corporation,
+Apache-2.0. CIM_Chip.Pull.xml got an EndOfSequence so it ends the enumeration.

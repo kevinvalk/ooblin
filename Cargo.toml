@@ -1,5 +1,3 @@
 [workspace]
-members = ["crates/amt-core", "crates/amt-console"]
-# The app needs a built UI to compile, so plain `cargo test` sticks to the library.
-default-members = ["crates/amt-core"]
+members = ["crates/amt-core", "crates/amt-console", "crates/mock-amt"]
 resolver = "3"

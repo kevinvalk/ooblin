@@ -2,27 +2,37 @@
 
 mod client;
 mod info;
+mod inventory;
 mod net;
-mod wsman;
+mod power;
+pub mod wsman;
 
 pub use client::{Client, Trust};
 pub use info::{ControlMode, Info};
-pub use net::Fingerprint;
-pub use wsman::Instance;
+pub use inventory::{Inventory, Memory};
+pub use net::{Connection, Fingerprint, Redirection, Session};
+pub use power::{PowerAction, PowerState};
 
-use serde::Deserialize;
-
-#[derive(Clone, Deserialize)]
+/// A device and how to log in to it. The ports only change for tests and tunnels.
+#[derive(Clone)]
 pub struct Target {
     pub host: String,
-    #[serde(default = "wsman_port")]
-    pub port: u16,
+    pub wsman_port: u16,
+    pub redirection_port: u16,
     pub user: String,
     pub password: String,
 }
 
-fn wsman_port() -> u16 {
-    net::WSMAN_PORT
+impl Target {
+    pub fn new(host: impl Into<String>, user: impl Into<String>, password: impl Into<String>) -> Self {
+        Self {
+            host: host.into(),
+            wsman_port: net::WSMAN_PORT,
+            redirection_port: net::REDIRECTION_PORT,
+            user: user.into(),
+            password: password.into(),
+        }
+    }
 }
 
 pub type Result<T, E = Error> = std::result::Result<T, E>;
@@ -37,6 +47,8 @@ pub enum Error {
     Transport(String),
     #[error("HTTP {0}")]
     Http(u16),
+    #[error("{method} failed with return value {code}")]
+    Method { method: String, code: String },
     #[error("WS-Man fault: {0}")]
     Fault(String),
     #[error("unexpected response: {0}")]

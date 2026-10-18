@@ -7,34 +7,91 @@
     <script type="module" src="/src/main.ts"></script>
   </head>
   <body>
-    <header data-tauri-drag-region></header>
+    <nav id="sidebar">
+      <h2>Devices</h2>
+      <ul id="devices"></ul>
+      <p class="empty">No devices yet</p>
+      <button type="button" class="secondary" data-action="new">New connection</button>
+    </nav>
 
-    <form id="connect" autocomplete="off" spellcheck="false">
-      <h1>AMT Console</h1>
-      <label>Host <input name="host" placeholder="192.168.1.50" required autofocus /></label>
-      <label>User <input name="user" value="admin" required /></label>
-      <label>Password <input name="password" type="password" required /></label>
-      <button type="submit">Connect</button>
-      <output></output>
-    </form>
+    <main>
+      <header>
+        <button type="button" class="icon" data-action="sidebar" title="Toggle the sidebar (⌘B)">
+          <svg viewBox="0 0 16 16"><rect x="1.5" y="2.5" width="13" height="11" rx="2" /><path d="M6 2.5v11" /></svg>
+        </button>
+        <div class="title" data-field="name"></div>
+        <p class="tags"><span data-field="version"></span> <span data-field="mode"></span></p>
+      </header>
 
-    <section id="device" hidden>
-      <h1 data-field="name"></h1>
-      <p class="tags"><span data-field="version"></span> <span data-field="mode"></span></p>
-      <dl>
-        <dt>Digest realm</dt>
-        <dd data-field="realm"></dd>
-        <dt>Certificate</dt>
-        <dd><code data-field="fingerprint"></code></dd>
-        <dd data-field="trust"></dd>
-      </dl>
-      <button type="button" class="secondary" data-action="disconnect">Disconnect</button>
-    </section>
+      <form id="connect" autocomplete="off" spellcheck="false">
+        <h1>Connect to a device</h1>
+        <label>Host <input name="host" placeholder="192.168.1.50" required autofocus /></label>
+        <label>User <input name="user" value="admin" required /></label>
+        <label>Password <input name="password" type="password" required /></label>
+        <label class="check"><input name="remember" type="checkbox" /> Remember the password</label>
+        <button type="submit">Connect</button>
+        <output></output>
+      </form>
+
+      <section id="session" hidden>
+        <nav class="tabs">
+          <button type="button" data-tab="overview">Overview</button>
+          <button type="button" data-tab="hardware">Hardware</button>
+        </nav>
+
+        <div data-panel="overview">
+          <h2>Power</h2>
+          <div class="power">
+            <span class="state" data-field="power"></span>
+            <button type="button" class="secondary" data-power="on">Power on</button>
+            <button type="button" class="secondary" data-power="off">Power off</button>
+            <button type="button" class="secondary" data-power="cycle">Power cycle</button>
+            <button type="button" class="secondary" data-power="reset">Reset</button>
+          </div>
+          <h2>AMT</h2>
+          <dl>
+            <dt>Digest realm</dt>
+            <dd data-field="realm"></dd>
+            <dt>Certificate</dt>
+            <dd><code data-field="fingerprint"></code></dd>
+            <dd class="muted" data-field="trust"></dd>
+          </dl>
+        </div>
+
+        <div data-panel="hardware">
+          <dl id="inventory"></dl>
+        </div>
+
+        <output></output>
+      </section>
+    </main>
+
+    <dialog id="confirm">
+      <form method="dialog">
+        <p data-field="question"></p>
+        <button value="cancel" class="secondary">Cancel</button>
+        <button value="confirm" class="danger" data-field="verb"></button>
+      </form>
+    </dialog>
+
+    <template id="device">
+      <li>
+        <button type="button" class="host"><span class="dot"></span><span data-field="host"></span></button>
+        <button type="button" class="icon disconnect" title="Disconnect">
+          <svg viewBox="0 0 16 16"><path d="M4.5 4.5l7 7M11.5 4.5l-7 7" /></svg>
+        </button>
+        <button type="button" class="icon forget" title="Forget">
+          <svg viewBox="0 0 16 16">
+            <path d="M6 2h4M2.5 4h11M4 4l.7 9.2a1 1 0 0 0 1 .8h4.6a1 1 0 0 0 1-.8L12 4M6.5 7v4M9.5 7v4" />
+          </svg>
+        </button>
+      </li>
+    </template>
 
     <template id="pin-mismatch">
       <p>
-        This device presented a different certificate than the one we pinned. That's expected after reprovisioning or
-        reflashing the ME, anything else may be someone in the middle.
+        <strong>The certificate has changed.</strong> That's expected after reprovisioning or reflashing the ME,
+        anything else may be someone in the middle.
       </p>
       <dl>
         <dt>Pinned</dt>

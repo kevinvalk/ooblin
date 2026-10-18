@@ -1,99 +1,198 @@
-//! A webview over `amt-core`. The webview never holds a socket, it calls these commands.
+//! A webview over `amt-core`. The webview never holds a socket or a stored password, it calls these commands.
 
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
-use std::collections::BTreeMap;
-use std::io;
-use std::path::PathBuf;
+mod hosts;
 
-use amt_core::{Client, Error, Fingerprint, Info, Target, Trust};
+use std::collections::HashMap;
+use std::fmt::Display;
+use std::sync::Arc;
+
+use amt_core::{Client, Error, Fingerprint, Info, Inventory, PowerAction, PowerState, Target};
+use clap::Parser;
+use hosts::{Device, Hosts};
 use serde::Serialize;
-use tauri::{AppHandle, Manager};
+use tauri::async_runtime::Mutex;
+use tauri::{AppHandle, State, WebviewWindow};
+
+/// One session per connected device, each on its own lock: AMT wants its calls one at a time, other devices don't care.
+#[derive(Default)]
+struct Sessions(std::sync::Mutex<HashMap<String, Arc<Mutex<Client>>>>);
+
+impl Sessions {
+    fn get(&self, host: &str) -> Result<Arc<Mutex<Client>>, CommandError> {
+        let session = self.0.lock().unwrap().get(host).cloned();
+        session.ok_or_else(|| CommandError::failed(format!("Not connected to {host}.")))
+    }
+}
+
+/// A desktop console for Intel AMT.
+#[derive(Parser)]
+#[command(version)]
+struct Args {
+    /// Connect to this host on start, with its saved credentials unless --password is given.
+    host: Option<String>,
+    #[arg(long, default_value = "admin")]
+    user: String,
+    #[arg(long)]
+    password: Option<String>,
+}
+
+/// The device to open on start, if any. The webview connects to it like a click in the sidebar would.
+#[tauri::command]
+fn launch(app: AppHandle, args: State<'_, Args>) -> Result<Option<Device>, CommandError> {
+    let Some(host) = args.host.clone() else { return Ok(None) };
+    let saved = Hosts::open(&app)?.device(&host).filter(|_| args.password.is_none());
+    Ok(Some(saved.unwrap_or(Device { host, user: args.user.clone(), remembered: args.password.is_some() })))
+}
 
 #[tauri::command]
-async fn connect(app: AppHandle, target: Target) -> Result<Info, CommandError> {
-    let mut pins = Pins::open(&app)?;
-    let info = Client::new(&target, pins.get(&target.host))?.info().await?;
-    if info.trust == Trust::FirstUse {
-        pins.set(&target.host, info.fingerprint)?;
+fn devices(app: AppHandle) -> Result<Vec<Device>, CommandError> {
+    Ok(Hosts::open(&app)?.devices())
+}
+
+#[tauri::command]
+async fn connect(
+    app: AppHandle,
+    sessions: State<'_, Sessions>,
+    host: String,
+    user: String,
+    password: String,
+    remember: bool,
+) -> Result<Info, CommandError> {
+    let target = Target::new(host, user, password);
+    let info = open(&app, &sessions, &target).await?;
+    if remember {
+        Hosts::open(&app)?.remember(&target)?;
     }
     Ok(info)
 }
 
-/// Only called after the user compared both fingerprints and chose to trust the new one.
+/// Connects with the password we already have, from the command line or the OS credential store.
+#[tauri::command]
+async fn reconnect(
+    app: AppHandle,
+    sessions: State<'_, Sessions>,
+    args: State<'_, Args>,
+    host: String,
+) -> Result<Info, CommandError> {
+    let target = match &args.password {
+        Some(password) if args.host.as_ref() == Some(&host) => Target::new(host, &args.user, password),
+        _ => Hosts::open(&app)?.target(&host)?,
+    };
+    open(&app, &sessions, &target).await
+}
+
+async fn open(app: &AppHandle, sessions: &Sessions, target: &Target) -> Result<Info, CommandError> {
+    let mut hosts = Hosts::open(app)?;
+    let mut client = Client::new(target, hosts.pin(&target.host))?;
+    let info = client.info().await?;
+    hosts.connected(target, info.fingerprint)?;
+    sessions.0.lock().unwrap().insert(target.host.clone(), Arc::new(Mutex::new(client)));
+    Ok(info)
+}
+
+#[tauri::command]
+fn disconnect(sessions: State<'_, Sessions>, host: &str) {
+    sessions.0.lock().unwrap().remove(host);
+}
+
+#[tauri::command]
+fn forget(app: AppHandle, sessions: State<'_, Sessions>, host: &str) -> Result<(), CommandError> {
+    disconnect(sessions, host);
+    Hosts::open(&app)?.forget(host)
+}
+
 #[tauri::command]
 fn trust(app: AppHandle, host: &str, fingerprint: Fingerprint) -> Result<(), CommandError> {
-    Ok(Pins::open(&app)?.set(host, fingerprint)?)
+    Ok(Hosts::open(&app)?.trust(host, fingerprint)?)
 }
 
-/// Certificate pins per host, in `pins.json` in the app's config directory.
-struct Pins {
-    path: PathBuf,
-    pins: BTreeMap<String, Fingerprint>,
+#[tauri::command]
+async fn power_state(sessions: State<'_, Sessions>, host: &str) -> Result<PowerState, CommandError> {
+    Ok(sessions.get(host)?.lock().await.power_state().await?)
 }
 
-impl Pins {
-    fn open(app: &AppHandle) -> io::Result<Self> {
-        let path = app.path().app_config_dir().map_err(io::Error::other)?.join("pins.json");
-        let pins = match std::fs::read(&path) {
-            Ok(json) => serde_json::from_slice(&json)?,
-            Err(error) if error.kind() == io::ErrorKind::NotFound => BTreeMap::new(),
-            Err(error) => return Err(error),
-        };
-        Ok(Self { path, pins })
-    }
+#[tauri::command]
+async fn power(sessions: State<'_, Sessions>, host: &str, action: PowerAction) -> Result<(), CommandError> {
+    Ok(sessions.get(host)?.lock().await.power(action).await?)
+}
 
-    fn get(&self, host: &str) -> Option<Fingerprint> {
-        self.pins.get(host).copied()
-    }
+#[tauri::command]
+async fn inventory(sessions: State<'_, Sessions>, host: &str) -> Result<Inventory, CommandError> {
+    Ok(sessions.get(host)?.lock().await.inventory().await?)
+}
 
-    fn set(&mut self, host: &str, fingerprint: Fingerprint) -> io::Result<()> {
-        self.pins.insert(host.to_owned(), fingerprint);
-        std::fs::create_dir_all(self.path.parent().expect("the config dir has a parent"))?;
-        std::fs::write(&self.path, serde_json::to_vec_pretty(&self.pins)?)
-    }
+/// The window is titled after the session on screen.
+#[tauri::command]
+fn title(window: WebviewWindow, title: &str) -> Result<(), CommandError> {
+    window.set_title(title).map_err(CommandError::failed)
 }
 
 /// What the webview gets when a command fails: always a message, and both fingerprints when the certificate changed.
 #[derive(Serialize)]
 #[serde(tag = "kind", rename_all = "camelCase")]
 enum CommandError {
-    PinMismatch {
-        message: String,
-        expected: Fingerprint,
-        actual: Fingerprint,
-    },
-    Failed {
-        message: String,
-    },
+    PinMismatch { message: String, expected: Fingerprint, actual: Fingerprint },
+    Failed { message: String },
+}
+
+impl CommandError {
+    fn failed(message: impl Display) -> Self {
+        Self::Failed { message: message.to_string() }
+    }
 }
 
 impl From<Error> for CommandError {
     fn from(error: Error) -> Self {
         match error {
-            Error::PinMismatch { expected, actual } => Self::PinMismatch {
-                message: error.to_string(),
-                expected,
-                actual,
-            },
-            error => Self::Failed {
-                message: error.to_string(),
-            },
+            Error::PinMismatch { expected, actual } => {
+                Self::PinMismatch { message: error.to_string(), expected, actual }
+            }
+            error => Self::failed(error),
         }
     }
 }
 
-impl From<io::Error> for CommandError {
-    fn from(error: io::Error) -> Self {
-        Self::Failed {
-            message: error.to_string(),
-        }
+impl From<std::io::Error> for CommandError {
+    fn from(error: std::io::Error) -> Self {
+        Self::failed(error)
+    }
+}
+
+impl From<keyring::Error> for CommandError {
+    fn from(error: keyring::Error) -> Self {
+        Self::failed(format_args!("Keychain: {error}"))
     }
 }
 
 fn main() {
-    tauri::Builder::default()
-        .invoke_handler(tauri::generate_handler![connect, trust])
+    let builder = tauri::Builder::default();
+    // Debug builds let agents drive the app through a localhost WebSocket (mcp-server-tauri), release builds don't.
+    #[cfg(debug_assertions)]
+    let builder =
+        builder.plugin(tauri_plugin_mcp_bridge::Builder::new().bind_address("127.0.0.1").build()).setup(|app| {
+            let bridge =
+                tauri::ipc::CapabilityBuilder::new("mcp-bridge").window("main").permission("mcp-bridge:default");
+            Ok(tauri::Manager::add_capability(app, bridge)?)
+        });
+
+    builder
+        .manage(Args::parse())
+        .manage(Sessions::default())
+        .invoke_handler(tauri::generate_handler![
+            launch,
+            devices,
+            connect,
+            reconnect,
+            disconnect,
+            forget,
+            trust,
+            power_state,
+            power,
+            inventory,
+            title
+        ])
         .run(tauri::generate_context!())
         .expect("the Tauri runtime starts");
 }

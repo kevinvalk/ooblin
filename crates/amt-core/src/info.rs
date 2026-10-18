@@ -31,15 +31,13 @@ impl Client {
         let software = self.enumerate("CIM_SoftwareIdentity").await?;
 
         let firmware = |id| {
-            let component = software
-                .iter()
-                .find(|component| component.get("InstanceID") == Some(id))?;
+            let component = software.iter().find(|component| component.get("InstanceID") == Some(id))?;
             component.get("VersionString").map(str::to_owned)
         };
 
         Ok(Info {
-            hostname: settings.get("HostName").unwrap_or_default().to_owned(),
-            domain: settings.get("DomainName").unwrap_or_default().to_owned(),
+            hostname: settings.text("HostName"),
+            domain: settings.text("DomainName"),
             version: firmware("AMT").unwrap_or_default(),
             build: firmware("Build Number"),
             control_mode: match setup.get("ProvisioningMode") {
@@ -47,7 +45,7 @@ impl Client {
                 Some("4") => ControlMode::Client,
                 _ => ControlMode::Unknown,
             },
-            digest_realm: settings.get("DigestRealm").unwrap_or_default().to_owned(),
+            digest_realm: settings.text("DigestRealm"),
             fingerprint: self.fingerprint().expect("a successful call has pinned a certificate"),
             trust: self.trust(),
         })

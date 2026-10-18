@@ -2,7 +2,7 @@ use serde::Serialize;
 
 use crate::net::{Connection, Fingerprint};
 use crate::wsman::{self, Instance};
-use crate::{Result, Target};
+use crate::{Error, Result, Target};
 
 pub struct Client {
     connection: Connection,
@@ -23,25 +23,31 @@ impl Client {
     /// Connects lazily, the first call does the TLS handshake and pin check.
     pub fn new(target: &Target, pin: Option<Fingerprint>) -> Result<Self> {
         let trust = if pin.is_some() { Trust::Pinned } else { Trust::FirstUse };
-        Ok(Self {
-            connection: Connection::new(target, pin)?,
-            trust,
-            message_id: 0,
-        })
+        Ok(Self { connection: Connection::new(target, pin)?, trust, message_id: 0 })
     }
 
-    pub fn trust(&self) -> Trust {
+    pub(crate) fn trust(&self) -> Trust {
         self.trust
     }
 
     /// Known after the first successful call.
-    pub fn fingerprint(&self) -> Option<Fingerprint> {
+    pub(crate) fn fingerprint(&self) -> Option<Fingerprint> {
         self.connection.fingerprint()
     }
 
     pub async fn get(&mut self, class: &str) -> Result<Instance> {
         let envelope = wsman::get(class, self.next_message_id());
-        wsman::parse_get(&self.connection.post(envelope).await?)
+        wsman::parse_instance(&self.connection.post(envelope).await?)
+    }
+
+    /// Calls a method, a non-zero `ReturnValue` is an error.
+    pub async fn invoke(&mut self, class: &str, method: &str, input: &str) -> Result<Instance> {
+        let envelope = wsman::invoke(class, method, input, self.next_message_id());
+        let output = wsman::parse_instance(&self.connection.post(envelope).await?)?;
+        match output.get("ReturnValue") {
+            Some("0") | None => Ok(output),
+            Some(code) => Err(Error::Method { method: method.to_owned(), code: code.to_owned() }),
+        }
     }
 
     pub async fn enumerate(&mut self, class: &str) -> Result<Vec<Instance>> {

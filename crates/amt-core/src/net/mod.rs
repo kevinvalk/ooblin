@@ -1,5 +1,10 @@
-//! Our whole egress surface: nothing outside this file may touch the network (`tests/net_boundary.rs`). AMT 19 is
-//! TLS-only, so there is deliberately no plaintext path.
+//! Our whole egress surface: nothing outside this module may touch the network (`tests/net_boundary.rs`). AMT 19 is
+//! TLS-only, so there is deliberately no plaintext path. This file speaks WS-Man on 16993, `redirection` the binary
+//! SOL, KVM and IDER sessions on 16995, and both pin the device's certificate the same way.
+
+mod redirection;
+
+pub use redirection::{REDIRECTION_PORT, Redirection, Session};
 
 use std::error::Error as _;
 use std::fmt;
@@ -33,17 +38,9 @@ pub struct Connection {
 impl Connection {
     /// Without a `pin` we pin whatever certificate we see first, so it can't change under us mid-session.
     pub fn new(target: &Target, pin: Option<Fingerprint>) -> Result<Self> {
-        let pin = Arc::new(Pin {
-            pinned: pin.map(OnceLock::from).unwrap_or_default(),
-            rejected: OnceLock::new(),
-            algorithms: aws_lc_rs::default_provider().signature_verification_algorithms,
-        });
-        let tls = ClientConfig::builder()
-            .dangerous()
-            .with_custom_certificate_verifier(pin.clone())
-            .with_no_client_auth();
+        let pin = Pin::new(pin);
         let http = reqwest::Client::builder()
-            .use_preconfigured_tls(tls)
+            .use_preconfigured_tls(pin.tls())
             .pool_max_idle_per_host(1)
             .connect_timeout(Duration::from_secs(10))
             .timeout(Duration::from_secs(60))
@@ -52,7 +49,7 @@ impl Connection {
 
         Ok(Self {
             http,
-            url: format!("https://{}:{}/wsman", target.host, target.port),
+            url: format!("https://{}:{}/wsman", target.host, target.wsman_port),
             user: target.user.clone(),
             password: target.password.clone(),
             challenge: None,
@@ -69,10 +66,7 @@ impl Connection {
     pub async fn post(&mut self, envelope: String) -> Result<String> {
         let mut response = self.send(&envelope).await?;
         if response.status() == StatusCode::UNAUTHORIZED {
-            let challenge = response
-                .headers()
-                .get(WWW_AUTHENTICATE)
-                .and_then(|value| value.to_str().ok());
+            let challenge = response.headers().get(WWW_AUTHENTICATE).and_then(|value| value.to_str().ok());
             self.challenge = Some(digest_auth::parse(challenge.unwrap_or_default()).map_err(protocol)?);
             response = self.send(&envelope).await?;
         }
@@ -94,18 +88,9 @@ impl Connection {
             .body(envelope.to_owned());
         if let Some(challenge) = &mut self.challenge {
             let context = AuthContext::new_post(&self.user, &self.password, "/wsman", None::<&[u8]>);
-            request = request.header(
-                AUTHORIZATION,
-                challenge.respond(&context).map_err(protocol)?.to_header_string(),
-            );
+            request = request.header(AUTHORIZATION, challenge.respond(&context).map_err(protocol)?.to_header_string());
         }
-        request
-            .send()
-            .await
-            .map_err(|error| match (self.pin.pinned.get(), self.pin.rejected.get()) {
-                (Some(&expected), Some(&actual)) => Error::PinMismatch { expected, actual },
-                _ => transport(error),
-            })
+        request.send().await.map_err(|error| self.pin.mismatch().unwrap_or_else(|| transport(error)))
     }
 }
 
@@ -152,10 +137,7 @@ impl FromStr for Fingerprint {
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         let bytes: Option<Vec<u8>> = s.split(':').map(|byte| u8::from_str_radix(byte, 16).ok()).collect();
-        bytes
-            .and_then(|bytes| bytes.try_into().ok())
-            .map(Self)
-            .ok_or_else(|| format!("not a SHA-256 fingerprint: {s}"))
+        bytes.and_then(|bytes| bytes.try_into().ok()).map(Self).ok_or_else(|| format!("not a SHA-256 fingerprint: {s}"))
     }
 }
 
@@ -167,9 +149,7 @@ impl serde::Serialize for Fingerprint {
 
 impl<'de> serde::Deserialize<'de> for Fingerprint {
     fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        String::deserialize(deserializer)?
-            .parse()
-            .map_err(serde::de::Error::custom)
+        String::deserialize(deserializer)?.parse().map_err(serde::de::Error::custom)
     }
 }
 
@@ -179,6 +159,26 @@ struct Pin {
     pinned: OnceLock<Fingerprint>,
     rejected: OnceLock<Fingerprint>,
     algorithms: WebPkiSupportedAlgorithms,
+}
+
+impl Pin {
+    fn new(pin: Option<Fingerprint>) -> Arc<Self> {
+        Arc::new(Self {
+            pinned: pin.map(OnceLock::from).unwrap_or_default(),
+            rejected: OnceLock::new(),
+            algorithms: aws_lc_rs::default_provider().signature_verification_algorithms,
+        })
+    }
+
+    fn tls(self: &Arc<Self>) -> ClientConfig {
+        ClientConfig::builder().dangerous().with_custom_certificate_verifier(self.clone()).with_no_client_auth()
+    }
+
+    /// Why a connection failed, if it was because the device presented another certificate.
+    fn mismatch(&self) -> Option<Error> {
+        let (&expected, &actual) = (self.pinned.get()?, self.rejected.get()?);
+        Some(Error::PinMismatch { expected, actual })
+    }
 }
 
 impl ServerCertVerifier for Pin {
@@ -195,9 +195,7 @@ impl ServerCertVerifier for Pin {
             return Ok(ServerCertVerified::assertion());
         }
         let _ = self.rejected.set(presented);
-        Err(rustls::Error::InvalidCertificate(
-            CertificateError::ApplicationVerificationFailure,
-        ))
+        Err(rustls::Error::InvalidCertificate(CertificateError::ApplicationVerificationFailure))
     }
 
     fn verify_tls12_signature(

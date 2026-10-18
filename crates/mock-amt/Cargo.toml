@@ -1,0 +1,22 @@
+[package]
+name = "mock-amt"
+version = "0.1.0"
+edition = "2024"
+license = "Apache-2.0"
+publish = false
+
+[dependencies]
+amt-core = { path = "../amt-core" }
+clap = { version = "4", features = ["derive"] }
+http-body-util = "0.1"
+hyper = { version = "1", features = ["server", "http1"] }
+hyper-util = { version = "0.1", features = ["tokio"] }
+md-5 = "0.10"
+rcgen = "0.14"
+roxmltree = "0.21"
+rpassword = "7"
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "net", "sync"] }
+tokio-rustls = "0.26"
+
+[dev-dependencies]
+tempfile = "3"

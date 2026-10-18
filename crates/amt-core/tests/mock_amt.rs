@@ -1,190 +1,146 @@
-//! `Client` against a stand-in AMT: TLS with a self-signed certificate, Digest with a nonce we can expire, and canned
-//! responses from go-wsman-messages. The real device has the final word, this keeps TLS, pinning and Digest honest.
+//! amt-core against our mock AMT: TLS and pinning, Digest on both ports, and reading what real devices told us.
 
-use std::convert::Infallible;
-use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
+use std::path::Path;
+use std::sync::Arc;
+use std::sync::atomic::Ordering;
 
-use amt_core::{Client, ControlMode, Error, Fingerprint, Target, Trust};
-use http_body_util::{BodyExt, Full};
-use hyper::body::{Bytes, Incoming};
-use hyper::service::service_fn;
-use hyper::{Request, Response, StatusCode};
-use hyper_util::rt::TokioIo;
-use md5::{Digest, Md5};
-use tokio::net::TcpListener;
-use tokio_rustls::TlsAcceptor;
-use tokio_rustls::rustls::ServerConfig;
-use tokio_rustls::rustls::pki_types::{CertificateDer, PrivateKeyDer};
+use amt_core::{Client, ControlMode, Error, Fingerprint, PowerAction, PowerState, Redirection, Session, Target, Trust};
+use mock_amt::{Amt, Direction, PASSWORD, Transcript, USER};
 
-const REALM: &str = "Digest:F3EB554784E729164447A89F60B641C5";
-const PASSWORD: &str = "P@ssw0rd";
-
-struct Amt {
-    port: u16,
-    fingerprint: Fingerprint,
-    nonce: Mutex<String>,
-    connections: AtomicUsize,
-    challenges: AtomicUsize,
+async fn start(fixture: &Path) -> Arc<Amt> {
+    Amt::start("127.0.0.1:0", "127.0.0.1:0", fixture).await
 }
 
-impl Amt {
-    async fn start() -> Arc<Self> {
-        let cert = rcgen::generate_simple_self_signed(["localhost".to_owned()]).unwrap();
-        let der = CertificateDer::from(cert.cert.der().to_vec());
-        let key = PrivateKeyDer::try_from(cert.signing_key.serialize_der()).unwrap();
-        let tls = ServerConfig::builder()
-            .with_no_client_auth()
-            .with_single_cert(vec![der.clone()], key)
-            .unwrap();
-        let acceptor = TlsAcceptor::from(Arc::new(tls));
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+async fn samples() -> Arc<Amt> {
+    start(&mock_amt::fixture("go-wsman-messages")).await
+}
 
-        let amt = Arc::new(Self {
-            port: listener.local_addr().unwrap().port(),
-            fingerprint: Fingerprint::of(&der),
-            nonce: Mutex::new("first".into()),
-            connections: AtomicUsize::new(0),
-            challenges: AtomicUsize::new(0),
-        });
-        let server = amt.clone();
-        tokio::spawn(async move {
-            loop {
-                let (tcp, _) = listener.accept().await.unwrap();
-                server.connections.fetch_add(1, Ordering::SeqCst);
-                let (acceptor, amt) = (acceptor.clone(), server.clone());
-                tokio::spawn(async move {
-                    let Ok(tls) = acceptor.accept(tcp).await else { return };
-                    let service = service_fn(move |request| {
-                        let amt = amt.clone();
-                        async move { Ok::<_, Infallible>(amt.respond(request).await) }
-                    });
-                    let _ = hyper::server::conn::http1::Builder::new()
-                        .serve_connection(TokioIo::new(tls), service)
-                        .await;
-                });
-            }
-        });
-        amt
-    }
+fn target(amt: &Amt, password: &str) -> Target {
+    Target { wsman_port: amt.port, redirection_port: amt.redirection_port, ..Target::new("127.0.0.1", USER, password) }
+}
 
-    fn client(&self, password: &str, pin: Option<Fingerprint>) -> Client {
-        let target = Target {
-            host: "127.0.0.1".into(),
-            port: self.port,
-            user: "admin".into(),
-            password: password.into(),
-        };
-        Client::new(&target, pin).unwrap()
-    }
+fn client(amt: &Amt, password: &str, pin: Option<Fingerprint>) -> Client {
+    Client::new(&target(amt, password), pin).unwrap()
+}
 
-    async fn respond(&self, request: Request<Incoming>) -> Response<Full<Bytes>> {
-        assert!(
-            request.headers().contains_key("content-length"),
-            "AMT needs a Content-Length"
-        );
-        assert!(
-            !request.headers().contains_key("transfer-encoding"),
-            "AMT rejects chunked bodies"
-        );
-
-        let authorization = request
-            .headers()
-            .get("authorization")
-            .and_then(|value| value.to_str().ok());
-        if !authorization.is_some_and(|header| self.verify(header)) {
-            self.challenges.fetch_add(1, Ordering::SeqCst);
-            let nonce = self.nonce.lock().unwrap().clone();
-            let challenge = format!(r#"Digest realm="{REALM}", nonce="{nonce}", stale="false", qop="auth""#);
-            return Response::builder()
-                .status(StatusCode::UNAUTHORIZED)
-                .header("www-authenticate", challenge)
-                .body(Full::default())
-                .unwrap();
-        }
-
-        let body = request.into_body().collect().await.unwrap().to_bytes();
-        let body = std::str::from_utf8(&body).unwrap();
-        let fixture = [
-            ("AMT_GeneralSettings", "amt_general_settings_get.xml"),
-            (
-                "AMT_SetupAndConfigurationService",
-                "amt_setup_and_configuration_service_get.xml",
-            ),
-            ("enumeration/Enumerate<", "cim_software_identity_enumerate.xml"),
-            ("enumeration/Pull<", "cim_software_identity_pull.xml"),
-        ]
-        .into_iter()
-        .find_map(|(needle, fixture)| body.contains(needle).then_some(fixture))
-        .unwrap_or_else(|| panic!("unexpected request: {body}"));
-        let xml = std::fs::read(format!("{}/tests/fixtures/{fixture}", env!("CARGO_MANIFEST_DIR"))).unwrap();
-        Response::new(Full::new(xml.into()))
-    }
-
-    fn verify(&self, header: &str) -> bool {
-        let param = |name: &str| {
-            let value = header
-                .split(", ")
-                .find_map(|param| param.strip_prefix(&format!("{name}=")))?;
-            Some(value.trim_matches('"').to_owned())
-        };
-        let md5 = |input: String| format!("{:x}", Md5::digest(input));
-        let (Some(nonce), Some(nc), Some(cnonce), Some(response)) =
-            (param("nonce"), param("nc"), param("cnonce"), param("response"))
-        else {
-            return false;
-        };
-        let (ha1, ha2) = (md5(format!("admin:{REALM}:{PASSWORD}")), md5("POST:/wsman".into()));
-        nonce == *self.nonce.lock().unwrap() && response == md5(format!("{ha1}:{nonce}:{nc}:{cnonce}:auth:{ha2}"))
-    }
+fn fingerprint() -> Fingerprint {
+    Fingerprint::of(&Amt::certificate())
 }
 
 #[tokio::test]
 async fn trusts_on_first_use_and_reads_info_over_one_connection() {
-    let amt = Amt::start().await;
-    let info = amt.client(PASSWORD, None).info().await.unwrap();
+    let amt = samples().await;
+    let info = client(&amt, PASSWORD, None).info().await.unwrap();
 
     assert_eq!(info.hostname, "Test Host Name");
     assert_eq!(info.version, "12.0.67");
     assert_eq!(info.control_mode, ControlMode::Admin);
-    assert_eq!((info.fingerprint, info.trust), (amt.fingerprint, Trust::FirstUse));
+    assert_eq!((info.fingerprint, info.trust), (fingerprint(), Trust::FirstUse));
     assert_eq!(amt.connections.load(Ordering::SeqCst), 1);
     assert_eq!(amt.challenges.load(Ordering::SeqCst), 1);
 }
 
 #[tokio::test]
 async fn accepts_the_pinned_certificate() {
-    let amt = Amt::start().await;
-    let info = amt.client(PASSWORD, Some(amt.fingerprint)).info().await.unwrap();
+    let amt = samples().await;
+    let info = client(&amt, PASSWORD, Some(fingerprint())).info().await.unwrap();
     assert_eq!(info.trust, Trust::Pinned);
 }
 
 #[tokio::test]
 async fn refuses_a_changed_certificate() {
-    let amt = Amt::start().await;
+    let amt = samples().await;
     let old = Fingerprint::of(b"the certificate before reprovisioning");
-    match amt.client(PASSWORD, Some(old)).info().await {
-        Err(Error::PinMismatch { expected, actual }) => assert_eq!((expected, actual), (old, amt.fingerprint)),
+    match client(&amt, PASSWORD, Some(old)).info().await {
+        Err(Error::PinMismatch { expected, actual }) => assert_eq!((expected, actual), (old, fingerprint())),
         other => panic!("expected a pin mismatch, got {other:?}"),
     }
 }
 
 #[tokio::test]
 async fn reports_wrong_credentials() {
-    let amt = Amt::start().await;
-    assert!(matches!(
-        amt.client("wrong", None).info().await,
-        Err(Error::Unauthorized)
-    ));
+    let amt = samples().await;
+    assert!(matches!(client(&amt, "wrong", None).info().await, Err(Error::Unauthorized)));
 }
 
 #[tokio::test]
 async fn answers_a_fresh_challenge_silently() {
-    let amt = Amt::start().await;
-    let mut client = amt.client(PASSWORD, None);
+    let amt = samples().await;
+    let mut client = client(&amt, PASSWORD, None);
     client.get("AMT_GeneralSettings").await.unwrap();
 
-    *amt.nonce.lock().unwrap() = "second".into();
+    amt.expire_nonce();
     client.get("AMT_GeneralSettings").await.unwrap();
     assert_eq!(amt.challenges.load(Ordering::SeqCst), 2);
+}
+
+#[tokio::test]
+async fn reads_and_changes_the_power_state() {
+    let amt = samples().await;
+    let mut client = client(&amt, PASSWORD, None);
+    assert_eq!(client.power_state().await.unwrap(), PowerState::On);
+
+    client.power(PowerAction::Reset).await.unwrap();
+    assert!(amt.requests.lock().unwrap().last().unwrap().contains("<h:PowerState>10</h:PowerState>"));
+}
+
+#[tokio::test]
+async fn reads_the_inventory() {
+    let amt = samples().await;
+    let inventory = client(&amt, PASSWORD, None).inventory().await.unwrap();
+
+    assert_eq!(inventory.model, "NUC9V7QNX");
+    assert_eq!(inventory.board, "Intel Corporation NUC9V7QNB");
+    assert_eq!((inventory.bios.as_str(), inventory.bios_date.as_str()), ("QNCFLX70.0054.2020.0810.2227", "2020-08-10"));
+    assert_eq!(inventory.processor, "Intel(R) Core(TM) i7-9850H CPU @ 2.60GHz");
+    assert_eq!(inventory.memory.len(), 2);
+    assert_eq!((inventory.memory[0].bytes, inventory.memory[0].mhz), (16 << 30, 2400));
+    assert_eq!(inventory.memory[0].part, "CT16G4SFD824A.M16FE");
+}
+
+/// Every fixture is a regression test: we must keep reading whatever that device told us.
+#[tokio::test]
+async fn reads_every_fixture() {
+    for fixture in mock_amt::fixtures() {
+        let amt = start(&fixture).await;
+        let mut client = client(&amt, PASSWORD, None);
+        let name = fixture.display();
+
+        let info = client.info().await.unwrap_or_else(|error| panic!("{name}: {error}"));
+        assert!(!info.version.is_empty(), "{name}: no AMT version");
+        client.power_state().await.unwrap_or_else(|error| panic!("{name}: {error}"));
+        let inventory = client.inventory().await.unwrap_or_else(|error| panic!("{name}: {error}"));
+        assert!(!inventory.processor.is_empty() && !inventory.memory.is_empty(), "{name}: no CPU or memory");
+    }
+}
+
+/// A fixture whose SOL session says hello once it's open.
+fn hello() -> tempfile::TempDir {
+    let dir = tempfile::tempdir().unwrap();
+    Transcript(vec![(Direction::Received, b"hello".to_vec())]).save(&dir.path().join("sol.transcript")).unwrap();
+    dir
+}
+
+#[tokio::test]
+async fn opens_a_redirection_session_with_digest() {
+    let fixture = hello();
+    let amt = start(fixture.path()).await;
+    let mut sol = Redirection::open(&target(&amt, PASSWORD), None, Session::Sol).await.unwrap();
+    assert_eq!(sol.read_exact(5).await.unwrap(), b"hello");
+}
+
+#[tokio::test]
+async fn refuses_a_redirection_session_with_a_wrong_password() {
+    let fixture = hello();
+    let amt = start(fixture.path()).await;
+    let opened = Redirection::open(&target(&amt, "wrong"), None, Session::Sol).await;
+    assert!(matches!(opened, Err(Error::Unauthorized)));
+}
+
+#[tokio::test]
+async fn reports_a_redirection_session_that_is_not_enabled() {
+    let fixture = hello();
+    let amt = start(fixture.path()).await;
+    let opened = Redirection::open(&target(&amt, PASSWORD), None, Session::Kvm).await;
+    assert!(matches!(opened, Err(Error::Protocol(message)) if message.contains("is it enabled")));
 }

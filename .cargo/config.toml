@@ -1,0 +1,7 @@
+[alias]
+# The debug app for our verify loop (AGENTS.md): its own identifier, so it has its own devices and keychain entries,
+# hidden so it never steals focus, and without CSP because the MCP bridge injects inline scripts.
+verify = [
+  "tauri", "build", "--debug", "--no-bundle",
+  "--config", '{"identifier":"io.codean.amt-console.verify","app":{"windows":[{"width":860,"height":600,"visible":false}],"security":{"csp":null}}}',
+]
