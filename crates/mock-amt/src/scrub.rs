@@ -30,6 +30,7 @@ const SENSITIVE: &[&str] = &[
     "TrustedDNSSuffix",
     "ProvisioningServerOTP",
     "UUID",
+    "OtherIdentifyingInfo",
     "PlatformGUID",
     "SSID",
     "ProfileName",

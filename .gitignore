@@ -3,6 +3,3 @@
 /ui/node_modules
 /ui/dist
 .DS_Store
-# Fixtures of real devices stay local unless we decide otherwise, even scrubbed.
-/fixtures/*
-!/fixtures/go-wsman-messages

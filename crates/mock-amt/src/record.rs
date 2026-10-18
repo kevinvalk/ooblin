@@ -1,42 +1,81 @@
 //! Records a device into a fixture, unattended and without changing anything on it:
 //!
-//! - WS-Man: for every class we know of, a WS-Transfer Get and a WS-Enumeration Enumerate/Pull. Both are read-only by
-//!   spec. Classes the device lacks answer with a fault and we skip them, the replay answers those the same way.
+//! - WS-Man: for every class we know of, a WS-Transfer Get and a WS-Enumeration Enumerate/Pull, all pages of it. Both are
+//!   read-only by spec. Classes the device lacks answer with a fault and we skip them, the replay answers those the same
+//!   way. Then the app's own reads that call methods (the clock, accounts, the logs), through a forwarding mock that
+//!   keeps each reply under the name its replay will look for.
 //! - Redirection: a short SOL, KVM and IDER session, saved as transcripts. SOL presses Enter once to get a prompt, KVM
 //!   fetches one full frame (a screenshot, mind what's on screen), IDER only opens the session, so no drive ever shows
 //!   up on the host. Message layouts from MeshCommander (Apache-2.0).
 
 use std::io::Write as _;
+use std::ops::Range;
 use std::path::Path;
 use std::time::Duration;
 
-use amt_core::{Connection, Error, Fingerprint, Redirection, Session, Target, wsman};
+use amt_core::{Client, Connection, Error, Fingerprint, Redirection, Session, Target, wsman};
+use roxmltree::Document;
 
 use crate::scrub::scrub;
 use crate::transcript::{Direction, Transcript};
+use crate::{Amt, PASSWORD, USER};
 
-/// Every class go-wsman-messages knows, which covers everything the DMT console touches.
+/// Every class MeshCommander or go-wsman-messages knows of. A crawl is cheap, so we'd rather ask for one too many.
 const CLASSES: &[&str] = &[
+    "AMT_8021xCredentialContext",
+    "AMT_8021XProfile",
+    "AMT_ActiveFilterStatistics",
+    "AMT_AgentPresenceCapabilities",
+    "AMT_AgentPresenceInterfacePolicy",
+    "AMT_AgentPresenceService",
+    "AMT_AgentPresenceWatchdog",
+    "AMT_AgentPresenceWatchdogAction",
     "AMT_AlarmClockService",
     "AMT_AssetTable",
     "AMT_AssetTableService",
     "AMT_AuditLog",
+    "AMT_AuditPolicyRule",
     "AMT_AuthorizationService",
     "AMT_BootCapabilities",
     "AMT_BootSettingData",
+    "AMT_ComplexFilterEntryBase",
+    "AMT_CRL",
     "AMT_CryptographicCapabilities",
+    "AMT_EACCredentialContext",
+    "AMT_EndpointAccessControlService",
+    "AMT_EnvironmentDetectionInterfacePolicy",
     "AMT_EnvironmentDetectionSettingData",
     "AMT_EthernetPortSettings",
     "AMT_EventLogEntry",
+    "AMT_EventManagerService",
+    "AMT_EventSubscriber",
+    "AMT_FilterEntryBase",
+    "AMT_FilterInSystemDefensePolicy",
     "AMT_GeneralSettings",
+    "AMT_GeneralSystemDefenseCapabilities",
     "AMT_Hdr8021Filter",
+    "AMT_HeuristicPacketFilterInterfacePolicy",
+    "AMT_HeuristicPacketFilterSettings",
+    "AMT_HeuristicPacketFilterStatistics",
     "AMT_Implementation",
+    "AMT_InterfacePolicy",
+    "AMT_IPHeadersFilter",
     "AMT_KerberosSettingData",
-    "AMT_MPSUsernamePassword",
     "AMT_ManagementPresenceRemoteSAP",
     "AMT_MessageLog",
+    "AMT_MPSUsernamePassword",
+    "AMT_NetworkFilter",
+    "AMT_NetworkPortDefaultSystemDefensePolicy",
+    "AMT_NetworkPortSystemDefenseCapabilities",
+    "AMT_NetworkPortSystemDefensePolicy",
+    "AMT_PCIDevice",
+    "AMT_PETCapabilities",
+    "AMT_PETFilterForTarget",
+    "AMT_PETFilterSetting",
     "AMT_PolicySetAppliesToElement",
+    "AMT_ProvisioningCertificateHash",
     "AMT_PublicKeyCertificate",
+    "AMT_PublicKeyManagementCapabilities",
     "AMT_PublicKeyManagementService",
     "AMT_PublicPrivateKeyPair",
     "AMT_RedirectionService",
@@ -46,92 +85,228 @@ const CLASSES: &[&str] = &[
     "AMT_RemoteAccessPolicyRule",
     "AMT_RemoteAccessService",
     "AMT_SetupAndConfigurationService",
+    "AMT_SNMPEventSubscriber",
+    "AMT_StateTransitionCondition",
+    "AMT_SystemDefensePolicy",
+    "AMT_SystemDefensePolicyInService",
+    "AMT_SystemDefenseService",
     "AMT_SystemPowerScheme",
+    "AMT_ThirdPartyDataStorageAdministrationService",
+    "AMT_ThirdPartyDataStorageService",
+    "AMT_TimeSynchronizationService",
     "AMT_TLSCredentialContext",
     "AMT_TLSProtocolEndpoint",
     "AMT_TLSProtocolEndpointCollection",
     "AMT_TLSSettingData",
-    "AMT_TimeSynchronizationService",
+    "AMT_TrapTargetForService",
     "AMT_UserInitiatedConnectionService",
+    "AMT_WebUIService",
     "AMT_WiFiPortConfigurationService",
+    "CIM_AbstractIndicationSubscription",
+    "CIM_Account",
+    "CIM_AccountManagementCapabilities",
+    "CIM_AccountManagementService",
+    "CIM_AccountOnSystem",
+    "CIM_AdminDomain",
+    "CIM_AlertIndication",
+    "CIM_AssignedIdentity",
     "CIM_AssociatedPowerManagementService",
     "CIM_AssociatedSensor",
+    "CIM_AuthenticationService",
+    "CIM_AuthorizationService",
+    "CIM_Battery",
     "CIM_BIOSElement",
     "CIM_BIOSFeature",
-    "CIM_Battery",
+    "CIM_BIOSFeatureBIOSElements",
     "CIM_BootConfigSetting",
     "CIM_BootService",
+    "CIM_BootSettingData",
     "CIM_BootSourceSetting",
+    "CIM_Capabilities",
     "CIM_Card",
     "CIM_Chassis",
     "CIM_Chip",
     "CIM_Collection",
+    "CIM_Component",
     "CIM_ComputerSystem",
     "CIM_ComputerSystemPackage",
     "CIM_ConcreteComponent",
     "CIM_ConcreteDependency",
+    "CIM_Controller",
     "CIM_CoolingDevice",
+    "CIM_Credential",
     "CIM_CredentialContext",
+    "CIM_CredentialManagementService",
     "CIM_Dependency",
+    "CIM_DeviceSAPImplementation",
+    "CIM_ElementCapabilities",
+    "CIM_ElementConformsToProfile",
+    "CIM_ElementLocation",
     "CIM_ElementSettingData",
+    "CIM_ElementSoftwareIdentity",
+    "CIM_ElementStatisticalData",
     "CIM_EnabledLogicalElement",
     "CIM_EnabledLogicalElementCapabilities",
     "CIM_EthernetPort",
     "CIM_Fan",
-    "CIM_IEEE8021xSettings",
+    "CIM_FilterCollection",
+    "CIM_FilterCollectionSubscription",
+    "CIM_HostedAccessPoint",
+    "CIM_HostedDependency",
+    "CIM_HostedService",
     "CIM_Identity",
+    "CIM_IEEE8021xCapabilities",
+    "CIM_IEEE8021xSettings",
+    "CIM_Indication",
+    "CIM_IndicationService",
+    "CIM_InstalledSoftwareIdentity",
     "CIM_KVMRedirectionSAP",
+    "CIM_LANEndpoint",
+    "CIM_ListenerDestination",
+    "CIM_ListenerDestinationWSManagement",
+    "CIM_Location",
     "CIM_Log",
+    "CIM_LogEntry",
     "CIM_LogicalDevice",
     "CIM_LogicalElement",
+    "CIM_LogicalPort",
+    "CIM_LogicalPortCapabilities",
+    "CIM_LogManagesRecord",
+    "CIM_ManagedCredential",
     "CIM_ManagedElement",
     "CIM_ManagedSystemElement",
     "CIM_MediaAccessDevice",
+    "CIM_MemberOfCollection",
+    "CIM_Memory",
+    "CIM_MessageLog",
+    "CIM_NetworkPort",
+    "CIM_NetworkPortCapabilities",
+    "CIM_NetworkPortConfigurationService",
+    "CIM_OrderedComponent",
+    "CIM_OwningCollectionElement",
+    "CIM_OwningJobElement",
+    "CIM_PCIController",
+    "CIM_PhysicalComponent",
+    "CIM_PhysicalElement",
+    "CIM_PhysicalElementLocation",
+    "CIM_PhysicalFrame",
     "CIM_PhysicalMemory",
     "CIM_PhysicalPackage",
+    "CIM_Policy",
+    "CIM_PolicyAction",
+    "CIM_PolicyCondition",
+    "CIM_PolicyInSystem",
+    "CIM_PolicyRule",
+    "CIM_PolicyRuleInSystem",
+    "CIM_PolicySet",
+    "CIM_PolicySetAppliesToElement",
+    "CIM_PolicySetInSystem",
     "CIM_PowerManagementCapabilities",
     "CIM_PowerManagementService",
+    "CIM_PowerSupply",
+    "CIM_Privilege",
+    "CIM_PrivilegeManagementCapabilities",
+    "CIM_PrivilegeManagementService",
+    "CIM_ProcessIndication",
     "CIM_Processor",
     "CIM_Product",
+    "CIM_ProtocolEndpoint",
+    "CIM_ProvidesServiceToElement",
+    "CIM_Realizes",
+    "CIM_RecordForLog",
+    "CIM_RecordLog",
     "CIM_RedirectionService",
+    "CIM_ReferencedProfile",
+    "CIM_RegisteredProfile",
+    "CIM_RemoteAccessAvailableToElement",
+    "CIM_RemoteIdentity",
+    "CIM_RemotePort",
+    "CIM_RemoteServiceAccessPoint",
     "CIM_Role",
+    "CIM_RoleBasedAuthorizationService",
+    "CIM_RoleBasedManagementCapabilities",
+    "CIM_RoleLimitedToTarget",
+    "CIM_SAPAvailableForElement",
+    "CIM_SecurityService",
     "CIM_Sensor",
     "CIM_Service",
+    "CIM_ServiceAccessBySAP",
+    "CIM_ServiceAccessPoint",
+    "CIM_ServiceAffectsElement",
     "CIM_ServiceAvailable",
     "CIM_ServiceAvailableToElement",
+    "CIM_ServiceSAPDependency",
+    "CIM_ServiceServiceDependency",
     "CIM_SettingData",
+    "CIM_SharedCredential",
+    "CIM_SoftwareElement",
+    "CIM_SoftwareFeature",
+    "CIM_SoftwareFeatureSoftwareElements",
     "CIM_SoftwareIdentity",
+    "CIM_StatisticalData",
+    "CIM_StorageExtent",
     "CIM_System",
+    "CIM_SystemBIOS",
+    "CIM_SystemComponent",
+    "CIM_SystemDevice",
     "CIM_SystemPackaging",
     "CIM_Tachometer",
+    "CIM_UseOfLog",
+    "CIM_Watchdog",
     "CIM_WiFiEndpoint",
     "CIM_WiFiEndpointCapabilities",
     "CIM_WiFiEndpointSettings",
     "CIM_WiFiPort",
     "CIM_WiFiPortCapabilities",
+    "IPS_AdminProvisioningRecord",
     "IPS_AlarmClockOccurrence",
-    "IPS_HTTPProxyAccessPoint",
-    "IPS_HTTPProxyService",
+    "IPS_ClientProvisioningRecord",
     "IPS_HostBasedSetupService",
     "IPS_HostBootReason",
     "IPS_HostIPSettings",
+    "IPS_HTTPProxyAccessPoint",
+    "IPS_HTTPProxyService",
+    "IPS_IderSessionUsingPort",
     "IPS_IEEE8021xSettings",
     "IPS_IPv6PortSettings",
     "IPS_KVMRedirectionSettingData",
+    "IPS_KvmSessionUsingPort",
     "IPS_LANEndpoint",
+    "IPS_ManualProvisioningRecord",
     "IPS_OptInService",
     "IPS_PowerManagementService",
+    "IPS_ProvisioningAuditRecord",
     "IPS_ProvisioningRecordLog",
+    "IPS_RasSessionUsingPort",
+    "IPS_ScreenConfigurationService",
     "IPS_ScreenSettingData",
     "IPS_SecIOService",
+    "IPS_SessionUsingPort",
+    "IPS_SolSessionUsingPort",
+    "IPS_TLSProvisioningRecord",
+    "IPS_WatchDogAction",
 ];
 
 /// Records `target` into `fixture`, telling how it goes on stderr.
-pub async fn record(target: &Target, fixture: &Path) -> Result<(), Box<dyn std::error::Error>> {
+pub async fn record(target: &Target, fixture: &Path) -> anyhow::Result<()> {
     let mut device = Connection::new(target, None)?;
     crawl(&mut device, &fixture.join("wsman")).await?;
     let pin = device.fingerprint();
     eprintln!("Certificate {}", pin.map(|pin| pin.to_string()).unwrap_or_default());
+
+    eprint!("methods  recording…");
+    let proxy = Amt::forward(device, fixture).await;
+    let mut client = Client::new(&Target { wsman_port: proxy.port, ..Target::new("127.0.0.1", USER, PASSWORD) }, None)?;
+    let reads = [
+        client.status().await.err(),
+        client.settings().await.err(),
+        client.event_log().await.err(),
+        client.audit_log().await.err(),
+    ];
+    match reads.into_iter().flatten().next() {
+        None => eprintln!("\rmethods  clock, accounts, event log and audit log"),
+        Some(error) => eprintln!("\rmethods  incomplete, {error}"),
+    }
 
     for (session, name) in [(Session::Sol, "sol"), (Session::Kvm, "kvm"), (Session::Ider, "ider")] {
         eprint!("{name:>6}  recording…");
@@ -148,7 +323,7 @@ pub async fn record(target: &Target, fixture: &Path) -> Result<(), Box<dyn std::
 }
 
 /// Crawls `device` into `dir`, scrubbed, and returns how many classes answered.
-pub async fn crawl(device: &mut Connection, dir: &Path) -> Result<usize, Box<dyn std::error::Error>> {
+pub async fn crawl(device: &mut Connection, dir: &Path) -> anyhow::Result<usize> {
     std::fs::create_dir_all(dir)?;
     let save =
         |class: &str, action: &str, xml: &str| std::fs::write(dir.join(format!("{class}.{action}.xml")), scrub(xml));
@@ -163,17 +338,34 @@ pub async fn crawl(device: &mut Connection, dir: &Path) -> Result<usize, Box<dyn
         }
         let enumerate = fetch(device, wsman::enumerate(class, 0)).await?;
         let mut context = enumerate.as_deref().map(wsman::parse_enumerate).transpose()?;
-        let pulled = context.is_some();
+        let mut pages = Vec::new();
         while let Some(current) = context {
             let xml = device.post(wsman::pull(class, &current, 0)).await?;
-            // A multi-page enumeration keeps its last page, AMT fits everything we've seen in one.
-            save(class, "Pull", &xml)?;
             context = wsman::parse_pull(&xml)?.next;
+            pages.push(xml);
         }
-        answered += usize::from(get.is_some() || pulled);
+        if !pages.is_empty() {
+            save(class, "Pull", &merge(&pages))?;
+        }
+        answered += usize::from(get.is_some() || !pages.is_empty());
     }
     eprintln!("\r WS-Man  {answered} of {} classes answered\x1b[K", CLASSES.len());
     Ok(answered)
+}
+
+/// Pages of one enumeration as one: the last page (it carries EndOfSequence) with everyone's items.
+fn merge(pages: &[String]) -> String {
+    let last = pages.last().expect("at least one page");
+    let Some(range) = items(last) else { return last.clone() };
+    let all: String = pages.iter().filter_map(|page| Some(&page[items(page)?])).collect();
+    format!("{}{all}{}", &last[..range.start], &last[range.end..])
+}
+
+/// Where the instances inside a page's `<Items>` start and end.
+fn items(page: &str) -> Option<Range<usize>> {
+    let doc = Document::parse(page).ok()?;
+    let items = doc.descendants().find(|node| node.has_tag_name("Items"))?;
+    Some(items.first_child()?.range().start..items.last_child()?.range().end)
 }
 
 /// A fault means the device doesn't have this, anything else (unreachable, wrong password) ends the crawl.

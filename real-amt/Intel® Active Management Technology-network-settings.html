@@ -1,0 +1,145 @@
+<!DOCTYPE html PUBLIC "-//W3C//DTD HTML 4.01 Transitional//EN">
+<html class=" idc0_343 kbqbyq"><head><link rel="stylesheet" href="Intel%C2%AE%20Active%20Management%20Technology-network-settings_files/styles_jakU.css">
+<meta http-equiv="Content-Type" content="text/html; charset=UTF-8">
+<title>Intel® Active Management Technology</title></head>
+<body>
+<table class="header">
+<tbody><tr>
+         <td valign="top" nowrap="nowrap">
+<p class="top1">Intel<font class="r"><sup>®</sup></font> Active Management Technology</p>
+<p class="top2"><b>Computer:</b> ms-02-a</p>
+         </td>
+<td valign="middle"><img src="Intel%C2%AE%20Active%20Management%20Technology-network-settings_files/logo_jakU.gif" align="right" alt="Intel">
+         </td>
+</tr>
+   </tbody></table>
+
+<table class="spread" cellspacing="0">
+<tbody><tr>
+<td class="navbar">
+<br>
+<p class="nav1"><a href="https://192.168.88.51:16993/index.htm">System Status</a></p>
+ 
+<p class="nav1">Hardware Information</p>
+<p class="nav2">
+<a href="https://192.168.88.51:16993/hw-sys.htm">System</a>
+<br><a href="https://192.168.88.51:16993/hw-proc.htm">Processor</a>
+<br><a href="https://192.168.88.51:16993/hw-mem.htm">Memory</a>
+<br><a href="https://192.168.88.51:16993/hw-disk.htm">Disk</a>
+<br><a href="https://192.168.88.51:16993/hw-batt.htm">Battery</a></p>
+<p class="nav1"><a href="https://192.168.88.51:16993/events.htm">Event Log</a></p>
+<p class="nav1"><a href="https://192.168.88.51:16993/remote.htm">Remote Control</a></p>
+<p class="nav1"><a href="https://192.168.88.51:16993/power.htm">Power Policies</a></p>
+<p class="nav1"><a href="https://192.168.88.51:16993/ip.htm">Network Settings</a></p>
+<p class="nav1"><a href="https://192.168.88.51:16993/ipv6.htm">IPv6 Network Settings</a></p>
+<p class="nav1"><a href="https://192.168.88.51:16993/fqdn.htm">System Name Settings</a></p>
+<p class="nav1"><a href="https://192.168.88.51:16993/acl.htm">User Accounts</a></p>
+<p class="nav1"><a href="https://192.168.88.51:16993/links.htm">Web Applications Links</a></p>
+</td>
+<td class="maincell">
+
+<h1>Network Settings</h1>
+<p></p>
+<form name="IpForm" method="POST" action="/ipform">
+<input type="hidden" name="t" value="283ATxwcAABbAAAAAAAAAAAAAAAAAP//wKgAfgAAAAAeDtVqnz4U29YJWOQIAJ+xbfkN79vs5aY1IGpxnc9kjRygxcY=">
+<table class="log" border="0" cellpadding="0" cellspacing="0" width="480">
+<tbody><tr>
+<td class="nw" width="38%"></td>
+<td class="ne">&nbsp;</td>
+</tr>
+<tr>
+<td colspan="2"><p> Configure the managed device network settings for this computer.</p></td>
+</tr>
+<tr>
+<td><p><input type="checkbox" name="RespondPing" checked="checked">Respond to ping</p></td>
+<td></td>
+</tr>
+<tr><td colspan="2" height="5" class="r1">&nbsp;</td></tr>
+<tr><td></td></tr>
+<tr>
+<td colspan="2">
+<p>TCP/IP settings for wired connection</p>
+<p><input type="radio" name="command" value="command1" checked="checked" onclick="dis(true)">Obtain IP settings automatically</p>
+<p><input type="radio" name="command" value="command2" onclick="dis(false)">Use the following IP settings:</p>
+</td>
+</tr>
+<tr>
+<td height="28">
+<p class="in">IP address:</p>
+</td>
+<td><input type="text" name="IpAddress" size="16" maxlength="15" disabled="disabled" style="background-color: rgb(192, 192, 192);"></td>
+</tr>
+<tr>
+<td height="28">
+<p class="in">Subnet mask:</p>
+</td>
+<td><input type="text" name="SubnetMask" size="16" maxlength="15" disabled="disabled" style="background-color: rgb(192, 192, 192);"></td>
+</tr>
+<tr>
+<td height="28">
+<p class="in">Gateway address:</p>
+</td>
+<td><input type="text" name="DefaultGatway" size="16" maxlength="15" disabled="disabled" style="background-color: rgb(192, 192, 192);"></td>
+</tr>
+<tr>
+<td height="28"><p class="in">Preferred DNS address:</p></td>
+<td><input type="text" name="DNSServer" size="16" maxlength="15" disabled="disabled" style="background-color: rgb(192, 192, 192);"></td>
+</tr>
+<tr>
+<td height="28"><p class="in">Alternate DNS address:</p></td>
+<td><input type="text" name="AlternativeDns" size="16" maxlength="15" disabled="disabled" style="background-color: rgb(192, 192, 192);"></td>
+</tr>
+<tr><td colspan="2" height="6" class="r1">&nbsp;</td></tr>
+<tr><td></td></tr>
+<tr>
+<td valign="bottom">
+<h2><input type="submit" value="   Submit   "></h2>
+</td>
+<td></td>
+</tr>
+<tr>
+<td class="sw"></td>
+<td class="se"></td>
+</tr>
+</tbody></table>
+</form>
+<script language="JavaScript" type="text/javascript">
+function dis(Active)
+{
+  var tcolor;
+ 
+ if (Active==true) 
+ { 
+    tcolor = "#C0C0C0";
+ }
+ else {
+  tcolor = "#ffffff";
+ }
+
+ IpForm.IpAddress.disabled=Active
+ IpForm.IpAddress.style.backgroundColor = tcolor
+ IpForm.SubnetMask.disabled=Active
+ IpForm.SubnetMask.style.backgroundColor=tcolor; 
+ IpForm.DefaultGatway.disabled=Active
+ IpForm.DefaultGatway.style.backgroundColor=tcolor
+ IpForm.DNSServer.disabled=Active
+ IpForm.DNSServer.style.backgroundColor=tcolor 
+ IpForm.AlternativeDns.disabled=Active
+ IpForm.AlternativeDns.style.backgroundColor=tcolor
+}
+function set_ip() {
+  if(IpForm.command[0].checked) {
+  	dis(true);
+  }
+  else {
+  	dis(false);
+  }
+}
+   
+    set_ip()
+</script>
+</td>
+		</tr>
+	</tbody></table>
+
+</body></html>

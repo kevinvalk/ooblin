@@ -28,12 +28,16 @@ cargo test
 
 ### Mock AMT
 
-AMT lives in the management engine of a real vPro machine, and nobody makes an emulator for it. So we record a real
-device once and replay it from then on. `mock-amt record <fixture> <host>` asks for the password and reads everything
-the device offers, without changing anything: every WS-Man class it knows (serials, addresses and names scrubbed) and a
-short serial console, KVM and IDER session, all into `fixtures/<fixture>`. `mock-amt run <fixture>` then serves it on
-127.0.0.1 as `admin` / `P@ssw0rd`, filling in by the spec what a recording can't hold: handshakes, authentication,
-method results. `cargo test` replays every fixture, so whatever a device once told us keeps parsing.
+AMT lives in the management engine of a real vPro machine, and nobody makes an emulator for it. So we record real
+devices once and replay them from then on: `mock-amt record <fixture> <host>` asks for the password and reads everything
+the device offers, without changing anything: every WS-Man class it knows, the read-only methods the app uses (clock,
+accounts, event and audit log) and a short serial console, KVM and IDER session, all into `fixtures/<fixture>`.
+`mock-amt run <fixture>` then serves it on 127.0.0.1 as `admin` / `P@ssw0rd`, filling in by the spec what a recording
+can't hold: handshakes, authentication, method results. `cargo test` replays every fixture, so whatever a device once
+told us keeps parsing.
 
-`fixtures/go-wsman-messages` holds Intel's own sample responses, fixtures of real devices stay out of git. Run it with
-`cargo run -p mock-amt -- run go-wsman-messages`.
+Fixtures are committed, so record a device that has nothing to hide. Serials, addresses and names are scrubbed, but the
+audit log keeps its user names and client addresses, and the KVM session keeps a screenshot of whatever is on screen.
+`fixtures/go-wsman-messages` is an untouched copy of Intel's sample responses from
+[go-wsman-messages](https://github.com/device-management-toolkit/go-wsman-messages) (`pkg/wsman/wsmantesting/responses`
+at `00402b9`, Apache-2.0), which the mock serves alongside.

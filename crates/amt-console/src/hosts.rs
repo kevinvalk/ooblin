@@ -10,6 +10,7 @@ use amt_core::{Fingerprint, Target};
 use keyring::Entry;
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Manager};
+use ts_rs::TS;
 
 use crate::CommandError;
 
@@ -27,7 +28,8 @@ struct Saved {
 }
 
 /// A device as the webview sees it. `remembered` means we can log in without asking for the password.
-#[derive(Serialize)]
+#[derive(Serialize, TS)]
+#[ts(export, export_to = "console.ts")]
 pub struct Device {
     pub host: String,
     pub user: String,

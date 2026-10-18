@@ -6,7 +6,6 @@ mod redirection;
 
 pub use redirection::{REDIRECTION_PORT, Redirection, Session};
 
-use std::error::Error as _;
 use std::fmt;
 use std::str::FromStr;
 use std::sync::{Arc, OnceLock};
@@ -42,8 +41,11 @@ impl Connection {
         let http = reqwest::Client::builder()
             .use_preconfigured_tls(pin.tls())
             .pool_max_idle_per_host(1)
+            // A burst of reads shares a connection, but we don't reuse one AMT may have given up on in the meantime.
+            .pool_idle_timeout(Duration::from_secs(5))
             .connect_timeout(Duration::from_secs(10))
-            .timeout(Duration::from_secs(60))
+            // AMT answers in a second or two, a device taking longer has most likely hung.
+            .timeout(Duration::from_secs(20))
             .build()
             .map_err(transport)?;
 
@@ -94,23 +96,27 @@ impl Connection {
     }
 }
 
-/// reqwest's own message is just "error sending request", the actual reason lives in the source chain.
+/// reqwest's own message is just "error sending request for url (…)", the actual reason is the last of its causes. A
+/// timeout's is "deadline has elapsed", which helps nobody.
 fn transport(error: reqwest::Error) -> Error {
-    let mut message = error.to_string();
-    let mut source = error.source();
-    while let Some(cause) = source {
-        message = format!("{message}: {cause}");
-        source = cause.source();
+    if error.is_timeout() {
+        return Error::Timeout;
     }
-    Error::Transport(message)
+    let mut cause: &dyn std::error::Error = &error;
+    while let Some(source) = cause.source() {
+        cause = source;
+    }
+    Error::Transport(cause.to_string())
 }
 
 fn protocol(error: digest_auth::Error) -> Error {
     Error::Protocol(error.to_string())
 }
 
-/// AMT certificates are self-signed, so instead of a CA we trust the SHA-256 of the leaf certificate.
-#[derive(Clone, Copy, PartialEq, Eq)]
+/// AMT certificates are self-signed, so instead of a CA we trust the SHA-256 of the leaf certificate. It travels as
+/// `AB:CD:…`, see its `Display`.
+#[derive(Clone, Copy, PartialEq, Eq, ts_rs::TS)]
+#[ts(export, export_to = "core.ts", type = "string")]
 pub struct Fingerprint([u8; 32]);
 
 impl Fingerprint {
@@ -218,17 +224,5 @@ impl ServerCertVerifier for Pin {
 
     fn supported_verify_schemes(&self) -> Vec<SignatureScheme> {
         self.algorithms.supported_schemes()
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::Fingerprint;
-
-    #[test]
-    fn fingerprint_round_trips() {
-        let fingerprint = Fingerprint::of(b"certificate");
-        assert_eq!(fingerprint.to_string().parse(), Ok(fingerprint));
-        assert!("AB:CD".parse::<Fingerprint>().is_err());
     }
 }

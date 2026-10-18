@@ -1,17 +1,24 @@
 //! Intel AMT over TLS, without a webview. Every socket lives in `net`.
 
 mod client;
+mod decode;
+mod hardware;
 mod info;
-mod inventory;
+mod logs;
 mod net;
 mod power;
+mod settings;
+mod status;
 pub mod wsman;
 
 pub use client::{Client, Trust};
+pub use hardware::{Battery, Bios, Disk, Hardware, Module, Motherboard, Processor, System};
 pub use info::{ControlMode, Info};
-pub use inventory::{Inventory, Memory};
+pub use logs::{AuditRecord, Event, Severity};
 pub use net::{Connection, Fingerprint, Redirection, Session};
-pub use power::{PowerAction, PowerState};
+pub use power::{Power, PowerAction, PowerState};
+pub use settings::{Account, Settings};
+pub use status::{Ipv4, Ipv6, Port, RemoteAccess, Status};
 
 /// A device and how to log in to it. The ports only change for tests and tunnels.
 #[derive(Clone)]
@@ -45,6 +52,8 @@ pub enum Error {
     Unauthorized,
     #[error("{0}")]
     Transport(String),
+    #[error("it didn't answer in time")]
+    Timeout,
     #[error("HTTP {0}")]
     Http(u16),
     #[error("{method} failed with return value {code}")]

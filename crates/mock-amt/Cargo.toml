@@ -6,6 +6,7 @@ license = "Apache-2.0"
 publish = false
 
 [dependencies]
+anyhow = "1"
 amt-core = { path = "../amt-core" }
 clap = { version = "4", features = ["derive"] }
 http-body-util = "0.1"

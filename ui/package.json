@@ -4,13 +4,19 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
-    "build": "tsc && vite build"
+    "build": "svelte-check && vite build"
   },
   "dependencies": {
     "@tauri-apps/api": "~2.12"
   },
   "devDependencies": {
-    "typescript": "^7.0.2",
+    "@lucide/svelte": "^1.59.0",
+    "@sveltejs/vite-plugin-svelte": "^7.3.1",
+    "@tailwindcss/vite": "^4.3.3",
+    "svelte": "^5.57.2",
+    "svelte-check": "^4.7.7",
+    "tailwindcss": "^4.3.3",
+    "typescript": "^6.0.3",
     "vite": "^8.3.4"
   }
 }

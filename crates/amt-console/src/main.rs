@@ -8,12 +8,15 @@ use std::collections::HashMap;
 use std::fmt::Display;
 use std::sync::Arc;
 
-use amt_core::{Client, Error, Fingerprint, Info, Inventory, PowerAction, PowerState, Target};
+use amt_core::{
+    AuditRecord, Client, Error, Event, Fingerprint, Hardware, Info, Power, PowerAction, Settings, Status, Target,
+};
 use clap::Parser;
 use hosts::{Device, Hosts};
 use serde::Serialize;
 use tauri::async_runtime::Mutex;
 use tauri::{AppHandle, State, WebviewWindow};
+use ts_rs::TS;
 
 /// One session per connected device, each on its own lock: AMT wants its calls one at a time, other devices don't care.
 #[derive(Default)]
@@ -109,18 +112,38 @@ fn trust(app: AppHandle, host: &str, fingerprint: Fingerprint) -> Result<(), Com
 }
 
 #[tauri::command]
-async fn power_state(sessions: State<'_, Sessions>, host: &str) -> Result<PowerState, CommandError> {
-    Ok(sessions.get(host)?.lock().await.power_state().await?)
+async fn power(sessions: State<'_, Sessions>, host: &str) -> Result<Power, CommandError> {
+    Ok(sessions.get(host)?.lock().await.power().await?)
 }
 
 #[tauri::command]
-async fn power(sessions: State<'_, Sessions>, host: &str, action: PowerAction) -> Result<(), CommandError> {
-    Ok(sessions.get(host)?.lock().await.power(action).await?)
+async fn set_power(sessions: State<'_, Sessions>, host: &str, action: PowerAction) -> Result<(), CommandError> {
+    Ok(sessions.get(host)?.lock().await.set_power(action).await?)
 }
 
 #[tauri::command]
-async fn inventory(sessions: State<'_, Sessions>, host: &str) -> Result<Inventory, CommandError> {
-    Ok(sessions.get(host)?.lock().await.inventory().await?)
+async fn status(sessions: State<'_, Sessions>, host: &str) -> Result<Status, CommandError> {
+    Ok(sessions.get(host)?.lock().await.status().await?)
+}
+
+#[tauri::command]
+async fn hardware(sessions: State<'_, Sessions>, host: &str) -> Result<Hardware, CommandError> {
+    Ok(sessions.get(host)?.lock().await.hardware().await?)
+}
+
+#[tauri::command]
+async fn settings(sessions: State<'_, Sessions>, host: &str) -> Result<Settings, CommandError> {
+    Ok(sessions.get(host)?.lock().await.settings().await?)
+}
+
+#[tauri::command]
+async fn events(sessions: State<'_, Sessions>, host: &str) -> Result<Vec<Event>, CommandError> {
+    Ok(sessions.get(host)?.lock().await.event_log().await?)
+}
+
+#[tauri::command]
+async fn audit(sessions: State<'_, Sessions>, host: &str) -> Result<Vec<AuditRecord>, CommandError> {
+    Ok(sessions.get(host)?.lock().await.audit_log().await?)
 }
 
 /// The window is titled after the session on screen.
@@ -130,10 +153,13 @@ fn title(window: WebviewWindow, title: &str) -> Result<(), CommandError> {
 }
 
 /// What the webview gets when a command fails: always a message, and both fingerprints when the certificate changed.
-#[derive(Serialize)]
+/// `Unreachable` means the device stopped answering, even to a second try.
+#[derive(Serialize, TS)]
+#[ts(export, export_to = "console.ts")]
 #[serde(tag = "kind", rename_all = "camelCase")]
 enum CommandError {
     PinMismatch { message: String, expected: Fingerprint, actual: Fingerprint },
+    Unreachable { message: String },
     Failed { message: String },
 }
 
@@ -149,6 +175,7 @@ impl From<Error> for CommandError {
             Error::PinMismatch { expected, actual } => {
                 Self::PinMismatch { message: error.to_string(), expected, actual }
             }
+            Error::Transport(_) | Error::Timeout => Self::Unreachable { message: error.to_string() },
             error => Self::failed(error),
         }
     }
@@ -181,17 +208,8 @@ fn main() {
         .manage(Args::parse())
         .manage(Sessions::default())
         .invoke_handler(tauri::generate_handler![
-            launch,
-            devices,
-            connect,
-            reconnect,
-            disconnect,
-            forget,
-            trust,
-            power_state,
-            power,
-            inventory,
-            title
+            launch, devices, connect, reconnect, disconnect, forget, trust, power, set_power, status, hardware,
+            settings, events, audit, title
         ])
         .run(tauri::generate_context!())
         .expect("the Tauri runtime starts");

@@ -1,7 +1,9 @@
 # AGENTS.md
 
-A desktop Intel AMT console for Linux, macOS and Windows: a Tauri v2 app (`crates/amt-console`) with a Vite +
-TypeScript UI (`ui/`, no framework) over a library without Tauri (`crates/amt-core`).
+A desktop Intel AMT console for Linux, macOS and Windows: a library without Tauri (`crates/amt-core`), a Tauri v2 app
+over it (`crates/amt-console`) and its UI in Svelte 5 and Tailwind (`ui/`, see `ui/DESIGN.md`). The library hands over
+data that reads the way a person says it, the UI lays it out: it calls the commands with `invoke` (named after the
+tabs), keeps state in the component that owns it, and its pages are markup only.
 
 ## What matters here
 
@@ -9,7 +11,8 @@ TypeScript UI (`ui/`, no framework) over a library without Tauri (`crates/amt-co
 - Tauri drives everything (`cargo tauri dev`/`build` start Vite themselves), few moving parts.
 - Cross-platform from day one, nothing that only works on one OS.
 - No abstraction, helper, knob or config until a second real use needs it.
-- Use a solid, well-known crate over hand-rolling or vendoring the same thing.
+- Use a solid, well-known crate over hand-rolling or vendoring the same thing. `anyhow` and `?` outside the library.
+- Spec and integration tests (fixtures, the running app) over unit tests: only pin down what we must not get wrong.
 - Comments only where a reader would otherwise get it wrong: terse, "we" voice, lines up to ~120 chars.
 - Not sure how the protocol, firmware or a library behaves? Ask, don't guess.
 - Kevin reviews all code, edits files while you work (treat unexpected changes as his) and does the commits.
@@ -24,26 +27,29 @@ config dir, our own commands aren't capability-gated, and power state 8 is a har
 
 ## Working on it
 
-- See `README.md` to run it. `cargo test` runs the library tests against a mock AMT, `npm run build --prefix ui`
-  typechecks the UI.
+- See `README.md` to run it. `cargo test` runs the library tests against a mock AMT and writes the UI's types to
+  `ui/src/bindings` (ts-rs, committed), `npm run build --prefix ui` typechecks the UI.
 - Only `crates/amt-core/src/net/` may touch the network, `cargo test` enforces it.
 - Only Kevin can test against the real device (MS-02, AMT 19), we verify everything else ourselves.
 
 ## Verifying a change
 
-We check our own work in the running app, against the mock AMT, without bothering Kevin:
+We check our own work in the running app, against the mock AMT, without bothering Kevin. Every command gets a time
+limit (`perl -e 'alarm 120; exec @ARGV' <command>`), a hang wastes Kevin's time far more than a retry does.
 
 1. `cargo verify` builds the debug app (hidden window, MCP bridge on localhost, and its own identifier, so its own
    devices and keychain entries, never Kevin's), `cargo build -p mock-amt` the mock.
 2. Start `target/debug/mock-amt run go-wsman-messages` (or a real device's fixture, if there is one) and
-   `target/debug/amt-console 127.0.0.1 --password 'P@ssw0rd'` as background tasks.
+   `TAURI_MCP_NO_FOREGROUND=1 target/debug/amt-console 127.0.0.1 --password 'P@ssw0rd'` as background tasks (the
+   variable stops screenshots from bringing the hidden window to the front on macOS).
    Run the binaries themselves, not `cargo run`, so stopping the task stops the process. For a second session, connect
    to the same mock as `localhost`.
 3. Open a driver session with `npx -y -p @hypothesi/tauri-mcp-cli@0.13 tauri-mcp driver-session start --port 9223`,
    retrying at most 20 times a second apart. Still nothing? Read the background tasks' output, never wait longer.
 4. Drive the app (or use the `tauri` MCP server from `.mcp.json`): `webview-wait-for`, `webview-screenshot`,
    `webview-interact`, `webview-keyboard`, `webview-execute-js`, `read-logs --source console`. Wait for elements, never
-   sleep. Look at every screen you touched and check the console for errors.
+   sleep. Look at every screen you touched and check the console for errors. The window is hidden, so
+   `requestAnimationFrame` and text waits never fire there: wait for selectors.
 5. Always clean up: stop both background tasks, run `tauri-mcp daemon stop`, and check nothing listens on 9223,
    16993 or 16995 anymore.
 

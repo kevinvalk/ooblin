@@ -19,7 +19,7 @@ enum Command {
 }
 
 #[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
+async fn main() -> anyhow::Result<()> {
     match Command::parse() {
         Command::Run { fixture } => {
             let dir = mock_amt::fixture(&fixture);

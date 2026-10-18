@@ -11,10 +11,12 @@ mod wsman;
 pub use record::{crawl, record};
 pub use transcript::{Direction, Transcript};
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicUsize;
 use std::sync::{Arc, Mutex};
 
+use amt_core::Connection;
 use md5::{Digest as _, Md5};
 use tokio::net::{TcpListener, ToSocketAddrs};
 use tokio_rustls::TlsAcceptor;
@@ -43,12 +45,30 @@ pub struct Amt {
     /// Every authenticated WS-Man request body, oldest first.
     pub requests: Mutex<Vec<String>>,
     fixture: PathBuf,
+    /// Replies in go-wsman-messages' layout, by class and lowercase action.
+    samples: HashMap<(String, String), PathBuf>,
     nonce: Mutex<String>,
+    /// When recording: the device we forward every WS-Man request to.
+    device: Option<tokio::sync::Mutex<Connection>>,
 }
 
 impl Amt {
     /// Serves `fixture` with WS-Man on `wsman` and the redirection sessions on `redirection`.
     pub async fn start(wsman: impl ToSocketAddrs, redirection: impl ToSocketAddrs, fixture: &Path) -> Arc<Self> {
+        Self::serve(wsman, redirection, fixture, None).await
+    }
+
+    /// Forwards WS-Man to `device` and keeps its method replies in `fixture`, see `record`.
+    async fn forward(device: Connection, fixture: &Path) -> Arc<Self> {
+        Self::serve("127.0.0.1:0", "127.0.0.1:0", fixture, Some(device)).await
+    }
+
+    async fn serve(
+        wsman: impl ToSocketAddrs,
+        redirection: impl ToSocketAddrs,
+        fixture: &Path,
+        device: Option<Connection>,
+    ) -> Arc<Self> {
         let (wsman, redirection) =
             (TcpListener::bind(wsman).await.unwrap(), TcpListener::bind(redirection).await.unwrap());
         let amt = Arc::new(Self {
@@ -58,7 +78,9 @@ impl Amt {
             challenges: AtomicUsize::new(0),
             requests: Mutex::default(),
             fixture: fixture.to_owned(),
+            samples: samples(fixture),
             nonce: Mutex::new("first".into()),
+            device: device.map(tokio::sync::Mutex::new),
         });
         let (certificate, key) = identity();
         let tls = ServerConfig::builder().with_no_client_auth().with_single_cert(vec![certificate], key).unwrap();
@@ -76,6 +98,21 @@ impl Amt {
     pub fn expire_nonce(&self) {
         *self.nonce.lock().unwrap() = "expired".into();
     }
+}
+
+/// Indexes replies laid out like go-wsman-messages' (`amt/general/get.xml`), by the class each one names.
+fn samples(dir: &Path) -> HashMap<(String, String), PathBuf> {
+    let mut samples = HashMap::new();
+    for path in std::fs::read_dir(dir).into_iter().flatten().flatten().map(|entry| entry.path()) {
+        if path.is_dir() {
+            samples.extend(self::samples(&path));
+        } else if let (Some(stem), Ok(xml)) = (path.file_stem(), std::fs::read_to_string(&path)) {
+            let uri = xml.split("ResourceURI>").nth(1).and_then(|uri| uri.split('<').next()).unwrap_or_default();
+            let class = uri.rsplit('/').next().unwrap_or_default().to_owned();
+            samples.entry((class, stem.to_string_lossy().to_lowercase())).or_insert(path);
+        }
+    }
+    samples
 }
 
 /// Ed25519 signs deterministically, so a fixed seed gives the same certificate on every start and the app's pin for

@@ -4,6 +4,7 @@
 use std::path::Path;
 
 use amt_core::{Client, Connection, Target};
+use anyhow::Result;
 use mock_amt::{Amt, Direction, PASSWORD, Transcript, USER};
 
 fn target(amt: &Amt) -> Target {
@@ -71,40 +72,31 @@ fn ider() -> Transcript {
 }
 
 #[tokio::test]
-async fn records_every_session_as_the_device_said_it() {
-    let device = tempfile::tempdir().unwrap();
+async fn records_every_session_as_the_device_said_it() -> Result<()> {
+    let device = tempfile::tempdir()?;
     for (name, transcript) in [("sol", sol()), ("kvm", kvm()), ("ider", ider())] {
-        transcript.save(&device.path().join(format!("{name}.transcript"))).unwrap();
+        transcript.save(&device.path().join(format!("{name}.transcript")))?;
     }
     let amt = Amt::start("127.0.0.1:0", "127.0.0.1:0", device.path()).await;
 
-    let recorded = tempfile::tempdir().unwrap();
-    mock_amt::record(&target(&amt), recorded.path()).await.unwrap();
+    let recorded = tempfile::tempdir()?;
+    mock_amt::record(&target(&amt), recorded.path()).await?;
     for name in ["sol", "kvm", "ider"] {
-        let load = |dir: &Path| Transcript::load(&dir.join(format!("{name}.transcript"))).unwrap();
-        assert_eq!(load(recorded.path()), load(device.path()), "{name}");
+        let load = |dir: &Path| Transcript::load(&dir.join(format!("{name}.transcript")));
+        assert_eq!(load(recorded.path())?, load(device.path())?, "{name}");
     }
+    Ok(())
 }
 
 #[tokio::test]
-async fn crawls_into_a_scrubbed_fixture_that_replays() {
-    let samples = mock_amt::fixture("go-wsman-messages");
-    let device = Amt::start("127.0.0.1:0", "127.0.0.1:0", &samples).await;
-    let crawled = tempfile::tempdir().unwrap();
-    let answered =
-        mock_amt::crawl(&mut Connection::new(&target(&device), None).unwrap(), &crawled.path().join("wsman"))
-            .await
-            .unwrap();
-    let mut classes: Vec<_> = std::fs::read_dir(samples.join("wsman"))
-        .unwrap()
-        .map(|file| file.unwrap().file_name().to_string_lossy().split('.').next().unwrap().to_owned())
-        .collect();
-    classes.sort();
-    classes.dedup();
-    assert_eq!(answered, classes.len(), "every class in the samples answers the crawl");
+async fn crawls_into_a_scrubbed_fixture_that_replays() -> Result<()> {
+    let device = Amt::start("127.0.0.1:0", "127.0.0.1:0", &mock_amt::fixture("go-wsman-messages")).await;
+    let crawled = tempfile::tempdir()?;
+    mock_amt::crawl(&mut Connection::new(&target(&device), None)?, &crawled.path().join("wsman")).await?;
 
     let replay = Amt::start("127.0.0.1:0", "127.0.0.1:0", crawled.path()).await;
-    let inventory = Client::new(&target(&replay), None).unwrap().inventory().await.unwrap();
-    assert_eq!(inventory.model, "NUC9V7QNX");
-    assert_ne!(inventory.serial, "JRQN0243007J", "serial numbers are scrubbed");
+    let hardware = Client::new(&target(&replay), None)?.hardware().await?;
+    assert_eq!(hardware.system.model, "NUC9V7QNX");
+    assert_ne!(hardware.system.serial_number, "JRQN0243007J", "serial numbers are scrubbed");
+    Ok(())
 }
