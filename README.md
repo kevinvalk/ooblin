@@ -8,8 +8,8 @@ Built with [Tauri](https://tauri.app) for Linux, macOS and Windows.
 
 ## Run
 
-`cargo tauri build` bundles the app. Start it with a host to connect straight away, using its saved credentials or the
-ones you pass:
+`cargo release` bundles the app (`cargo tauri build`, set up for shipping). Start it with a host to connect straight
+away, using its saved credentials or the ones you pass:
 
 ```sh
 amt-console [host] [--user admin] [--password <password>]
@@ -52,34 +52,34 @@ By the features in Intel's [AMT Implementation and Reference
 Guide](https://software.intel.com/sites/manageability/AMT_Implementation_and_Reference_Guide/default.htm), as checked
 against the MS-02 (AMT 19). Partly: some of it, see the notes.
 
-| Feature                                                      |        | Notes                                                                                                                                                                       |
-| ------------------------------------------------------------ | ------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Discovery, general info                                      | Partly | Finding devices by RMCP ping, version, control mode, host name, certificate. Not: provisioning record, ME capabilities, privacy level.                                      |
-| Hardware asset                                               | Yes    | System, BIOS, processors, memory, disks, batteries. Not: FRU and media device tables.                                                                                       |
-| Remote control (power, boot)                                 | Partly | Every power action, booting once to BIOS, PXE, a disk image or with the BIOS on SOL. Not: One-Click Recovery's boots, local boot sources, BIOS pause, input locks.          |
-| KVM                                                          | Yes    | ZRLE and Raw, 16-bit and 8-bit beyond 4K as AMT wants, keyboard, mouse, typing text, full screen, picking a screen, frames a second. Not: KVM settings.                     |
-| SOL                                                          | Yes    | xterm.js at 80 by 25, Backspace sent as ^H like MeshCommander.                                                                                                              |
-| Storage redirection (IDER)                                   | Yes    | A CD-ROM from an ISO, the floppy left empty. Not: READ (12), REQUEST SENSE.                                                                                                 |
-| User consent                                                 | Yes    | Choosing when it's needed, and asking for it: the device shows a code someone there reads out.                                                                              |
-| Redirection and KVM switches                                 | Yes    | By hand in the settings, sessions open only what's on.                                                                                                                      |
-| Event manager (event log)                                    | Partly | Reading. Not: export, clear, freeze, filters, alerts, subscriptions.                                                                                                        |
-| Access monitor (audit log)                                   | Partly | Reading. Not: export, clear, lock, auditing on or off, policy.                                                                                                              |
-| Alarm clock                                                  | Yes    | Scheduling wake-ups (once, hourly, daily, weekly) and canceling them.                                                                                                       |
-| Time synchronization                                         | Yes    | Reading the clock, setting it to this computer's.                                                                                                                           |
-| Network administration                                       | Partly | Wired IPv4 and IPv6, when it's reachable, the name, DNS registration, ping. Not: wireless.                                                                                  |
-| Wi-Fi port configuration                                     | No     |                                                                                                                                                                             |
-| 802.1X profiles                                              | No     |                                                                                                                                                                             |
-| Access control list (users)                                  | No     | Left to AMT's own web pages, which we link to.                                                                                                                              |
-| Certificate management                                       | Partly | Listing, adding certificates and trusted roots, saving, deleting. Not: keys, signing requests.                                                                              |
-| Transport layer security                                     | Partly | TLS only, pinned, its settings shown. Not: changing them or its certificate.                                                                                                |
-| Remote platform erase                                        | Partly | Turning it and One-Click Recovery on and off where the BIOS allows. Not: erasing (neither on the MS-02).                                                                    |
-| Environment detection                                        | No     |                                                                                                                                                                             |
-| Kerberos                                                     | No     | Not planned.                                                                                                                                                                |
-| Remote access (CIRA), Fast Call for Help                     | No     | Not planned: needs a server.                                                                                                                                                |
-| WS-Eventing, alerts                                          | No     | Not planned: needs a listener.                                                                                                                                              |
-| System defense, agent presence                               | No     | Not planned.                                                                                                                                                                |
-| Power packages (power policy)                                | Yes    | Choosing which of the maker's the device uses, and how long AMT stays awake after.                                                                                          |
-| Third-party storage, web application hosting                 | No     | Not planned: deprecated.                                                                                                                                                    |
+| Feature                                      |        | Notes                                                                                                                                                              |
+| -------------------------------------------- | ------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| Discovery, general info                      | Partly | Finding devices by RMCP ping, version, control mode, host name, certificate. Not: provisioning record, ME capabilities, privacy level.                             |
+| Hardware asset                               | Yes    | System, BIOS, processors, memory, disks, batteries. Not: FRU and media device tables.                                                                              |
+| Remote control (power, boot)                 | Partly | Every power action, booting once to BIOS, PXE, a disk image or with the BIOS on SOL. Not: One-Click Recovery's boots, local boot sources, BIOS pause, input locks. |
+| KVM                                          | Yes    | ZRLE and Raw, 16-bit and 8-bit beyond 4K as AMT wants, keyboard, mouse, typing text, full screen, picking a screen, frames a second. Not: KVM settings.            |
+| SOL                                          | Yes    | xterm.js at 80 by 25, Backspace sent as ^H like MeshCommander.                                                                                                     |
+| Storage redirection (IDER)                   | Yes    | A CD-ROM from an ISO, the floppy left empty.                                                                                                                       |
+| User consent                                 | Yes    | Choosing when it's needed, and asking for it: the device shows a code someone there reads out.                                                                     |
+| Redirection and KVM switches                 | Yes    | By hand in the settings, sessions open only what's on.                                                                                                             |
+| Event manager (event log)                    | Partly | Reading. Not: export, clear, freeze, filters, alerts, subscriptions.                                                                                               |
+| Access monitor (audit log)                   | Partly | Reading. Not: export, clear, lock, auditing on or off, policy.                                                                                                     |
+| Alarm clock                                  | Yes    | Scheduling wake-ups (once, hourly, daily, weekly) and canceling them.                                                                                              |
+| Time synchronization                         | Yes    | Reading the clock, setting it to this computer's.                                                                                                                  |
+| Network administration                       | Partly | Wired IPv4 and IPv6, when it's reachable, the name, DNS registration, ping. Not: wireless.                                                                         |
+| Wi-Fi port configuration                     | No     |                                                                                                                                                                    |
+| 802.1X profiles                              | No     |                                                                                                                                                                    |
+| Access control list (users)                  | No     | Left to AMT's own web pages, which we link to.                                                                                                                     |
+| Certificate management                       | Partly | Listing, adding certificates and trusted roots, saving, deleting. Not: keys, signing requests.                                                                     |
+| Transport layer security                     | Partly | TLS only, pinned, its settings shown. Not: changing them or its certificate.                                                                                       |
+| Remote platform erase                        | Partly | Turning it and One-Click Recovery on and off where the BIOS allows. Not: erasing (neither on the MS-02).                                                           |
+| Environment detection                        | No     |                                                                                                                                                                    |
+| Kerberos                                     | No     | Not planned.                                                                                                                                                       |
+| Remote access (CIRA), Fast Call for Help     | No     | Not planned: needs a server.                                                                                                                                       |
+| WS-Eventing, alerts                          | No     | Not planned: needs a listener.                                                                                                                                     |
+| System defense, agent presence               | No     | Not planned.                                                                                                                                                       |
+| Power packages (power policy)                | Yes    | Choosing which of the maker's the device uses, and how long AMT stays awake after.                                                                                 |
+| Third-party storage, web application hosting | No     | Not planned: deprecated.                                                                                                                                           |
 
 ## TODO
 
@@ -87,12 +87,9 @@ against the MS-02 (AMT 19). Partly: some of it, see the notes.
 - [ ] Have an optional built in PXE boot system where our tool hosts the PXE server directly.
 - [ ] The features above, starting with: the other boot options (One-Click Recovery's boots among them), exporting and
       clearing the logs, TLS's certificate, platform erase itself. Wi-Fi last.
-- [ ] IDER: READ (12) and REQUEST SENSE, and checking that a plain reset after booting the image boots from disk again
-      (clearing `UseIDER` if not).
-- [ ] Check on the MS-02 that SOL survives 10 minutes idle.
 - [ ] Say in the README that ⌘Tab and other system shortcuts can't reach the device.
-- [ ] `withGlobalTauri` off in release builds, the verify loop then needs another way in.
 - [ ] Give the verify build its own target directory: it shares `target/debug/amt-console` and port 9223 with
       `cargo tauri dev`, so one can't run while the other does.
-- [ ] CI: tests, clippy, the UI build, and releases with tauri-action, SHA-256 sums and a provenance attestation.
+- [ ] CI: tests, clippy, the UI build, and releases with tauri-action (as `cargo release` builds them), SHA-256 sums and a
+      provenance attestation.
 - [ ] Build from a fresh clone on macOS, Linux and Windows.

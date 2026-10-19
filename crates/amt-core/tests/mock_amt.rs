@@ -397,8 +397,8 @@ async fn asks_for_consent() -> Result<()> {
 }
 
 /// A device booting from the image the way MeshCommander answers it: is the drive ready, how big is the disc, then
-/// a read larger than a message may carry, a command we don't know, a read past the end, the empty floppy drive, and
-/// the end. The mock hangs up on any byte we get wrong.
+/// a read larger than a message may carry, a command we don't know, a read past the end and why it failed, a read in
+/// READ (12), the empty floppy drive, and the end. The mock hangs up on any byte we get wrong.
 #[tokio::test]
 async fn serves_a_disk_image_over_ider() -> Result<()> {
     let image: Vec<u8> = (0..6 * 2048).map(|i| (i % 251) as u8).collect();
@@ -449,9 +449,13 @@ async fn serves_a_disk_image_over_ider() -> Result<()> {
         sent(failed(6, 0xB0, [5, 0x20])),
         received(command(6, &[0x28, 0, 0, 0, 0, 5, 0, 0, 2])), // READ (10), blocks 5 and 6 of 6
         sent(failed(7, 0xB0, [5, 0x21])),
-        received(to(0xA0, 7, &[0x28, 0, 0, 0, 0, 0, 0, 0, 1])), // a read from the floppy drive
-        sent(failed(8, 0xA0, [2, 0x3A])),
-        received(message(0x43, 0, 8, &[])),
+        received(command(7, &[0x03, 0, 0, 0, 18])), // REQUEST SENSE: why, out of range
+        sent(data(8, &[0x70, 0, 5, 0, 0, 0, 0, 10, 0, 0, 0, 0, 0x21, 0, 0, 0, 0, 0], true)),
+        received(command(8, &[0xA8, 0, 0, 0, 0, 0, 0, 0, 0, 1])), // READ (12), block 0
+        sent(data(9, &image[..2048], true)),
+        received(to(0xA0, 9, &[0x28, 0, 0, 0, 0, 0, 0, 0, 1])), // a read from the floppy drive
+        sent(failed(10, 0xA0, [2, 0x3A])),
+        received(message(0x43, 0, 10, &[])),
     ]);
     Transcript(transcript).save(&fixture.path().join("ider.transcript"))?;
     std::fs::create_dir(fixture.path().join("wsman"))?;
@@ -463,7 +467,7 @@ async fn serves_a_disk_image_over_ider() -> Result<()> {
     let ider = client(&amt, PASSWORD, None)?.ider(std::fs::File::open(file.path())?).await?;
     let mut reads = Vec::new();
     ider.serve(|served| reads.push(served)).await?;
-    assert_eq!(reads, [5 * 2048]);
+    assert_eq!(reads, [5 * 2048, 6 * 2048]);
     Ok(())
 }
 

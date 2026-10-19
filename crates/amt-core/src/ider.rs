@@ -27,6 +27,8 @@ pub struct Ider {
     served: u64,
     /// The most the command at hand takes back, its allocation length.
     allocation: usize,
+    /// Why the CD-ROM's last command failed (sense key, additional sense code and qualifier), for REQUEST SENSE.
+    sense: [u8; 3],
 }
 
 /// The CD-ROM's ATAPI device id, the floppy drive's is 0xA0.
@@ -46,7 +48,8 @@ impl Client {
         let image = File::from_std(image);
         let blocks = image.metadata().await?.len() / 2048;
         let redirection = self.redirect(Session::Ider).await?;
-        let mut ider = Ider { redirection, image, blocks, chunk: 0, sequence: 0, served: 0, allocation: 0 };
+        let mut ider =
+            Ider { redirection, image, blocks, chunk: 0, sequence: 0, served: 0, allocation: 0, sense: [0; 3] };
         // Timeouts of 30 seconds to receive and none to send, a heartbeat every 20 seconds, version 1.
         ider.send(0x40, &[0x30, 0x75, 0, 0, 0x20, 0x4E, 1, 0, 0, 0], false, false).await?;
         let reply = ider.redirection.read_exact(30).await?;
@@ -113,23 +116,31 @@ impl Ider {
         let u16_at = |at: usize| u16::from_be_bytes([cdb[at], cdb[at + 1]]);
         // Unlike the references we stop at the allocation length, as SCSI wants: more is an overrun to the host.
         self.allocation = match cdb[0] {
-            0x1A => cdb[4].into(),
+            0x03 | 0x1A => cdb[4].into(),
             0x23 | 0x43 | 0x46 | 0x4A | 0x5A => u16_at(7).into(),
             _ => usize::MAX,
         };
+        // REQUEST SENSE: why the last command failed, in fixed format, which it then forgets. The floppy drive is empty.
+        if cdb[0] == 0x03 {
+            let [key, asc, ascq] = if device == CD { std::mem::take(&mut self.sense) } else { [2, 0x3A, 0] };
+            return self.data(device, &[0x70, 0, key, 0, 0, 0, 0, 10, 0, 0, 0, 0, asc, ascq, 0, 0, 0, 0], dma).await;
+        }
         if device != CD {
             return self.end(device, 2, 0x3A, 0).await; // medium not present
         }
+        self.sense = [0; 3];
+        let u32_at = |at: usize| u64::from(u32::from_be_bytes([cdb[at], cdb[at + 1], cdb[at + 2], cdb[at + 3]]));
         match cdb[0] {
-            // READ (6) and READ (10).
-            0x08 | 0x28 => {
+            // READ (6), READ (10) and READ (12).
+            0x08 | 0x28 | 0xA8 => {
                 let (lba, len) = match cdb[0] {
                     // A length of 0 is 256 blocks here.
                     0x08 => (
                         u64::from(cdb[1] & 0x1f) << 16 | u64::from(u16_at(2)),
                         if cdb[4] == 0 { 256 } else { cdb[4].into() },
                     ),
-                    _ => (u32::from_be_bytes([cdb[2], cdb[3], cdb[4], cdb[5]]).into(), u16_at(7).into()),
+                    0x28 => (u32_at(2), u16_at(7).into()),
+                    _ => (u32_at(2), u32_at(6)),
                 };
                 match len {
                     0 => self.ok(device).await,
@@ -244,6 +255,9 @@ impl Ider {
 
     /// The command failed, with its sense key and additional sense code and qualifier.
     async fn end(&mut self, device: u8, sense: u8, asc: u8, ascq: u8) -> Result<()> {
+        if device == CD {
+            self.sense = [sense, asc, ascq];
+        }
         let mut message = vec![0; 12];
         message.extend([0x87, sense << 4, 3, 0, 0, 0, device, 0x51, sense, asc, ascq]);
         self.send(0x51, &message, true, false).await
