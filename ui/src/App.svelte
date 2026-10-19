@@ -16,10 +16,20 @@
   /** The device we're connecting to: it spins, and a second click on it does nothing. */
   let connecting: string | null = $state(null);
   let collapsed = $state(false);
+  /** The disk image in the drive of the device on screen, see Session. */
+  let image = $derived(current ? sessions[current]?.image : undefined);
   let message = $state("");
+  let hide = 0;
+
+  /** Says `text` in the footer for as long as it takes to read: five seconds, more for more words, fifteen at most. */
+  function say(text: string) {
+    message = text;
+    clearTimeout(hide);
+    hide = setTimeout(() => (message = ""), Math.min(5000 + 50 * text.length, 15_000));
+  }
 
   async function listDevices() {
-    devices = await invoke<Device[]>("devices").catch((error) => ((message = String(error)), []));
+    devices = await invoke<Device[]>("devices").catch((error) => (say(String(error)), []));
   }
 
   /** Open sessions show, remembered devices log in, the rest ask for their password. */
@@ -33,7 +43,7 @@
   function showForm(device?: Device, error?: CommandError) {
     form = { key: form.key + 1, device, error };
     current = null;
-    message = "";
+    say("");
     listDevices();
   }
 
@@ -60,7 +70,7 @@
 
   function show(host: string) {
     current = host;
-    message = "";
+    say("");
     refreshPower(host);
     listDevices();
   }
@@ -76,26 +86,41 @@
     listDevices();
   }
 
-  /** The device stopped answering, even to a second try: we let go of it and say why, Connect tries again. */
+  /** The device stopped answering for good: we let go of it and say why, Connect tries again. */
   function lost(host: string, error: CommandError) {
     invoke("disconnect", { host });
     delete sessions[host];
     const failure = explain(error, `Lost the connection to ${host}`);
     if (host === current) showForm(devices.find((device) => device.host === host), failure);
-    else message = failure.message;
+    else say(failure.message);
   }
 
+  /** The hosts whose power we're asking for, one ask at a time: one that doesn't answer takes a while to say so. */
+  const asking = new Set<string>();
+
+  /** A device may not answer for a while (AMT can be busy while it resets), only after two minutes is it gone. Until
+   * then its power is unknown. */
   async function refreshPower(host: string) {
     const session = sessions[host];
+    if (asking.has(host)) return;
+    asking.add(host);
     try {
       session.power = await invoke<Power>("power", { host });
+      session.silent = undefined;
       const changing = session.changing;
       if (changing && (session.power.state !== changing.from || Date.now() > changing.until)) {
         session.changing = undefined;
       }
     } catch (error) {
-      if ((error as CommandError).kind === "Unreachable") lost(host, error as CommandError);
-      else if (host === current) message = explain(error, host).message;
+      if ((error as CommandError).kind !== "Unreachable") {
+        if (host === current) say(explain(error, host).message);
+      } else if (Date.now() - (session.silent ??= Date.now()) > 120_000) {
+        lost(host, error as CommandError);
+      } else {
+        session.power = undefined;
+      }
+    } finally {
+      asking.delete(host);
     }
   }
 
@@ -166,11 +191,7 @@
 
   <div class="grid min-w-0 overflow-hidden">
     {#if current}
-      <Session
-        session={sessions[current]}
-        say={(text) => (message = text)}
-        onlost={(error) => lost(current!, error)}
-      />
+      <Session session={sessions[current]} {say} />
     {:else}
       {#key form.key}
         <Connect
@@ -188,6 +209,19 @@
     <button type="button" class="btn-icon size-7" title="Toggle the sidebar (⌘B)" onclick={() => (collapsed = !collapsed)}>
       <PanelLeft class="size-4" />
     </button>
-    <output class="truncate text-muted">{message}</output>
+    <!-- What's true now outlasts what just happened. -->
+    <output class="truncate text-muted">
+      {current && sessions[current].silent ? `${current} isn't answering, trying again…` : message}
+    </output>
+    <!-- Only while the device reads, and a minute after. -->
+    {#if image?.recent}
+      <span
+        class="ml-auto pr-1.5 whitespace-nowrap text-muted tabular-nums"
+        title="How fast the device reads the disk image. AMT tops out at about 1 MB/s: each read goes through its small
+management engine, and the device waits on every one."
+      >
+        Disk image {(image.rate / 1e6).toFixed(2)} MB/s
+      </span>
+    {/if}
   </footer>
 </div>

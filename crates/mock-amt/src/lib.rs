@@ -46,6 +46,8 @@ pub struct Amt {
     pub challenges: AtomicUsize,
     /// Every authenticated WS-Man request body, oldest first.
     pub requests: Mutex<Vec<String>>,
+    /// The page each enumeration context is at.
+    pages: Mutex<HashMap<String, usize>>,
     fixture: PathBuf,
     /// Replies in go-wsman-messages' layout, by class and lowercase action.
     samples: HashMap<(String, String), PathBuf>,
@@ -79,6 +81,7 @@ impl Amt {
             connections: AtomicUsize::new(0),
             challenges: AtomicUsize::new(0),
             requests: Mutex::default(),
+            pages: Mutex::default(),
             fixture: fixture.to_owned(),
             samples: samples(fixture),
             nonce: Mutex::new("first".into()),

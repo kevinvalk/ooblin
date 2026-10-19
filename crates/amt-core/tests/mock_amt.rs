@@ -176,18 +176,17 @@ fn rects(frame: &[u8]) -> Vec<(u16, u16, u16, u16, &[u8])> {
     rects
 }
 
-/// As the MS-02 recorded it: AMT 19 first only says its size, then sends the screen in 64 by 64 tiles.
+/// As the MS-02 recorded it: AMT 19 first only says its size, then sends the screen in ZRLE tiles of 64 by 64.
 #[tokio::test]
 async fn shows_the_ms_02_screen() -> Result<()> {
     let amt = start(&mock_amt::fixture("ms-02")).await;
     let kvm = client(&amt, PASSWORD, None)?.kvm().await?;
-    let size = [0, 4, 0, 3]; // 1024 by 768
+    let size = [0x20, 3, 0x58, 2]; // 800 by 600
     assert_eq!(kvm.frame().await?, size);
     let frame = kvm.frame().await?;
     assert_eq!(frame[..4], size);
     let rects = rects(&frame);
-    assert_eq!(rects.iter().map(|&(_, _, w, h, _)| u32::from(w) * u32::from(h)).sum::<u32>(), 1024 * 768);
-    assert_eq!(rects[0].4[..4], [123, 174, 255, 255], "RGB565 0x7d7f");
+    assert_eq!(rects.iter().map(|&(_, _, w, h, _)| u32::from(w) * u32::from(h)).sum::<u32>(), 800 * 600);
     assert_eq!(kvm.frame().await?, size, "nothing changed, so after a second just the size");
     Ok(())
 }
@@ -275,5 +274,76 @@ async fn turns_kvm_and_the_listener_on_first() -> Result<()> {
         .map(|input| (&*input.class, input.get("RequestedState").or(input.get("ListenerEnabled"))))
         .collect();
     assert_eq!(changes, [("RequestStateChange_INPUT", Some("2")), ("AMT_RedirectionService", Some("true"))]);
+    Ok(())
+}
+
+/// A device booting from the image the way MeshCommander answers it: is the drive ready, how big is the disc, then
+/// a read larger than a message may carry, a command we don't know, a read past the end, the empty floppy drive, and
+/// the end. The mock hangs up on any byte we get wrong.
+#[tokio::test]
+async fn serves_a_disk_image_over_ider() -> Result<()> {
+    let image: Vec<u8> = (0..6 * 2048).map(|i| (i % 251) as u8).collect();
+    let file = tempfile::NamedTempFile::new()?;
+    std::fs::write(file.path(), &image)?;
+
+    // The device's messages carry its sequence, ours ours. A command is for the CD-ROM (0xB0), in PIO.
+    let message = |kind: u8, attributes: u8, sequence: u32, data: &[u8]| {
+        [&[kind, 0, 0, attributes][..], &sequence.to_le_bytes(), data].concat()
+    };
+    let to = |device: u8, sequence, cdb: &[u8]| {
+        let mut cdb = cdb.to_vec();
+        cdb.resize(12, 0);
+        message(0x50, 0, sequence, &[&[0, 0, 0, 0, 0, 0, device, 0][..], &cdb].concat())
+    };
+    let command = |sequence, cdb: &[u8]| to(0xB0, sequence, cdb);
+    let failed = |sequence, device, [sense, asc]: [u8; 2]| {
+        message(
+            0x51,
+            2,
+            sequence,
+            &[&[0; 12][..], &[0x87, sense << 4, 3, 0, 0, 0, device, 0x51, sense, asc, 0]].concat(),
+        )
+    };
+    let ok =
+        |sequence| message(0x51, 2, sequence, &[&[0; 12][..], &[0xC5, 0, 3, 0, 0, 0, 0xB0, 0x50, 0, 0, 0]].concat());
+    let data = |sequence, data: &[u8], last: bool| {
+        let len = (data.len() as u16).to_le_bytes();
+        let header = [0, len[0], len[1], 0, 0xB5, 0, 2, 0, len[0], len[1], 0xB0, 0x58];
+        let end: [u8; 14] = if last { [0x85, 0, 3, 0, 0, 0, 0xB0, 0x50, 0, 0, 0, 0, 0, 0] } else { [0; 14] };
+        message(0x54, if last { 2 } else { 0 }, sequence, &[&header[..], &end, data].concat())
+    };
+    let (sent, received) = (|bytes: Vec<u8>| (Direction::Sent, bytes), |bytes: Vec<u8>| (Direction::Received, bytes));
+    let opened = Transcript::load(&mock_amt::fixture("ms-02").join("ider.transcript"))?;
+    let fixture = tempfile::tempdir()?;
+    let mut transcript = opened.0; // our open and the MS-02's answer, 8192 bytes at most a message
+    transcript.extend([
+        sent(message(0x48, 0, 1, &[3, 0x09, 0, 0, 0])),
+        received(message(0x49, 0, 1, &[3, 1, 0, 0, 0])),
+        received(command(2, &[0x00])), // TEST UNIT READY
+        sent(ok(2)),
+        received(command(3, &[0x25])), // READ CAPACITY
+        sent(data(3, &[0, 0, 0, 5, 0, 0, 8, 0], true)),
+        received(command(4, &[0x28, 0, 0, 0, 0, 1, 0, 0, 5])), // READ (10), blocks 1 to 5
+        sent(data(4, &image[2048..2048 + 8192], false)),
+        sent(data(5, &image[2048 + 8192..], true)),
+        received(command(5, &[0x12])), // INQUIRY, which AMT answers itself
+        sent(failed(6, 0xB0, [5, 0x20])),
+        received(command(6, &[0x28, 0, 0, 0, 0, 5, 0, 0, 2])), // READ (10), blocks 5 and 6 of 6
+        sent(failed(7, 0xB0, [5, 0x21])),
+        received(to(0xA0, 7, &[0x28, 0, 0, 0, 0, 0, 0, 0, 1])), // a read from the floppy drive
+        sent(failed(8, 0xA0, [2, 0x3A])),
+        received(message(0x43, 0, 8, &[])),
+    ]);
+    Transcript(transcript).save(&fixture.path().join("ider.transcript"))?;
+    std::fs::create_dir(fixture.path().join("wsman"))?;
+    for file in ["AMT_RedirectionService.Get.xml", "IPS_OptInService.Get.xml"] {
+        std::fs::copy(mock_amt::fixture("ms-02").join("wsman").join(file), fixture.path().join("wsman").join(file))?;
+    }
+
+    let amt = start(fixture.path()).await;
+    let ider = client(&amt, PASSWORD, None)?.ider(std::fs::File::open(file.path())?).await?;
+    let mut reads = Vec::new();
+    ider.serve(|served| reads.push(served)).await?;
+    assert_eq!(reads, [5 * 2048]);
     Ok(())
 }

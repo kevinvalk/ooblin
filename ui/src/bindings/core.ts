@@ -82,9 +82,9 @@ export type Power = { state: PowerState, actions: Array<PowerAction>, };
 
 /**
  * The power changes AMT can make. The `Soft` ones, `Sleep` and `Hibernate` ask the OS, the `To` ones power on or reset
- * into the BIOS setup or a network boot, once.
+ * into the BIOS setup, a network boot or the disk image in the IDER drive, once.
  */
-export type PowerAction = "On" | "SoftOff" | "Off" | "SoftReset" | "Reset" | "Cycle" | "Sleep" | "Hibernate" | "Nmi" | "OnToBios" | "OnToPxe" | "ResetToBios" | "ResetToPxe";
+export type PowerAction = "On" | "SoftOff" | "Off" | "SoftReset" | "Reset" | "Cycle" | "Sleep" | "Hibernate" | "Nmi" | "OnToBios" | "OnToPxe" | "OnToImage" | "ResetToBios" | "ResetToPxe" | "ResetToImage";
 
 /**
  * The CIM `PowerState`s AMT reports, folded into what a person cares about and named the way they'd say it.

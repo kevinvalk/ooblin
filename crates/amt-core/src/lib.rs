@@ -4,17 +4,20 @@
 
 mod client;
 mod hardware;
+mod ider;
 mod info;
 mod kvm;
 mod logs;
 mod net;
 mod power;
+mod redirection;
 mod settings;
 mod status;
 pub mod wsman;
 
 pub use client::Client;
 pub use hardware::{Battery, Bios, Disk, Hardware, Module, Motherboard, Processor, System};
+pub use ider::Ider;
 pub use info::Info;
 pub use kvm::{Input, Kvm};
 pub use logs::{AuditRecord, Event, Severity};
@@ -69,6 +72,10 @@ pub enum Error {
 
 impl From<std::io::Error> for Error {
     fn from(error: std::io::Error) -> Self {
-        Self::Transport(error.to_string())
+        match error.kind() {
+            // TLS says so in more words, with a link.
+            std::io::ErrorKind::UnexpectedEof => Self::Transport("the device closed the connection".into()),
+            _ => Self::Transport(error.to_string()),
+        }
     }
 }

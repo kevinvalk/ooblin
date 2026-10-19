@@ -50,6 +50,8 @@ impl Redirection {
         let tcp = tokio::time::timeout(Duration::from_secs(10), TcpStream::connect(address))
             .await
             .map_err(|_| Error::Transport(format!("connecting to {}:{} timed out", address.0, address.1)))??;
+        // Our messages are small and each waits on an answer, Nagle's algorithm would hold every one of them back.
+        tcp.set_nodelay(true)?;
         let name = ServerName::try_from(target.host.clone()).map_err(|error| Error::Transport(error.to_string()))?;
         let stream = TlsConnector::from(std::sync::Arc::new(pin.tls()))
             .connect(name, tcp)
@@ -71,8 +73,10 @@ impl Redirection {
         Ok(buf)
     }
 
+    /// TLS may hold on to what we write until we flush, so we do.
     pub async fn write_all(&mut self, bytes: &[u8]) -> Result<()> {
-        Ok(self.stream.write_all(bytes).await?)
+        self.stream.write_all(bytes).await?;
+        Ok(self.stream.flush().await?)
     }
 
     /// Its two directions, to read and write at once.

@@ -83,17 +83,16 @@ async fn answer(amt: &Amt, body: &str) -> Option<(StatusCode, String)> {
             page(1)?;
             ok(envelope(EnumerateResponse { EnumerationContext: class }))
         }
-        // Each page leads to the next by the context it ends with, after the last we say there are no more.
+        // Each page leads to the next by the context it ends with, after the last we say there are no more. AMT keeps
+        // one context for all pages, so we remember which page each context is at.
         "Pull" => {
             let context = text("EnumerationContext")?;
-            let next = if context == class {
-                Some(1)
-            } else {
-                (1..).map_while(|n| Some((n, page(n)?))).find_map(|(n, xml)| {
-                    (amt_core::wsman::parse_pull(&xml).ok()?.next.as_deref() == Some(context)).then_some(n + 1)
-                })
-            };
-            ok(next.and_then(page).unwrap_or_else(|| envelope(PullResponse { EndOfSequence })))
+            let n = if context == class { Some(1) } else { amt.pages.lock().unwrap().remove(context) };
+            let Some(xml) = n.and_then(page) else { return ok(envelope(PullResponse { EndOfSequence })) };
+            if let Some(next) = amt_core::wsman::parse_pull(&xml).ok()?.next {
+                amt.pages.lock().unwrap().insert(next, n? + 1);
+            }
+            ok(xml)
         }
         // Methods we have no reply for (the ones that change something) simply succeed.
         method => ok(recorded(method).unwrap_or_else(|| envelope(Output { method, class }))),

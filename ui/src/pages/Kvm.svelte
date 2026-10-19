@@ -1,42 +1,58 @@
 <!-- The device's screen, keyboard and mouse. Rust decodes, we paint what changed and send what's pressed: keys by
-     where they sit, the mouse in the screen's own pixels. Full screen fills the screen with this alone. -->
+     where they sit, the mouse in the screen's own pixels. Full screen fills the screen with this alone. A screen that
+     goes away (AMT drops it while the device boots, say) keeps its last picture until it's back. Hidden, it stays open
+     and painted. -->
 <script lang="ts">
   import { ChevronDown, LoaderCircle, Maximize, Minimize } from "@lucide/svelte";
   import { invoke } from "@tauri-apps/api/core";
   import type { CommandError } from "../bindings/console";
   import type { Input } from "../bindings/core";
 
-  let { host }: { host: string } = $props();
+  let { host, hidden }: { host: string; hidden: boolean } = $props();
 
   let canvas: HTMLCanvasElement;
   let painted = $state(false);
+  /** Why the screen went away, until it's back. */
   let error = $state("");
   let attempt = $state(0);
+  /** Failures in a row: we wait longer after each, up to half a minute, so a device that's busy isn't kept busier. */
+  let failures = 0;
+  /** The last session closing: the next opens once it's gone, AMT takes one at a time. */
+  let closing: Promise<unknown> = Promise.resolve();
   let fullscreen = $state(false);
 
-  // The screen is painted until we leave or it fails, each change asked for once the one before is painted.
+  // The screen is painted until we leave, each change asked for once the one before is painted. When it fails we try
+  // again a little later.
   $effect(() => {
     attempt;
     const target = host;
     const context = canvas.getContext("2d")!;
     let open = true;
+    let retry = 0;
     painted = false;
-    error = "";
     (async () => {
       try {
+        await closing;
+        if (!open) return;
         await invoke("kvm_open", { host: target });
         canvas.focus();
         while (open) {
           paint(context, await invoke<ArrayBuffer>("kvm_frame", { host: target }));
           painted = true;
+          error = "";
+          failures = 0;
         }
       } catch (failure) {
-        if (open) error = (failure as CommandError).message ?? String(failure);
+        if (!open) return;
+        painted = false;
+        error = (failure as CommandError).message ?? String(failure);
+        retry = setTimeout(() => attempt++, Math.min(3000 * 2 ** failures++, 30_000));
       }
     })();
     return () => {
       open = false;
-      invoke("kvm_close", { host: target });
+      clearTimeout(retry);
+      closing = invoke("kvm_close", { host: target });
     };
   });
 
@@ -126,10 +142,11 @@
   });
 </script>
 
-<main class={["grid min-h-0 grid-rows-[auto_1fr]", fullscreen ? "fixed inset-0 z-50 bg-canvas" : "px-8 pb-8"]}>
+<main class={["grid min-h-0 grid-rows-[auto_1fr]", fullscreen ? "fixed inset-0 z-50 bg-canvas" : "px-8 pb-8"]} {hidden}>
   <div class={["flex items-center gap-2", fullscreen ? "px-3 py-2" : "pt-4 pb-3"]}>
-    {#if !painted && !error}
-      <LoaderCircle class="size-4 animate-spin text-muted" /><span class="text-muted">Opening the screen…</span>
+    {#if !painted}
+      <LoaderCircle class="size-4 flex-none animate-spin text-muted" />
+      <span class="truncate text-muted" title={error}>{error ? `Reconnecting, ${error}` : "Opening the screen…"}</span>
     {/if}
     <!-- A native menu, looking like our buttons. -->
     <label class="btn btn-secondary relative ml-auto h-7 px-2.5">
@@ -160,17 +177,10 @@
     </button>
   </div>
 
-  {#if error}
-    <div class="grid content-start justify-items-center gap-4 py-16 text-center">
-      <p class="text-muted">{error}</p>
-      <button type="button" class="btn btn-secondary" onclick={() => attempt++}>Try again</button>
-    </div>
-  {/if}
   <!-- The device's own screen, so its own pointer: ours stays visible on top, as it moves without delay. -->
   <canvas
     bind:this={canvas}
     class="size-full min-h-0 bg-black object-contain outline-none"
-    class:hidden={error}
     tabindex="0"
     onkeydown={(event) => key(event, true)}
     onkeyup={(event) => key(event, false)}

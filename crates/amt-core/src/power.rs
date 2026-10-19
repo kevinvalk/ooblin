@@ -25,7 +25,7 @@ pub enum PowerState {
 }
 
 /// The power changes AMT can make. The `Soft` ones, `Sleep` and `Hibernate` ask the OS, the `To` ones power on or reset
-/// into the BIOS setup or a network boot, once.
+/// into the BIOS setup, a network boot or the disk image in the IDER drive, once.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[ts(export, export_to = "core.ts")]
 pub enum PowerAction {
@@ -40,20 +40,22 @@ pub enum PowerAction {
     Nmi,
     OnToBios,
     OnToPxe,
+    OnToImage,
     ResetToBios,
     ResetToPxe,
+    ResetToImage,
 }
 
 impl PowerAction {
     /// Its CIM `PowerState`, as go-wsman-messages names them (8 is a hard off, the handover had it as soft).
     fn state(self) -> u8 {
         match self {
-            Self::On | Self::OnToBios | Self::OnToPxe => 2,
+            Self::On | Self::OnToBios | Self::OnToPxe | Self::OnToImage => 2,
             Self::Sleep => 4,
             Self::Cycle => 5,
             Self::Hibernate => 7,
             Self::Off => 8,
-            Self::Reset | Self::ResetToBios | Self::ResetToPxe => 10,
+            Self::Reset | Self::ResetToBios | Self::ResetToPxe | Self::ResetToImage => 10,
             Self::Nmi => 11,
             Self::SoftOff => 12,
             Self::SoftReset => 14,
@@ -91,15 +93,17 @@ impl Client {
         };
         let mut actions: Vec<_> =
             association.all("AvailableRequestedPowerStates").filter_map(PowerAction::from_state).collect();
-        // Like Intel's console: into the BIOS when it says it can, PXE when it says it can.
+        // Like Intel's console: into the BIOS, PXE or IDER when it says it can.
         let boot = self.get("AMT_BootCapabilities").await?;
         let can = |capability| boot.get(capability) == Some("true");
-        for (via, bios, pxe) in [
-            (PowerAction::On, PowerAction::OnToBios, PowerAction::OnToPxe),
-            (PowerAction::Reset, PowerAction::ResetToBios, PowerAction::ResetToPxe),
+        for (via, bios, pxe, image) in [
+            (PowerAction::On, PowerAction::OnToBios, PowerAction::OnToPxe, PowerAction::OnToImage),
+            (PowerAction::Reset, PowerAction::ResetToBios, PowerAction::ResetToPxe, PowerAction::ResetToImage),
         ] {
             if actions.contains(&via) {
-                actions.extend(can("BIOSSetup").then_some(bios).into_iter().chain(can("ForcePXEBoot").then_some(pxe)));
+                let targets = [("BIOSSetup", bios), ("ForcePXEBoot", pxe), ("IDER", image)];
+                actions
+                    .extend(targets.into_iter().filter(|&(capability, _)| can(capability)).map(|(_, action)| action));
             }
         }
         Ok(Power { state, actions })
@@ -107,8 +111,9 @@ impl Client {
 
     pub async fn set_power(&mut self, action: PowerAction) -> Result<()> {
         match action {
-            PowerAction::OnToBios | PowerAction::ResetToBios => self.boot_once(true).await?,
-            PowerAction::OnToPxe | PowerAction::ResetToPxe => self.boot_once(false).await?,
+            PowerAction::OnToBios | PowerAction::ResetToBios => self.boot_once(Boot::Bios).await?,
+            PowerAction::OnToPxe | PowerAction::ResetToPxe => self.boot_once(Boot::Pxe).await?,
+            PowerAction::OnToImage | PowerAction::ResetToImage => self.boot_once(Boot::Image).await?,
             _ => {}
         }
         self.invoke(&RequestPowerStateChange { PowerState: action.state(), ManagedElement: SYSTEM }).await?;
@@ -116,17 +121,17 @@ impl Client {
     }
 
     /// Sets up the next boot like Intel's console does (`internal/usecase/devices/power.go`): clear the boot order,
-    /// put the boot settings, make that configuration the next boot's, and boot from PXE unless it's the BIOS setup.
-    async fn boot_once(&mut self, bios: bool) -> Result<()> {
+    /// put the boot settings, make that configuration the next boot's, and boot from PXE if that's where.
+    async fn boot_once(&mut self, boot: Boot) -> Result<()> {
         let current = self.get("AMT_BootSettingData").await?;
         self.invoke(&ChangeBootOrder { Source: None }).await?;
-        self.put(BOOT_SETTINGS, &BootSettingData::once(&current, bios)).await?;
+        self.put(BOOT_SETTINGS, &BootSettingData::once(&current, boot)).await?;
         let configuration = Reference {
             class: "CIM_BootConfigSetting",
             selectors: &[("InstanceID", "Intel(r) AMT: Boot Configuration 0")],
         };
         self.invoke(&SetBootConfigRole { BootConfigSetting: configuration, Role: 1 }).await?;
-        if !bios {
+        if boot == Boot::Pxe {
             let pxe = Reference {
                 class: "CIM_BootSourceSetting",
                 selectors: &[("InstanceID", "Intel(r) AMT: Force PXE Boot")],
@@ -218,21 +223,29 @@ struct BootSettingData<'a> {
     UserPasswordBypass: bool,
 }
 
+/// Where to boot once: the BIOS setup, the network, or the disk image in the IDER drive.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Boot {
+    Bios,
+    Pxe,
+    Image,
+}
+
 impl<'a> BootSettingData<'a> {
-    /// Intel's console keeps the device's own names and secure boot, clears the rest, and boots into the BIOS setup
-    /// or not.
-    fn once(current: &'a Instance, bios: bool) -> Self {
+    /// Intel's console keeps the device's own names and secure boot, clears the rest, and says where to boot: the
+    /// BIOS setup, or IDER's CD-ROM (its device 1).
+    fn once(current: &'a Instance, boot: Boot) -> Self {
         let kept = |name| current.get(name).unwrap_or_default();
         Self {
             BIOSPause: false,
-            BIOSSetup: bios,
+            BIOSSetup: boot == Boot::Bios,
             BootMediaIndex: 0,
             ConfigurationDataReset: false,
             ElementName: kept("ElementName"),
             EnforceSecureBoot: current.get("EnforceSecureBoot") == Some("true"),
             FirmwareVerbosity: 0,
             ForcedProgressEvents: false,
-            IDERBootDevice: 0,
+            IDERBootDevice: u8::from(boot == Boot::Image),
             InstanceID: kept("InstanceID"),
             LockKeyboard: false,
             LockPowerButton: false,
@@ -245,7 +258,7 @@ impl<'a> BootSettingData<'a> {
             SecureErase: false,
             UefiBootParametersArray: "",
             UefiBootNumberOfParams: 0,
-            UseIDER: false,
+            UseIDER: boot == Boot::Image,
             UseSOL: false,
             UseSafeMode: false,
             UserPasswordBypass: false,
@@ -281,7 +294,7 @@ mod tests {
             .map(|(name, value)| (name.into(), value.into()))
             .into(),
         };
-        let request = wsman::put(BOOT_SETTINGS, &BootSettingData::once(&current, false), 0);
+        let request = wsman::put(BOOT_SETTINGS, &BootSettingData::once(&current, Boot::Pxe), 0);
         assert_eq!(body_meaning(&request), meaning(expected));
     }
 }

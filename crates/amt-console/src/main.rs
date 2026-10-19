@@ -6,6 +6,7 @@ mod hosts;
 
 use std::collections::HashMap;
 use std::fmt::Display;
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use amt_core::{
@@ -14,13 +15,13 @@ use amt_core::{
 use clap::Parser;
 use hosts::{Device, Hosts};
 use serde::Serialize;
-use tauri::async_runtime::Mutex;
-use tauri::ipc::Response;
+use tauri::async_runtime::{JoinHandle, Mutex};
+use tauri::ipc::{Channel, Response};
 use tauri::{AppHandle, State, WebviewWindow};
 use ts_rs::TS;
 
 /// One session per connected device: its client, on its own lock as AMT wants its calls one at a time (other devices
-/// don't care), and its screen while one is open.
+/// don't care), its screen while one is open and the disk image in its drive.
 #[derive(Default)]
 struct Sessions(std::sync::Mutex<HashMap<String, Session>>);
 
@@ -28,6 +29,16 @@ struct Sessions(std::sync::Mutex<HashMap<String, Session>>);
 struct Session {
     client: Arc<Mutex<Client>>,
     kvm: Option<Arc<Kvm>>,
+    image: Option<Arc<Image>>,
+}
+
+/// The task serving a disk image, which stops with the last copy of it.
+struct Image(JoinHandle<()>);
+
+impl Drop for Image {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
 }
 
 impl Sessions {
@@ -38,6 +49,16 @@ impl Sessions {
 
     fn kvm(&self, host: &str) -> Result<Arc<Kvm>, CommandError> {
         self.get(host)?.kvm.ok_or_else(|| CommandError::failed("The screen isn't open."))
+    }
+
+    fn update<T>(&self, host: &str, change: impl FnOnce(&mut Session) -> T) -> Option<T> {
+        self.0.lock().unwrap().get_mut(host).map(change)
+    }
+
+    async fn close_kvm(&self, host: &str) {
+        if let Some(kvm) = self.update(host, |session| session.kvm.take()).flatten() {
+            kvm.close().await;
+        }
     }
 }
 
@@ -91,7 +112,11 @@ async fn connect(
     if remember {
         hosts.remember(&target)?;
     }
-    sessions.0.lock().unwrap().insert(target.host, Session { client: Arc::new(Mutex::new(client)), kvm: None });
+    sessions
+        .0
+        .lock()
+        .unwrap()
+        .insert(target.host, Session { client: Arc::new(Mutex::new(client)), kvm: None, image: None });
     Ok(info)
 }
 
@@ -113,7 +138,12 @@ fn trust(app: AppHandle, host: &str, fingerprint: String) -> Result<(), CommandE
 
 #[tauri::command]
 async fn set_power(sessions: State<'_, Sessions>, host: &str, action: PowerAction) -> Result<(), CommandError> {
-    Ok(sessions.get(host)?.client.lock().await.set_power(action).await?)
+    let session = sessions.get(host)?;
+    let serving = session.image.is_some_and(|image| !image.0.inner().is_finished());
+    if matches!(action, PowerAction::OnToImage | PowerAction::ResetToImage) && !serving {
+        return Err(CommandError::failed("No disk image is mounted, mount one again."));
+    }
+    Ok(session.client.lock().await.set_power(action).await?)
 }
 
 /// What the UI reads from a session: a command per `Client` read, named after it.
@@ -128,13 +158,12 @@ macro_rules! reads {
 
 reads!(power: Power, status: Status, hardware: Hardware, settings: Settings, event_log: Vec<Event>, audit_log: Vec<AuditRecord>);
 
-/// Opens the device's screen, see `Client::kvm`. One at a time per device, a second replaces the first.
+/// Opens the device's screen, see `Client::kvm`, closing the one that may be open: AMT takes one at a time.
 #[tauri::command]
 async fn kvm_open(sessions: State<'_, Sessions>, host: &str) -> Result<(), CommandError> {
-    let kvm = sessions.get(host)?.client.lock().await.kvm().await?;
-    if let Some(session) = sessions.0.lock().unwrap().get_mut(host) {
-        session.kvm = Some(Arc::new(kvm));
-    }
+    sessions.close_kvm(host).await;
+    let kvm = Arc::new(sessions.get(host)?.client.lock().await.kvm().await?);
+    sessions.update(host, |session| session.kvm = Some(kvm));
     Ok(())
 }
 
@@ -149,12 +178,40 @@ async fn kvm_input(sessions: State<'_, Sessions>, host: &str, inputs: Vec<Input>
     Ok(sessions.kvm(host)?.input(inputs).await?)
 }
 
-/// The session ends once a `kvm_frame` still waiting is done with it.
 #[tauri::command]
-fn kvm_close(sessions: State<'_, Sessions>, host: &str) {
-    if let Some(session) = sessions.0.lock().unwrap().get_mut(host) {
-        session.kvm = None;
-    }
+async fn kvm_close(sessions: State<'_, Sessions>, host: &str) -> Result<(), CommandError> {
+    sessions.close_kvm(host).await;
+    Ok(())
+}
+
+/// Asks for a disk image. Native dialogs want the main thread, where a command that isn't async runs.
+#[tauri::command]
+fn ider_pick(window: WebviewWindow) -> Option<PathBuf> {
+    rfd::FileDialog::new().set_parent(&window).add_filter("Disk image", &["iso"]).pick_file()
+}
+
+/// Puts the image at `path` in the device's drive (see `Client::ider`) and says its name, then how much of it the
+/// device read on `reads` as it goes. AMT has one drive, so the image in it comes out first.
+#[tauri::command]
+async fn ider_mount(
+    sessions: State<'_, Sessions>,
+    host: &str,
+    path: PathBuf,
+    reads: Channel<u64>,
+) -> Result<String, CommandError> {
+    let file = std::fs::File::open(&path)?;
+    sessions.update(host, |session| session.image = None);
+    let ider = sessions.get(host)?.client.lock().await.ider(file).await?;
+    // How serving ended doesn't matter, booting from the image says it's gone.
+    let serve = ider.serve(move |served| reads.send(served).unwrap_or_default());
+    let image = Arc::new(Image(tauri::async_runtime::spawn(async move { serve.await.unwrap_or_default() })));
+    sessions.update(host, |session| session.image = Some(image));
+    Ok(path.file_name().unwrap_or_default().to_string_lossy().into_owned())
+}
+
+#[tauri::command]
+fn ider_eject(sessions: State<'_, Sessions>, host: &str) {
+    sessions.update(host, |session| session.image = None);
 }
 
 /// The window is titled after the session on screen.
@@ -225,7 +282,8 @@ fn main() {
         .manage(Sessions::default())
         .invoke_handler(tauri::generate_handler![
             launch, devices, connect, disconnect, forget, trust, power, set_power, status, hardware, settings,
-            event_log, audit_log, kvm_open, kvm_frame, kvm_input, kvm_close, title, fullscreen
+            event_log, audit_log, kvm_open, kvm_frame, kvm_input, kvm_close, ider_pick, ider_mount, ider_eject, title,
+            fullscreen
         ])
         .run(tauri::generate_context!())
         .expect("the Tauri runtime starts");

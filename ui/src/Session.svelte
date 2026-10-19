@@ -1,5 +1,5 @@
-<!-- An open session: its power and a tab at a time. Pages stay until refreshed, so going back to a tab shows it at
-     once. A device that stops answering is `onlost`. -->
+<!-- An open session: its power, the disk image in its drive and a tab at a time. Pages stay until refreshed, so going
+     back to a tab shows it at once. Whether a device that doesn't answer is gone is App's to say. -->
 <script module lang="ts">
   import type { Info, Power, PowerAction, PowerState } from "./bindings/core";
 
@@ -7,16 +7,23 @@
     host: string;
     info: Info;
     power?: Power;
+    /** Since when it hasn't answered, see App's `refreshPower`. */
+    silent?: number;
     /** Set from a power change until the state moves or a minute has passed, a reset never shows as another state. */
     changing?: { from: PowerState; until: number };
     /** By tab: what it read, or why it couldn't, and when. */
     pages: Record<string, { data?: unknown; error?: string; read?: Date }>;
+    /** The disk image in its drive: its name, how much of it the device read and how fast (bytes a second), and
+     * whether it did in the last minute. */
+    image?: { name: string; read: number; rate: number; recent: boolean };
+    /** Whether its screen was opened: it stays open across tabs. */
+    kvm?: boolean;
   }
 </script>
 
 <script lang="ts">
-  import { ChevronDown, RefreshCw } from "@lucide/svelte";
-  import { invoke } from "@tauri-apps/api/core";
+  import { ChevronDown, Disc3, LoaderCircle, RefreshCw, X } from "@lucide/svelte";
+  import { Channel, invoke } from "@tauri-apps/api/core";
   import type { CommandError } from "./bindings/console";
   import AuditLog from "./pages/AuditLog.svelte";
   import EventLog from "./pages/EventLog.svelte";
@@ -25,11 +32,7 @@
   import Settings from "./pages/Settings.svelte";
   import Status from "./pages/Status.svelte";
 
-  let {
-    session,
-    say,
-    onlost,
-  }: { session: Session; say: (text: string) => void; onlost: (error: CommandError) => void } = $props();
+  let { session, say }: { session: Session; say: (text: string) => void } = $props();
 
   /** The commands are named after the tabs that read. Status and the logs change often enough to want a refresh. The
    * KVM tab is a screen of its own, for devices that have one. */
@@ -44,9 +47,10 @@
   let page = $derived(tab === "kvm" ? undefined : session.pages[tab]);
   let live = $derived(tab !== "kvm" && TABS[tab].live);
 
-  // Whatever is on screen gets read, unless we have it.
+  // Whatever is on screen gets read, unless we have it. A screen, once opened, stays open.
   $effect(() => {
-    if (tab !== "kvm" && !session.pages[tab]) read();
+    if (tab === "kvm") session.kvm = true;
+    else if (!session.pages[tab]) read();
   });
 
   /** Reads the tab afresh. It starts blank, so a refresh shows it happened, and replaces the page, so whatever the one
@@ -58,7 +62,7 @@
       page.data = await invoke(name, { host: session.host });
       page.read = new Date();
     } catch (error) {
-      failed(error, (message) => (page.error = message));
+      page.error = reason(error);
     }
   }
 
@@ -79,15 +83,48 @@
       if (session.power) session.changing = { from: session.power.state, until: Date.now() + 60_000 };
       say(`${label} sent.`);
     } catch (error) {
-      failed(error, say);
+      say(reason(error));
     }
   }
 
-  /** A device that stopped answering is lost, anything else is said where it happened. */
-  function failed(error: unknown, show: (message: string) => void) {
-    const failure = error as CommandError;
-    if (failure.kind === "Unreachable") onlost(failure);
-    else show(failure.message ?? String(error));
+  let mounting = $state(false);
+
+  /** The image is read from here as the device asks for it, the file never goes through the webview. Rust tells us how
+   * much it read so far, its rate we work out every second. */
+  async function mount() {
+    const path = await invoke<string | null>("ider_pick");
+    if (!path) return;
+    mounting = true;
+    let image: Session["image"];
+    const reads = new Channel<number>();
+    reads.onmessage = (read) => image && (image.read = read);
+    try {
+      const name = await invoke<string>("ider_mount", { host: session.host, path, reads });
+      session.image = { name, read: 0, rate: 0, recent: false };
+      const mounted = (image = session.image);
+      let [last, quiet] = [0, Infinity];
+      const tick = setInterval(() => {
+        if (session.image !== mounted) return clearInterval(tick);
+        [mounted.rate, last] = [mounted.read - last, mounted.read];
+        quiet = mounted.rate ? 0 : quiet + 1;
+        mounted.recent = quiet < 60;
+      }, 1000);
+      say(`${name} is in the drive, the device sees it from its next boot on.`);
+    } catch (error) {
+      say(reason(error));
+    } finally {
+      mounting = false;
+    }
+  }
+
+  function eject() {
+    invoke("ider_eject", { host: session.host });
+    session.image = undefined;
+  }
+
+  /** Our commands fail with a `CommandError`, Tauri itself with a string. */
+  function reason(error: unknown) {
+    return (error as CommandError).message ?? String(error);
   }
 
   // ⌘R would reload the whole app, we read the tab again instead.
@@ -121,7 +158,7 @@
     class="block h-8 w-full rounded-md px-3 text-left enabled:hover:bg-accent enabled:hover:text-white disabled:text-muted"
     popovertarget="power-menu"
     popovertargetaction="hide"
-    disabled={!session.power?.actions.includes(name)}
+    disabled={!session.power?.actions.includes(name) || (name.endsWith("Image") && !session.image)}
     title={help}
     onclick={() => choose(name, label)}
   >
@@ -138,7 +175,20 @@
       title={session.power && session.power.state + (session.changing ? ", changing…" : "")}
     ></span>
     <h1 class="truncate text-xl font-semibold">{session.info.name}</h1>
-    <button type="button" class="btn btn-secondary ml-auto" popovertarget="power-menu">
+    <!-- The disk image in the device's drive, for booting from (IDER). -->
+    {#if session.image}
+      <!-- Lit while the device reads, like a drive's light. -->
+      <span class="ml-auto flex min-w-0 items-center gap-2 text-muted" title="In the device's drive">
+        <Disc3 class={["size-4 flex-none", session.image.rate && "text-accent"]} />
+        <span class="truncate">{session.image.name}</span>
+        <button type="button" class="btn-icon size-7 flex-none" title="Eject" onclick={eject}><X class="size-4" /></button>
+      </span>
+    {:else}
+      <button type="button" class="btn btn-secondary ml-auto" disabled={mounting} onclick={mount}>
+        {#if mounting}<LoaderCircle class="size-4 animate-spin" />{:else}<Disc3 class="size-4" />{/if} Disk image…
+      </button>
+    {/if}
+    <button type="button" class="btn btn-secondary" popovertarget="power-menu">
       Power <ChevronDown class="size-4" />
     </button>
     <!-- Grouped: power on, asking the OS, acting at once, and booting elsewhere this once. -->
@@ -163,6 +213,8 @@
       {@render action("ResetToBios", "Reset to BIOS", "Resets at once into the BIOS setup, this once.")}
       {@render action("OnToPxe", "Power on to PXE", "Powers on and boots from the network, this once.")}
       {@render action("ResetToPxe", "Reset to PXE", "Resets at once and boots from the network, this once.")}
+      {@render action("OnToImage", "Power on to disk image", "Powers on and boots from the image, this once.")}
+      {@render action("ResetToImage", "Reset to disk image", "Resets at once and boots from the image, this once.")}
     </div>
   </header>
 
@@ -185,9 +237,10 @@
     {/if}
   </div>
 
-  {#if tab === "kvm"}
-    <Kvm host={session.host} />
-  {:else}
+  {#if session.kvm}
+    <Kvm host={session.host} hidden={tab !== "kvm"} />
+  {/if}
+  {#if tab !== "kvm"}
     {@const Page = TABS[tab].page}
     <main class="overflow-y-auto px-8 pb-8 @container [scrollbar-gutter:stable]">
       <div class="mx-auto grid max-w-5xl gap-12 pt-6" aria-busy={!page?.data && !page?.error}>

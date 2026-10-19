@@ -30,8 +30,10 @@ Everything is `text-sm` (14px) unless it's a title. Sentence case, never upperca
 - Loading: the page itself, `aria-busy`, with gray bars where values go. Left out by the device: a dash. Both are CSS on
   empty `dt`, `dd`, `td` and `h3`, so markup just writes `{value}`. Not there at all (no battery): say so in words.
 - Waiting on the device after a click: a spinning `LoaderCircle` where the click was (button, sidebar entry).
-- Errors: in the page or form with a way to try again, in the footer for actions. A device that stops answering is let
-  go of, and the form says so.
+- The footer says what actions did for as long as it takes to read, what's true now (a device not answering) for
+  as long as it is, and on its right how fast the disk image in the drive is read, while it is and a minute after.
+- Errors: in the page or form with a way to try again, in the footer for actions. A device that stops answering for two
+  minutes is let go of, and the form says so, until then it's retried.
 
 ## Controls
 

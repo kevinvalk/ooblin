@@ -6,15 +6,13 @@ use std::collections::HashMap;
 use std::time::Duration;
 
 use flate2::{Decompress, FlushDecompress};
-use instant_xml::ToXml;
 use serde::Deserialize;
 use tokio::io::{AsyncReadExt, AsyncWriteExt, ReadHalf, WriteHalf};
 use tokio::sync::Mutex;
 use ts_rs::TS;
 
 use crate::net::{Redirection, Session, Stream};
-use crate::wsman::Method;
-use crate::{Client, Error, Result, Target};
+use crate::{Client, Error, Result};
 
 /// What the webview sends: keys by their DOM `code` (where they sit, not what they type), the mouse with the DOM
 /// `buttons` it holds and a notch of `scroll` up (negative) or down (positive), text to type, and letting go of every
@@ -56,40 +54,14 @@ struct Keyboard {
 const RGB565: [u8; 13] = [16, 16, 0, 1, 0, 31, 0, 63, 0, 31, 11, 5, 0];
 
 impl Client {
-    /// Opens the device's screen, turning KVM and the redirection listener on first if they're off, the way Intel's
-    /// console does (`SetFeatures`).
+    /// Opens the device's screen, turning KVM on first if need be.
     pub async fn kvm(&mut self) -> Result<Kvm> {
-        let kvm = self.get("CIM_KVMRedirectionSAP").await?;
-        // Enabled (2) or enabled but idle (6).
-        if !matches!(kvm.get("EnabledState"), Some("2" | "6")) {
-            self.invoke(&RequestStateChange { RequestedState: 2 }).await?;
-        }
-        let redirection = self.get("AMT_RedirectionService").await?;
-        if redirection.get("ListenerEnabled") != Some("true") {
-            let kept = |name| redirection.get(name).unwrap_or_default();
-            let listening = RedirectionService {
-                CreationClassName: kept("CreationClassName"),
-                ElementName: kept("ElementName"),
-                EnabledState: kept("EnabledState"),
-                ListenerEnabled: true,
-                Name: kept("Name"),
-                SystemCreationClassName: kept("SystemCreationClassName"),
-                SystemName: kept("SystemName"),
-            };
-            self.put(REDIRECTION_SERVICE, &listening).await?;
-        }
-        // Like MeshCommander: consent is needed unless it's not required or already given (3) or in use (4).
-        let consent = self.get("IPS_OptInService").await?;
-        if consent.get("OptInRequired") != Some("0") && !matches!(consent.get("OptInState"), Some("3" | "4")) {
-            return Err(Error::Protocol("KVM needs user consent here, which we can't ask for yet".into()));
-        }
-        Kvm::open(&self.target, self.fingerprint()).await
+        Kvm::open(self.redirect(Session::Kvm).await?).await
     }
 }
 
 impl Kvm {
-    async fn open(target: &Target, pin: Option<String>) -> Result<Self> {
-        let mut redirection = Redirection::open(target, pin, Session::Kvm).await?;
+    async fn open(mut redirection: Redirection) -> Result<Self> {
         // AMT starts the KVM data, then RFB: AMT 19 says 4.0 and takes 3.8, no RFB security as the redirection
         // handshake already authenticated us, a shared screen.
         redirection.write_all(&[0x40, 0, 0, 0, 0, 0, 0, 0]).await?;
@@ -185,6 +157,13 @@ impl Kvm {
         Ok(screen.size(frame))
     }
 
+    /// Ends the session once a frame still on its way is in (a second at most), saying goodbye rather than just
+    /// going: AMT takes one KVM session at a time, and the next one may already be coming.
+    pub async fn close(&self) {
+        let _screen = self.screen.lock().await;
+        let _ = self.keyboard.lock().await.writer.shutdown().await;
+    }
+
     pub async fn input(&self, inputs: Vec<Input>) -> Result<()> {
         let mut keyboard = self.keyboard.lock().await;
         for input in inputs {
@@ -220,8 +199,10 @@ impl Screen {
 }
 
 impl Keyboard {
+    /// TLS may hold on to what we write until we flush.
     async fn send(&mut self, bytes: &[u8]) -> Result<()> {
-        Ok(self.writer.write_all(bytes).await?)
+        self.writer.write_all(bytes).await?;
+        Ok(self.writer.flush().await?)
     }
 
     async fn input(&mut self, input: Input) -> Result<()> {
@@ -414,59 +395,4 @@ fn zrle(mut data: &[u8], width: usize, height: usize, out: &mut Vec<u8>) -> Opti
         _ => return None,
     }
     (out.len() == end).then_some(())
-}
-
-// The input and settings below are go-wsman-messages' (`pkg/wsman/cim/kvm`, `amt/redirection`), Copyright Intel
-// Corporation, Apache-2.0.
-
-const KVM_REDIRECTION: &str = "http://schemas.dmtf.org/wbem/wscim/1/cim-schema/2/CIM_KVMRedirectionSAP";
-const REDIRECTION_SERVICE: &str = "http://intel.com/wbem/wscim/1/amt-schema/1/AMT_RedirectionService";
-
-#[derive(ToXml)]
-#[xml(rename = "RequestStateChange_INPUT", ns(KVM_REDIRECTION))]
-struct RequestStateChange {
-    RequestedState: u8,
-}
-
-impl Method for RequestStateChange {
-    const URI: &'static str = KVM_REDIRECTION;
-    const NAME: &'static str = "RequestStateChange";
-}
-
-#[derive(ToXml)]
-#[xml(rename = "AMT_RedirectionService", ns(REDIRECTION_SERVICE))]
-struct RedirectionService<'a> {
-    CreationClassName: &'a str,
-    ElementName: &'a str,
-    EnabledState: &'a str,
-    ListenerEnabled: bool,
-    Name: &'a str,
-    SystemCreationClassName: &'a str,
-    SystemName: &'a str,
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::wsman::{self, body_meaning, meaning};
-
-    #[test]
-    fn turns_kvm_on_like_go_wsman_messages() {
-        // From go-wsman-messages' `base_test.go` and `service_test.go`.
-        let expected = r#"<h:RequestStateChange_INPUT xmlns:h="http://schemas.dmtf.org/wbem/wscim/1/cim-schema/2/CIM_KVMRedirectionSAP"><h:RequestedState>2</h:RequestedState></h:RequestStateChange_INPUT>"#;
-        let request = wsman::invoke(&RequestStateChange { RequestedState: 2 }, 0);
-        assert_eq!(body_meaning(&request), meaning(expected));
-
-        let expected = r#"<h:AMT_RedirectionService xmlns:h="http://intel.com/wbem/wscim/1/amt-schema/1/AMT_RedirectionService"><h:CreationClassName>AMT_RedirectionService</h:CreationClassName><h:ElementName>Intel(r) AMT Redirection Service</h:ElementName><h:EnabledState>32771</h:EnabledState><h:ListenerEnabled>true</h:ListenerEnabled><h:Name>Intel(r) AMT Redirection Service</h:Name><h:SystemCreationClassName>CIM_ComputerSystem</h:SystemCreationClassName><h:SystemName>Intel(r) AMT</h:SystemName></h:AMT_RedirectionService>"#;
-        let service = RedirectionService {
-            CreationClassName: "AMT_RedirectionService",
-            ElementName: "Intel(r) AMT Redirection Service",
-            EnabledState: "32771",
-            ListenerEnabled: true,
-            Name: "Intel(r) AMT Redirection Service",
-            SystemCreationClassName: "CIM_ComputerSystem",
-            SystemName: "Intel(r) AMT",
-        };
-        assert_eq!(body_meaning(&wsman::put(REDIRECTION_SERVICE, &service, 0)), meaning(expected));
-    }
 }
