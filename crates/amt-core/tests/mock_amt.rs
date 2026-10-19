@@ -284,27 +284,35 @@ async fn shows_the_ms_02_screen() -> Result<()> {
     Ok(())
 }
 
-/// Every kind of ZRLE tile (RFC 6143 7.7.6), all on one zlib stream, on a 3 by 10 screen.
+/// Every kind of ZRLE tile (RFC 6143 7.7.6), all on one zlib stream, on a 3 by 14 screen. And as AMT has it, a tile it
+/// didn't compress outside that stream, a zlib stored block, which the next tile's back-references must not see.
 #[tokio::test]
 async fn decodes_every_kind_of_zrle_tile() -> Result<()> {
     let [r, g, b] = [0xF800u16, 0x07E0, 0x001F].map(u16::to_le_bytes);
     let tiles = [
         ([&[1][..], &r].concat(), [r, r, r, r, r, r]),                     // solid
         ([&[0][..], &r, &g, &b, &b, &g, &r].concat(), [r, g, b, b, g, r]), // raw
-        ([&[2][..], &r, &b, &[0b010_00000, 0b101_00000]].concat(), [r, b, r, b, r, b]), // a bit each, rows padded
+        ([&[2][..], &r, &b, &[0b0101_0100]].concat(), [r, b, r, b, r, b]), // a bit each, across rows
         ([&[128][..], &r, &[1], &g, &[3]].concat(), [r, r, g, g, g, g]),   // runs
         ([&[131][..], &r, &g, &b, &[0x80, 2, 0x81, 1, 2]].concat(), [r, r, r, g, g, b]), // runs of a palette
+        ([&[0][..], &b, &b, &b, &g, &g, &g].concat(), [b, b, b, g, g, g]), // stored, see below
+        ([&[0][..], &r, &g, &b, &b, &g, &r].concat(), [r, g, b, b, g, r]), // the raw one again
     ];
     let mut update = vec![0, 0, 0, tiles.len() as u8];
     let mut zlib = Compress::new(Compression::default(), true);
     for (i, (tile, _)) in tiles.iter().enumerate() {
         let mut data = Vec::with_capacity(1024);
-        zlib.compress_vec(tile, &mut data, FlushCompress::Sync)?;
+        if i == 5 {
+            let len = (tile.len() as u16).to_le_bytes();
+            data = [&[0][..], &len, &len.map(|byte| !byte), tile].concat();
+        } else {
+            zlib.compress_vec(tile, &mut data, FlushCompress::Sync)?;
+        }
         update.extend(
             [&[0, 0, 0, 2 * i as u8, 0, 3, 0, 2, 0, 0, 0, 16][..], &(data.len() as u32).to_be_bytes(), &data].concat(),
         );
     }
-    let init = [0, 3, 0, 10, 16, 16, 0, 1, 0, 31, 0, 63, 0, 31, 11, 5, 0, 0, 0, 0, 0, 0, 0, 0];
+    let init = [0, 3, 0, 14, 16, 16, 0, 1, 0, 31, 0, 63, 0, 31, 11, 5, 0, 0, 0, 0, 0, 0, 0, 0];
     let fixture = tempfile::tempdir()?;
     let (sent, received) =
         (|bytes: &[u8]| (Direction::Sent, bytes.to_vec()), |bytes: &[u8]| (Direction::Received, bytes.to_vec()));
@@ -330,7 +338,7 @@ async fn decodes_every_kind_of_zrle_tile() -> Result<()> {
     let amt = start(fixture.path()).await;
     let frame = client(&amt, PASSWORD, None)?.kvm().await?.frame().await?;
     let rects = rects(&frame);
-    assert_eq!((&frame[..4], rects.len()), (&[3, 0, 10, 0][..], tiles.len()));
+    assert_eq!((&frame[..4], rects.len()), (&[3, 0, 14, 0][..], tiles.len()));
     let rgba = |pixel: [u8; 2]| match pixel {
         pixel if pixel == r => [255, 0, 0, 255],
         pixel if pixel == g => [0, 255, 0, 255],

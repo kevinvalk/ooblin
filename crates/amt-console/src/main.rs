@@ -20,6 +20,7 @@ use tauri::async_runtime::{JoinHandle, Mutex};
 use tauri::ipc::{Channel, Response};
 use tauri::{AppHandle, State, WebviewWindow};
 use tauri_plugin_opener::OpenerExt;
+use tauri_plugin_window_state::StateFlags;
 use ts_rs::TS;
 
 /// One session per connected device: its client, on its own lock as AMT wants its calls one at a time (other devices
@@ -429,6 +430,12 @@ fn main() {
 
     builder
         .plugin(tauri_plugin_opener::init())
+        // The window opens where and as large as it was, but neither hidden (the verify build's) nor full screen.
+        .plugin(
+            tauri_plugin_window_state::Builder::default()
+                .with_state_flags(StateFlags::SIZE | StateFlags::POSITION | StateFlags::MAXIMIZED)
+                .build(),
+        )
         .manage(Args::parse())
         .manage(Sessions::default())
         .manage(Discovery::default())

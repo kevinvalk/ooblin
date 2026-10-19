@@ -3,7 +3,7 @@
 # hidden so it never steals focus, and without CSP because the MCP bridge injects inline scripts.
 verify = [
   "tauri", "build", "--debug", "--no-bundle",
-  "--config", '{"identifier":"io.codean.amt-console.verify","app":{"windows":[{"width":1180,"height":800,"visible":false}],"security":{"csp":null}}}',
+  "--config", '{"identifier":"io.codean.amt-console.verify","app":{"windows":[{"width":1180,"height":860,"visible":false}],"security":{"csp":null}}}',
 ]
 
 # `cargo test` writes the types the UI sees to ui/src/bindings (ts-rs), a file per crate, numbers not bigints.

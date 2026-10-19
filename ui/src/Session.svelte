@@ -22,6 +22,8 @@
     sol?: boolean;
     /** What they wait for while they're not open, for the footer. */
     status?: { kvm?: string; sol?: string };
+    /** The screen's size and updates a second while it's shown, for the footer. */
+    screen?: { width: number; height: number; fps: number };
   }
 
   /** Our commands fail with a `CommandError`, Tauri itself with a string. */
@@ -362,6 +364,7 @@
       hidden={tab !== "kvm"}
       consent={() => consent("kvm")}
       status={(text) => ((session.status ??= {}).kvm = text)}
+      measured={(screen) => (session.screen = screen)}
     />
   {/if}
   {#if session.sol}

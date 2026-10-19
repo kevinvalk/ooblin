@@ -30,6 +30,8 @@
   let collapsed = $state(false);
   /** The disk image in the drive of the device on screen, see Session. */
   let image = $derived(current ? sessions[current]?.image : undefined);
+  /** And its screen, while shown, see Kvm. */
+  let screen = $derived(current ? sessions[current]?.screen : undefined);
   let message = $state({ text: "", failed: false });
   /** What the screen or serial console of the device on screen waits for, under what was just said. */
   let waiting = $derived(Object.values((current && sessions[current]?.status) || {}).find(Boolean));
@@ -294,15 +296,22 @@ takes seconds, a /16 (the most at a time) minutes."
         {message.text}
       </output>
     {/if}
-    <!-- Only while the device reads, and a minute after. -->
-    {#if image?.recent}
-      <span
-        class="ml-auto pr-1.5 whitespace-nowrap text-muted tabular-nums"
-        title="How fast the device reads the disk image. AMT tops out at about 1 MB/s: each read goes through its small
+    <span class="ml-auto flex gap-6 pr-1.5 whitespace-nowrap text-muted tabular-nums">
+      <!-- While the screen is shown. -->
+      {#if screen}
+        <span title="The device's screen, and the updates a second it sends">
+          KVM {screen.width} × {screen.height}, {screen.fps} fps
+        </span>
+      {/if}
+      <!-- Only while the device reads, and a minute after. -->
+      {#if image?.recent}
+        <span
+          title="How fast the device reads the disk image. AMT tops out at about 1 MB/s: each read goes through its small
 management engine, and the device waits on every one."
-      >
-        Disk image {(image.rate / 1e6).toFixed(2)} MB/s
-      </span>
-    {/if}
+        >
+          Disk image {(image.rate / 1e6).toFixed(2)} MB/s
+        </span>
+      {/if}
+    </span>
   </footer>
 </div>

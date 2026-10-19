@@ -3,7 +3,7 @@
 //! so the webview only paints.
 
 use std::collections::HashMap;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use flate2::{Decompress, FlushDecompress};
 use serde::{Deserialize, Serialize};
@@ -39,10 +39,21 @@ struct Screen {
     inflater: Decompress,
     width: u16,
     height: u16,
+    /// Bytes a pixel: 2 (RGB565), or 1 (RGB332) for a screen too large for AMT at 2.
+    bytes: usize,
     /// Whether we asked for an update the device hasn't sent yet, and whether the next is for the whole screen.
     asked: bool,
     whole: bool,
+    /// AMT misses some changes (a screen gone black where text was, say), which the whole screen anew puts right: we
+    /// ask for it `QUIET` after the last change, or `BUSY` after we last did while changes keep coming. These say when
+    /// the last change since we last asked came, when we did, and whether its answer, which isn't one, is to come.
+    changed: Option<Instant>,
+    anew: Instant,
+    answer: bool,
 }
+
+const QUIET: Duration = Duration::from_millis(500);
+const BUSY: Duration = Duration::from_secs(1);
 
 /// Update requests, keys and the mouse, and the keysym each held key went down as.
 struct Keyboard {
@@ -52,6 +63,10 @@ struct Keyboard {
 
 /// 16-bit RGB565, little-endian: AMT's own pixel format, which MeshCommander and Intel's console keep.
 const RGB565: [u8; 13] = [16, 16, 0, 1, 0, 31, 0, 63, 0, 31, 11, 5, 0];
+/// 8-bit RGB332, as MeshCommander and Intel's console ask for it, for a screen whose RGB565 would be more than
+/// `LARGEST` bytes, the most AMT keeps (MeshCommander's limit): beyond 4K and AMT 18 on.
+const RGB332: [u8; 13] = [8, 8, 0, 1, 0, 7, 0, 7, 0, 3, 5, 2, 0];
+const LARGEST: usize = 9_216_000;
 
 /// The device's screens KVM can show, by number from 0, and the one it shows. Like MeshCommander, there's a choice once
 /// more than one is active.
@@ -108,8 +123,21 @@ impl Kvm {
 
         let (reader, writer) = redirection.split();
         let (width, height) = (u16::from_be_bytes([init[0], init[1]]), u16::from_be_bytes([init[2], init[3]]));
-        let screen = Screen { reader, inflater: Decompress::new(true), width, height, asked: false, whole: true };
-        Ok(Self { screen: Mutex::new(screen), keyboard: Mutex::new(Keyboard { writer, held: HashMap::new() }) })
+        let inflater = Decompress::new(true);
+        let screen = Screen {
+            reader,
+            inflater,
+            width,
+            height,
+            bytes: 2,
+            asked: false,
+            whole: true,
+            changed: None,
+            anew: Instant::now(),
+            answer: false,
+        };
+        let keyboard = Keyboard { writer, held: HashMap::new() };
+        Ok(Self { screen: Mutex::new(screen), keyboard: Mutex::new(keyboard) })
     }
 
     /// The next change on screen, the way a canvas takes it: the screen's width and height, then per changed
@@ -117,21 +145,20 @@ impl Kvm {
     /// nothing changed for a second, so a screen nobody asks for any more lets go of its session soon.
     pub async fn frame(&self) -> Result<Vec<u8>> {
         let mut screen = self.screen.lock().await;
-        if !screen.asked {
-            let request = [
-                &[3, u8::from(!screen.whole), 0, 0, 0, 0][..],
-                &screen.width.to_be_bytes(),
-                &screen.height.to_be_bytes(),
-            ];
-            self.keyboard.lock().await.send(&request.concat()).await?;
-            (screen.asked, screen.whole) = (true, false);
-        }
+        self.ask(&mut screen).await?;
         let mut frame = vec![0; 4];
         loop {
-            // Reading a byte gives up nothing when it times out.
+            // Until the whole screen anew is due, or a second. Reading a byte gives up nothing when it times out.
+            let due = screen.changed.map(|last| (last + QUIET).min(screen.anew + BUSY));
+            let wait = due.map_or(BUSY, |due| due.saturating_duration_since(Instant::now()).min(BUSY));
             let mut kind = [0];
-            match tokio::time::timeout(Duration::from_secs(1), screen.reader.read(&mut kind)).await {
-                Err(_) => return Ok(screen.size(frame)),
+            match tokio::time::timeout(wait, screen.reader.read(&mut kind)).await {
+                Err(_) => {
+                    if due.is_some_and(|due| due <= Instant::now()) {
+                        self.request(&mut screen, true).await?;
+                    }
+                    return Ok(screen.size(frame));
+                }
                 Ok(Ok(0)) => return Err(Error::Transport("the device ended the KVM session".into())),
                 Ok(read) => read?,
             };
@@ -162,23 +189,60 @@ impl Kvm {
                 // Raw and ZRLE: AMT sends at most 64 by 64 at a time, a tile.
                 encoding @ (0 | 16) if (1..=64).contains(&width) && (1..=64).contains(&height) => {
                     frame.extend([x, y, width, height].iter().flat_map(|value| value.to_le_bytes()));
-                    let pixels = usize::from(width) * usize::from(height);
+                    let (pixels, bytes) = (usize::from(width) * usize::from(height), screen.bytes);
                     if encoding == 0 {
-                        frame
-                            .extend(screen.read(pixels * 2).await?.as_chunks().0.iter().flat_map(|&pixel| rgba(pixel)));
+                        frame.extend(screen.read(pixels * bytes).await?.chunks(bytes).flat_map(rgba));
                     } else {
                         let len = u32::from_be_bytes(screen.read(4).await?.try_into().unwrap());
                         let data = screen.read(len as usize).await?;
-                        let tile = screen.inflate(&data)?;
-                        zrle(&tile, width.into(), height.into(), &mut frame)
+                        // Like Intel's console and MeshCommander: a tile AMT didn't compress comes as a zlib stored
+                        // block (0, then its length) outside the stream, which mustn't go into the inflater's history.
+                        let stored = data.len() > 5
+                            && data[0] == 0
+                            && usize::from(u16::from_le_bytes([data[1], data[2]])) == data.len() - 5;
+                        let tile = if stored { data[5..].to_vec() } else { screen.inflate(&data)? };
+                        zrle(&tile, bytes, width.into(), height.into(), &mut frame)
                             .ok_or_else(|| Error::Protocol("a ZRLE tile we can't decode".into()))?;
                     }
                 }
                 encoding => return Err(Error::Protocol(format!("a {width} by {height} rectangle in {encoding}"))),
             }
         }
+        if frame.len() > 4 && !std::mem::take(&mut screen.answer) {
+            screen.changed = Some(Instant::now());
+        }
+        // The next one's on its way while this one is painted.
         screen.asked = false;
+        self.ask(&mut screen).await?;
         Ok(screen.size(frame))
+    }
+
+    /// Asks for the next update unless we did, in the pixel format the screen's size wants: changing it means the
+    /// whole screen anew.
+    async fn ask(&self, screen: &mut Screen) -> Result<()> {
+        if screen.asked {
+            return Ok(());
+        }
+        let bytes = if usize::from(screen.width) * usize::from(screen.height) * 2 > LARGEST { 1 } else { 2 };
+        if bytes != screen.bytes {
+            let format = if bytes == 1 { RGB332 } else { RGB565 };
+            self.keyboard.lock().await.send(&[&[0, 0, 0, 0][..], &format, &[0; 3]].concat()).await?;
+            (screen.bytes, screen.whole) = (bytes, true);
+        }
+        let whole = screen.whole || screen.changed.is_some() && screen.anew.elapsed() >= BUSY;
+        self.request(screen, whole).await?;
+        (screen.asked, screen.whole) = (true, false);
+        Ok(())
+    }
+
+    /// Asks for an update: of what changed, or of the `whole` screen.
+    async fn request(&self, screen: &mut Screen, whole: bool) -> Result<()> {
+        let request = [[3, u8::from(!whole)], [0; 2], [0; 2], screen.width.to_be_bytes(), screen.height.to_be_bytes()];
+        self.keyboard.lock().await.send(&request.concat()).await?;
+        if whole {
+            (screen.changed, screen.anew, screen.answer) = (None, Instant::now(), true);
+        }
+        Ok(())
     }
 
     /// Ends the session once a frame still on its way is in (a second at most), saying goodbye rather than just
@@ -204,8 +268,8 @@ impl Screen {
         Ok(bytes)
     }
 
-    /// One tile's worth of the zlib stream. A 64 by 64 tile inflates to at most 3 bytes a pixel (RLE, runs of one)
-    /// and its palette, anything more isn't a tile.
+    /// One tile's worth of the zlib stream. A 64 by 64 tile inflates to at most 3 bytes a pixel (RLE in RGB565, runs
+    /// of one) and its palette, anything more isn't a tile.
     fn inflate(&mut self, data: &[u8]) -> Result<Vec<u8>> {
         let mut tile = Vec::with_capacity(64 * 64 * 3 + 512);
         let before = self.inflater.total_in();
@@ -352,17 +416,35 @@ fn keysym(code: &str, shift: bool) -> Option<u32> {
     })
 }
 
-/// A 16-bit pixel as RGBA, each channel stretched to the full byte so white stays white.
-fn rgba(pixel: [u8; 2]) -> [u8; 4] {
-    let pixel = u16::from_le_bytes(pixel);
-    let (r, g, b) = ((pixel >> 11) as u8, (pixel >> 5 & 63) as u8, (pixel & 31) as u8);
-    [r << 3 | r >> 2, g << 2 | g >> 4, b << 3 | b >> 2, 255]
+/// An RGB565 or RGB332 pixel as RGBA, each channel stretched to the full byte so white stays white.
+fn rgba(pixel: &[u8]) -> [u8; 4] {
+    match *pixel {
+        [low, high] => {
+            let pixel = u16::from_le_bytes([low, high]);
+            let (r, g, b) = ((pixel >> 11) as u8, (pixel >> 5 & 63) as u8, (pixel & 31) as u8);
+            [r << 3 | r >> 2, g << 2 | g >> 4, b << 3 | b >> 2, 255]
+        }
+        [byte] => RGB332_RGBA[usize::from(byte)],
+        _ => unreachable!("our pixels are 1 or 2 bytes"),
+    }
 }
 
-/// A ZRLE tile (RFC 6143 7.7.6) as RGBA, its pixels 16-bit. `None` when the data doesn't add up to the tile.
-fn zrle(mut data: &[u8], width: usize, height: usize, out: &mut Vec<u8>) -> Option<()> {
+/// Every RGB332 pixel as RGBA, worked out once.
+const RGB332_RGBA: [[u8; 4]; 256] = {
+    let mut table = [[0; 4]; 256];
+    let mut pixel = 0;
+    while pixel < 256 {
+        let (r, g, b) = ((pixel >> 5) as u8, (pixel >> 2 & 7) as u8, (pixel & 3) as u8);
+        table[pixel] = [r << 5 | r << 2 | r >> 1, g << 5 | g << 2 | g >> 1, b * 85, 255];
+        pixel += 1;
+    }
+    table
+};
+
+/// A ZRLE tile (RFC 6143 7.7.6) as RGBA, its pixels `bytes` each. `None` when the data doesn't add up to the tile.
+fn zrle(mut data: &[u8], bytes: usize, width: usize, height: usize, out: &mut Vec<u8>) -> Option<()> {
     let data = &mut data;
-    let pixel = |data: &mut &[u8]| Some(rgba(data.split_off(..2)?.try_into().ok()?));
+    let pixel = |data: &mut &[u8]| Some(rgba(data.split_off(..bytes)?));
     let end = out.len() + width * height * 4;
     let kind = *data.split_off_first()?;
     let colors = match kind {
@@ -388,19 +470,18 @@ fn zrle(mut data: &[u8], width: usize, height: usize, out: &mut Vec<u8>) -> Opti
     match kind {
         0 => (0..width * height).try_for_each(|_| fill(out, pixel(data)?, 1))?,
         1 => fill(out, pixel(data)?, width * height)?,
-        // Indexes of 1, 2 or 4 bits, each row starting on a byte.
+        // Indexes of 1, 2 or 4 bits, packed across rows: Intel's console and MeshCommander read AMT's that way, where
+        // RFC 6143 starts each row on a byte.
         2..=16 => {
             let bits = match colors {
                 2 => 1,
                 3 | 4 => 2,
                 _ => 4,
             };
-            for _ in 0..height {
-                let row = data.split_off(..(width * bits).div_ceil(8))?;
-                for x in 0..width {
-                    let index = row[x * bits / 8] >> (8 - bits - x * bits % 8) & ((1 << bits) - 1);
-                    fill(out, *palette.get(usize::from(index))?, 1)?;
-                }
+            let indexes = data.split_off(..(width * height * bits).div_ceil(8))?;
+            for i in 0..width * height {
+                let index = indexes[i * bits / 8] >> (8 - bits - i * bits % 8) & ((1 << bits) - 1);
+                fill(out, *palette.get(usize::from(index))?, 1)?;
             }
         }
         128 => {
@@ -419,4 +500,23 @@ fn zrle(mut data: &[u8], width: usize, height: usize, out: &mut Vec<u8>) -> Opti
         _ => return None,
     }
     (out.len() == end).then_some(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn reads_rgb332_like_meshcommander() {
+        // MeshCommander's `SetPixelFormat` for it, `0, 0, 0, 0, 8, 8, 0, 1, 7, 7, 3 (as u16s), 5, 2, 0, 0, 0, 0`.
+        let set = [0, 0, 0, 0, 8, 8, 0, 1, 0, 7, 0, 7, 0, 3, 5, 2, 0, 0, 0, 0];
+        assert_eq!([&[0, 0, 0, 0][..], &RGB332, &[0; 3]].concat(), set);
+        // Red is the top 3 bits, green the next 3, blue the last 2, each stretched to the full byte.
+        let colors = [0xE0, 0x1C, 0x03, 0xFF, 0].map(|pixel| rgba(&[pixel]));
+        assert_eq!(colors, [[255, 0, 0, 255], [0, 255, 0, 255], [0, 0, 255, 255], [255; 4], [0, 0, 0, 255]]);
+        // A ZRLE tile of one color, a byte a pixel.
+        let mut out = Vec::new();
+        assert_eq!(zrle(&[1, 0xE0], 1, 2, 1, &mut out), Some(()));
+        assert_eq!(out, [255, 0, 0, 255].repeat(2));
+    }
 }

@@ -13,9 +13,19 @@
     hidden,
     consent,
     status,
-  }: { host: string; hidden: boolean; consent: () => Promise<boolean>; status: (text: string) => void } = $props();
+    measured,
+  }: {
+    host: string;
+    hidden: boolean;
+    consent: () => Promise<boolean>;
+    status: (text: string) => void;
+    measured: (screen?: { width: number; height: number; fps: number }) => void;
+  } = $props();
 
   let canvas: HTMLCanvasElement;
+  /** How wide the screen is, and how wide the canvas shows it in CSS pixels. */
+  let width = $state(0);
+  let shown = $state(0);
   let fullscreen = $state(false);
   /** Why it stopped, until connected again. */
   let stopped = $state("");
@@ -41,11 +51,23 @@
     );
   });
 
+  /** Updates painted this second, said each second with the screen's size, for the footer while it's shown: a screen
+   * that doesn't change has none. */
+  let painted = 0;
+  $effect(() => {
+    const counting = setInterval(() => {
+      measured(hidden || !canvas.width ? undefined : { width: canvas.width, height: canvas.height, fps: painted });
+      painted = 0;
+    }, 1000);
+    return () => (clearInterval(counting), measured());
+  });
+
   /** A frame is the screen's width and height, then per change its x, y, width, height and RGBA pixels. */
   function paint(context: CanvasRenderingContext2D, frame: ArrayBuffer) {
     const view = new DataView(frame);
     const u16 = (at: number) => view.getUint16(at, true);
-    if (canvas.width !== u16(0) || canvas.height !== u16(2)) [canvas.width, canvas.height] = [u16(0), u16(2)];
+    if (canvas.width !== u16(0) || canvas.height !== u16(2)) [width, canvas.width, canvas.height] = [u16(0), u16(0), u16(2)];
+    if (frame.byteLength > 4) painted++;
     for (let at = 4; at < frame.byteLength; ) {
       const [x, y, width, height] = [u16(at), u16(at + 2), u16(at + 4), u16(at + 6)];
       const pixels = new Uint8ClampedArray(frame, at + 8, width * height * 4);
@@ -73,7 +95,8 @@
 
   const mac = navigator.userAgent.includes("Mac");
 
-  function key(event: KeyboardEvent, down: boolean) {
+  function key(event: KeyboardEvent) {
+    const down = event.type === "keydown";
     event.preventDefault();
     event.stopPropagation();
     // The device repeats a held key itself.
@@ -86,12 +109,11 @@
     }
   }
 
-  /** Where the pointer is on the screen, which keeps its proportions within the canvas (`object-contain`). */
+  /** Where the pointer is on the screen, which the canvas shows whole, maybe shrunk. */
   function pointer(event: MouseEvent, scroll = 0) {
     const box = canvas.getBoundingClientRect();
-    const scale = Math.min(box.width / canvas.width, box.height / canvas.height);
     const at = (offset: number, size: number, pixels: number) =>
-      Math.min(Math.max(Math.floor((offset - (size - pixels * scale) / 2) / scale), 0), pixels - 1);
+      Math.min(Math.max(Math.floor((offset / size) * pixels), 0), pixels - 1);
     const x = at(event.clientX - box.left, box.width, canvas.width);
     const y = at(event.clientY - box.top, box.height, canvas.height);
     send({ kind: "Pointer", x, y, buttons: event.buttons, scroll });
@@ -193,21 +215,20 @@
     </button>
   </div>
 
-  <!-- The device's own screen, so its own pointer: ours stays visible on top, as it moves without delay. -->
-  <div class="relative grid min-h-0">
+  <!-- The device's own screen, so its own pointer: ours stays visible on top, as it moves without delay. At its own
+       size on black, shrunk only to fit, and its pixels kept sharp (not smoothed onto a Retina display's) unless it is. -->
+  <div class="relative grid min-h-0 place-items-center overflow-hidden bg-black">
   <canvas
     bind:this={canvas}
-    class="size-full min-h-0 bg-black object-contain outline-none"
+    bind:clientWidth={shown}
+    class={["max-h-full max-w-full outline-none", shown >= width && "[image-rendering:pixelated]"]}
     tabindex="0"
-    onkeydown={(event) => key(event, true)}
-    onkeyup={(event) => key(event, false)}
+    onkeydown={key}
+    onkeyup={key}
     onblur={() => send({ kind: "Release" })}
-    onpointerdown={(event) => {
-      canvas.setPointerCapture(event.pointerId);
-      pointer(event);
-    }}
-    onpointermove={(event) => pointer(event)}
-    onpointerup={(event) => pointer(event)}
+    onpointerdown={(event) => (canvas.setPointerCapture(event.pointerId), pointer(event))}
+    onpointermove={pointer}
+    onpointerup={pointer}
     onwheel={wheel}
     oncontextmenu={(event) => event.preventDefault()}
   ></canvas>
