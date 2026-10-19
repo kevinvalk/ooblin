@@ -6,6 +6,7 @@
 //! drive (a USB device since AMT 11) over both.
 
 use std::io::SeekFrom;
+use std::ops::Range;
 use std::time::Duration;
 
 use tokio::fs::File;
@@ -23,8 +24,8 @@ pub struct Ider {
     /// The most a message to the device may carry.
     chunk: usize,
     sequence: u32,
-    /// How much of the image the device read so far.
-    served: u64,
+    /// What of the image the command at hand read, in bytes.
+    served: Range<u64>,
     /// The most the command at hand takes back, its allocation length.
     allocation: usize,
     /// Why the CD-ROM's last command failed (sense key, additional sense code and qualifier), for REQUEST SENSE.
@@ -49,7 +50,7 @@ impl Client {
         let blocks = image.metadata().await?.len() / 2048;
         let redirection = self.redirect(Session::Ider).await?;
         let mut ider =
-            Ider { redirection, image, blocks, chunk: 0, sequence: 0, served: 0, allocation: 0, sense: [0; 3] };
+            Ider { redirection, image, blocks, chunk: 0, sequence: 0, served: 0..0, allocation: 0, sense: [0; 3] };
         // Timeouts of 30 seconds to receive and none to send, a heartbeat every 20 seconds, version 1.
         ider.send(0x40, &[0x30, 0x75, 0, 0, 0x20, 0x4E, 1, 0, 0, 0], false, false).await?;
         let reply = ider.redirection.read_exact(30).await?;
@@ -65,18 +66,18 @@ impl Client {
 }
 
 impl Ider {
-    /// Answers the device until it closes the session, telling `read` how much it read so far after every read.
-    pub async fn serve(mut self, mut read: impl FnMut(u64)) -> Result<()> {
+    /// Answers the device until it closes the session, telling `read` what of the image, in bytes, after every read.
+    pub async fn serve(mut self, mut read: impl FnMut(Range<u64>)) -> Result<()> {
         loop {
             let kind = self.redirection.read_exact(1).await?[0];
             match self.hear(kind).await? {
                 Heard::Closed => return Ok(()),
                 Heard::Command(command) => {
                     let device = if command[6] & 0x10 == 0 { 0xA0 } else { CD };
-                    let served = self.served;
                     self.command(device, command[6], &command[8..], command[1] & 1 == 1).await?;
-                    if self.served != served {
-                        read(self.served);
+                    let served = std::mem::take(&mut self.served);
+                    if !served.is_empty() {
+                        read(served);
                     }
                 }
                 Heard::Reset | Heard::Nothing => {}
@@ -192,18 +193,18 @@ impl Ider {
         }
     }
 
-    /// Blocks `lba` on, `len` of them, in the largest messages the device takes.
     /// Blocks `lba` on, `len` of them, in the largest messages the device takes. Like MeshCommander we listen between
     /// them: once the drive is reset the read is over, and sending on only confuses AMT.
     async fn read(&mut self, lba: u64, len: u64, dma: bool) -> Result<()> {
         self.image.seek(SeekFrom::Start(lba * 2048)).await?;
+        self.served = lba * 2048..lba * 2048;
         let mut left = len * 2048;
         let mut buf = vec![0; self.chunk];
         while left > 0 {
             let chunk = &mut buf[..self.chunk.min(left as usize)];
             self.image.read_exact(chunk).await?;
             left -= chunk.len() as u64;
-            self.served += chunk.len() as u64;
+            self.served.end += chunk.len() as u64;
             self.transfer(CD, chunk, left == 0, dma).await?;
             // After the last chunk the read is done, what comes next is the next command. Before it, reading a byte
             // gives up nothing when there's none yet.

@@ -1,0 +1,12 @@
+{
+  "printWidth": 120,
+  "overrides": [
+    {
+      "files": "renovate.json5",
+      "options": {
+        "parser": "json",
+        "trailingComma": "none"
+      }
+    }
+  ]
+}

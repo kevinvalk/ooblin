@@ -6,6 +6,7 @@ mod hosts;
 
 use std::collections::HashMap;
 use std::fmt::Display;
+use std::ops::Range;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -151,11 +152,16 @@ fn trust(app: AppHandle, host: &str, fingerprint: String) -> Result<(), CommandE
     Ok(Hosts::open(&app)?.trust(host, fingerprint)?)
 }
 
-/// The network to look for devices on unless told otherwise, see `amt_core::nearby`. The verify build (AGENTS.md) looks
-/// on this machine only, where the mock is, never at the user's devices.
+/// Whether this is the verify build (AGENTS.md), which keeps to the mock and off the user's screen.
+fn verify(app: &AppHandle) -> bool {
+    app.config().identifier.ends_with(".verify")
+}
+
+/// The network to look for devices on unless told otherwise, see `amt_core::nearby`. The verify build looks on this
+/// machine only, where the mock is, never at the user's devices.
 #[tauri::command]
 fn networks(app: AppHandle) -> String {
-    if app.config().identifier.ends_with(".verify") { "127.0.0.1/32".into() } else { amt_core::nearby() }
+    if verify(&app) { "127.0.0.1/32".into() } else { amt_core::nearby() }
 }
 
 /// The search for devices underway, see `discover`.
@@ -321,40 +327,47 @@ async fn sol_close(sessions: State<'_, Sessions>, host: &str) -> Result<(), Comm
 }
 
 /// Asks for a file to open, of a `kind` ("Disk image") and its `extensions`. Native dialogs want the main thread, where
-/// a command that isn't async runs.
+/// a command that isn't async runs. The verify build never shows one, it picks the file `AMT_CONSOLE_PICK` names.
 #[tauri::command]
-fn pick(window: WebviewWindow, kind: &str, extensions: Vec<String>) -> Option<PathBuf> {
+fn pick(app: AppHandle, window: WebviewWindow, kind: &str, extensions: Vec<String>) -> Option<PathBuf> {
+    if verify(&app) {
+        return std::env::var_os("AMT_CONSOLE_PICK").map(PathBuf::from);
+    }
     rfd::FileDialog::new().set_parent(&window).add_filter(kind, &extensions).pick_file()
 }
 
-/// Asks where to save a file, suggesting `name`.
+/// Asks where to save a file, suggesting `name`, see `pick`.
 #[tauri::command]
-fn pick_save(window: WebviewWindow, name: &str) -> Option<PathBuf> {
+fn pick_save(app: AppHandle, window: WebviewWindow, name: &str) -> Option<PathBuf> {
+    if verify(&app) {
+        return std::env::var_os("AMT_CONSOLE_PICK").map(PathBuf::from);
+    }
     rfd::FileDialog::new().set_parent(&window).set_file_name(name).save_file()
 }
 
-/// Puts the image at `path` in the device's drive (see `Client::ider`) and says its name, then how much of it the
-/// device read on `reads` as it goes, and nothing once the device closed the drive. AMT has one drive, so the image in
+/// Puts the image at `path` in the device's drive (see `Client::ider`) and says its name and size, then what of it the
+/// device reads on `reads` as it goes, and nothing once the device closed the drive. AMT has one drive, so the image in
 /// it comes out first. Ejecting it says nothing, the webview knows.
 #[tauri::command]
 async fn ider_mount(
     sessions: State<'_, Sessions>,
     host: &str,
     path: PathBuf,
-    reads: Channel<Option<u64>>,
-) -> Result<String, CommandError> {
+    reads: Channel<Option<Range<u64>>>,
+) -> Result<(String, u64), CommandError> {
     let file = std::fs::File::open(&path)?;
+    let size = file.metadata()?.len();
     sessions.update(host, |session| session.image = None);
     let ider = sessions.get(host)?.client.lock().await.ider(file).await?;
     let ended = reads.clone();
-    let serve = ider.serve(move |served| reads.send(Some(served)).unwrap_or_default());
+    let serve = ider.serve(move |read| reads.send(Some(read)).unwrap_or_default());
     let image = Arc::new(Task(tauri::async_runtime::spawn(async move {
         // How it ended doesn't matter, that it did does.
         serve.await.unwrap_or_default();
         ended.send(None).unwrap_or_default();
     })));
     sessions.update(host, |session| session.image = Some(image));
-    Ok(path.file_name().unwrap_or_default().to_string_lossy().into_owned())
+    Ok((path.file_name().unwrap_or_default().to_string_lossy().into_owned(), size))
 }
 
 #[tauri::command]

@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="256" height="256" viewBox="0 0 256 256">
+  <title>Ooblin</title>
+  <path fill="#65AE4C" d="M48 110C38 88 23 60 20 48C41 51 72 73 88 88C111 72 143 72 168 88C186 71 216 52 236 48C230 65 216 91 208 110Z"/>
+  <rect x="16" y="108" width="224" height="124" rx="25" fill="#85898C"/>
+  <path d="M62 156A24 24 0 1 0 88 156M75 145V172" fill="none" stroke="#FFFFFF" stroke-width="10" stroke-linecap="round"/>
+  <path fill="#FFFFFF" d="M165 168H189V178H199V188H207V210H147V188H155V178H165Z"/>
+  <circle cx="177" cy="143" r="9" fill="#9AF23C"/>
+</svg>

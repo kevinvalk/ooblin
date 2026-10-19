@@ -42,6 +42,8 @@
 @layer base {
   :root {
     color-scheme: light dark;
+    /* The window stays put when scrolled past its edge, sideways too, it's not a page. */
+    overscroll-behavior: none;
     @apply bg-canvas font-sans text-sm text-ink antialiased select-none;
   }
 
@@ -106,6 +108,34 @@
   /* A power state, named by `data-power`. */
   .dot {
     @apply size-2.5 flex-none rounded-full bg-muted data-[power=Asleep]:bg-asleep data-[power=Hibernating]:bg-asleep data-[power=On]:bg-on;
+  }
+
+  /* A disk image as the device reads it: its stretches, lit as they're read (`data-read`) and fading for `--decay`, and
+     how fast, from red to green as `--speed` goes from 0 to 1. In whole pixels, as our rem is 14px. */
+  .disk-map {
+    @apply grid auto-cols-[4px] grid-flow-col grid-rows-[repeat(4,4px)] gap-px;
+    > * {
+      @apply bg-line;
+    }
+    > [data-read] {
+      @apply bg-accent;
+      animation: read var(--decay) linear forwards;
+    }
+  }
+
+  @keyframes read {
+    to {
+      opacity: 0.35;
+    }
+  }
+
+  .disk-speed {
+    @apply flex w-[4px] items-end outline outline-line;
+    &::after {
+      @apply w-full transition-[height] duration-1000 ease-linear content-[''];
+      height: calc(var(--speed) * 100%);
+      background-color: hsl(calc(var(--speed) * 120) 80% 45%);
+    }
   }
 
   .btn {

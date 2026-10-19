@@ -36,8 +36,8 @@ sidebar's device names and the footer included. MAC addresses are written `12:07
   empty `dt`, `dd`, `td` and `h3`, so markup just writes `{value}`. Not there at all (no battery): say so in words.
 - Waiting on the device after a click: a spinning `LoaderCircle` where the click was (button, sidebar entry).
 - The footer says what actions did for as long as it takes to read, and while the pointer is on it so it can be
-  selected, what's true now (a device not answering) for as long as it is, and on its right how fast the disk image in
-  the drive is read, while it is and a minute after.
+  selected, what's true now (a device not answering) for as long as it is, and on its right, while a disk image is in
+  the drive, which parts of it were read and how fast it's read, its speed in a tooltip.
 - Errors: in the page with a way to try again, in the footer (in red) for actions and saving. A device that stops
   answering for two minutes is let go of, and the form says so, until then it's retried.
 

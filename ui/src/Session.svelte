@@ -14,9 +14,11 @@
     changing?: { from: PowerState; until: number };
     /** By tab: what it read, or why it couldn't, and when. */
     pages: Record<string, { data?: unknown; error?: string; read?: Date }>;
-    /** The disk image in its drive: its name, how much of it the device read and how fast (bytes a second), and
-     * whether it did in the last minute. */
-    image?: { name: string; read: number; rate: number; recent: boolean };
+    /** The disk image in its drive: its name and size, how much of it the device read and how fast (bytes a second),
+     * and when it last read each of its `CELLS` stretches (`Date.now()`, 0 for never). */
+    image?: { name: string; size: number; read: number; rate: number; cells: number[] };
+    /** Whether a disk image is on its way into its drive. */
+    mounting?: boolean;
     /** Whether its screen and serial console were opened: they stay open across tabs. */
     kvm?: boolean;
     sol?: boolean;
@@ -25,6 +27,9 @@
     /** The screen's size and updates a second while it's shown, for the footer. */
     screen?: { width: number; height: number; fps: number };
   }
+
+  /** The stretches a disk image is shown in, as read. */
+  export const CELLS = 128;
 
   /** Our commands fail with a `CommandError`, Tauri itself with a string. */
   export function reason(error: unknown) {
@@ -43,7 +48,7 @@
   import Sol from "./pages/Sol.svelte";
   import Status from "./pages/Status.svelte";
 
-  let { session, say }: { session: Session; say: (text: string, failed?: boolean) => void } = $props();
+  let { session = $bindable(), say }: { session: Session; say: (text: string, failed?: boolean) => void } = $props();
 
   /** The commands are named after the tabs that read. All but the hardware change often enough to want a refresh. The
    * KVM tab is a screen of its own, for devices that have one. */
@@ -174,41 +179,43 @@
     }
   }
 
-  let mounting = $state(false);
-
-  /** The image is read from here as the device asks for it, the file never goes through the webview. Rust tells us how
-   * much it read so far, its rate we work out every second. */
+  /** The image is read from here as the device asks for it, the file never goes through the webview. Rust tells us what
+   * of it each read was, how fast it reads we work out every second while it does. All of it for the device it went
+   * into, whichever one is shown by then. */
   async function mount(path?: string | null) {
     path ??= await invoke<string | null>("pick", { kind: "Disk image", extensions: ["iso"] });
     if (!path) return;
-    mounting = true;
-    let image: Session["image"];
-    const reads = new Channel<number | null>();
+    const device = session;
+    device.mounting = true;
+    const image = $state({ name: "", size: 0, read: 0, rate: 0, cells: Array<number>(CELLS).fill(0) });
+    let [tick, last] = [0, 0];
+    const reads = new Channel<{ start: number; end: number } | null>();
     reads.onmessage = (read) => {
-      if (read !== null) return image && (image.read = read);
-      // The device closed the drive: a reset, say.
-      if (image && session.image === image) {
-        session.image = undefined;
-        say("The device closed the disk image, mount it again to use it.");
+      // Until it's in, and once it's out, it's not ours to show.
+      if (device.image !== image) return;
+      if (!read) {
+        device.image = undefined;
+        return say(`${device.info.name} closed the disk image (a reset, say), mount it again to use it.`);
       }
+      image.read += read.end - read.start;
+      const cell = (at: number) => (at * CELLS) / image.size;
+      for (let i = Math.floor(cell(read.start)); i < cell(read.end); i++) image.cells[i] = Date.now();
+      tick ||= setInterval(() => {
+        [image.rate, last] = [image.read - last, image.read];
+        if (image.rate) return;
+        clearInterval(tick);
+        tick = 0;
+      }, 1000);
     };
     try {
-      const name = await invoke<string>("ider_mount", { host: session.host, path, reads });
-      session.image = { name, read: 0, rate: 0, recent: false };
-      const mounted = (image = session.image);
-      let [last, quiet] = [0, Infinity];
-      const tick = setInterval(() => {
-        if (session.image !== mounted) return clearInterval(tick);
-        [mounted.rate, last] = [mounted.read - last, mounted.read];
-        quiet = mounted.rate ? 0 : quiet + 1;
-        mounted.recent = quiet < 60;
-      }, 1000);
-      say(`${name} is in the drive, the device sees it from its next boot on.`);
+      [image.name, image.size] = await invoke<[string, number]>("ider_mount", { host: device.host, path, reads });
+      device.image = image;
+      say(`${image.name} is in the drive, the device sees it from its next boot on.`);
     } catch (error) {
       if ((error as CommandError).kind === "Consent" && (await consent("ider"))) return await mount(path);
       say(reason(error), true);
     } finally {
-      mounting = false;
+      device.mounting = false;
     }
   }
 
@@ -294,12 +301,12 @@
       <button
         type="button"
         class="btn btn-secondary ml-auto"
-        disabled={mounting}
+        disabled={session.mounting}
         aria-disabled={!!off("ider")}
         title={off("ider")}
         onclick={() => (off("ider") ? say(off("ider")!) : mount())}
       >
-        {#if mounting}<LoaderCircle class="size-4 animate-spin" />{:else}<Disc3 class="size-4" />{/if} Disk image…
+        {#if session.mounting}<LoaderCircle class="size-4 animate-spin" />{:else}<Disc3 class="size-4" />{/if} Disk image…
       </button>
     {/if}
     <button type="button" class="btn btn-secondary" popovertarget="power-menu">
