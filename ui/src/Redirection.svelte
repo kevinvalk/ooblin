@@ -12,7 +12,7 @@
 <script lang="ts">
   import { invoke } from "@tauri-apps/api/core";
   import type { Snippet } from "svelte";
-  import type { CommandError } from "./bindings/console";
+  import type { CommandError } from "./bindings/ooblin";
   import { reason } from "./Session.svelte";
 
   let {

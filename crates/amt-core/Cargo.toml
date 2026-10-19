@@ -3,6 +3,9 @@ name = "amt-core"
 version = "0.1.0"
 edition = "2024"
 license = "Apache-2.0"
+description = "Intel AMT over TLS: power, hardware, settings, logs, and its screen (KVM), serial console and disk images"
+keywords = ["intel-amt", "vpro", "wsman", "kvm", "out-of-band"]
+categories = ["network-programming", "hardware-support"]
 
 [dependencies]
 base64 = "0.23"

@@ -1,8 +1,11 @@
-# AMT Console
+<img src="assets/ooblin.svg" alt="" width="96" align="right">
 
-A desktop console for Intel AMT: power control, hardware inventory, the device's screen, keyboard and mouse (KVM) and
-booting it from a disk image on your machine (IDER). A serial console is next. No server, no cloud: the app talks to
-your devices directly, over TLS only, with pinned certificates and passwords kept in your OS keychain.
+# Ooblin
+
+Ooblin, the out-of-band (OOB) goblin, is a desktop console for Intel AMT: power control, hardware inventory, the
+device's screen, keyboard and mouse (KVM), its serial console and booting it from a disk image on your machine (IDER).
+No server, no cloud: the app talks to your devices directly, over TLS only, with pinned certificates and passwords kept
+in your OS keychain.
 
 Built with [Tauri](https://tauri.app) for Linux, macOS and Windows.
 
@@ -12,7 +15,7 @@ Built with [Tauri](https://tauri.app) for Linux, macOS and Windows.
 away, using its saved credentials or the ones you pass:
 
 ```sh
-amt-console [host] [--user admin] [--password <password>]
+ooblin [host] [--user admin] [--password <password>]
 ```
 
 ## Develop

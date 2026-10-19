@@ -3,7 +3,7 @@
 <script lang="ts">
   import { LoaderCircle } from "@lucide/svelte";
   import { untrack } from "svelte";
-  import type { CommandError, Device } from "./bindings/console";
+  import type { CommandError, Device } from "./bindings/ooblin";
 
   type Login = { host: string; user: string; password: string; remember: boolean };
   let {

@@ -34,7 +34,7 @@ struct Saved {
 /// A device as the webview sees it. We keep reaching it at the address it was given as, as AMT's own `name` (with its
 /// domain) may well not be in DNS. `remembered` means we can log in without asking for the password.
 #[derive(Serialize, TS)]
-#[ts(export, export_to = "console.ts")]
+#[ts(export, export_to = "ooblin.ts")]
 pub struct Device {
     pub host: String,
     pub name: String,
@@ -75,6 +75,17 @@ impl Hosts {
         let (pin, name, version) = (info.fingerprint.clone(), info.name.clone(), info.version.clone());
         self.hosts.insert(target.host.clone(), Saved { pin, name, version, user: target.user.clone(), remembered });
         self.save()
+    }
+
+    /// The device goes by another name now.
+    pub fn renamed(&mut self, host: &str, name: &str) -> io::Result<()> {
+        match self.hosts.get_mut(host) {
+            Some(saved) if saved.name != name => {
+                saved.name = name.to_owned();
+                self.save()
+            }
+            _ => Ok(()),
+        }
     }
 
     /// Only called after the user compared fingerprints and chose to trust the new one.

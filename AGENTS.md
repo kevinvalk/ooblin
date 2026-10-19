@@ -1,7 +1,7 @@
 # AGENTS.md
 
-A desktop Intel AMT console for Linux, macOS and Windows: a library that knows AMT (`crates/amt-core`), a Tauri v2 app
-over it (`crates/amt-console`) and a Svelte 5 and Tailwind UI (`ui/`, see `ui/DESIGN.md`). The library hands over data,
+Ooblin, a desktop Intel AMT console for Linux, macOS and Windows: a library that knows AMT (`crates/amt-core`), a Tauri
+v2 app over it (`crates/ooblin`) and a Svelte 5 and Tailwind UI (`ui/`, see `ui/DESIGN.md`). The library hands over data,
 the UI puts it in words.
 
 ## Working here
@@ -25,10 +25,10 @@ We check our own work in the running app against the mock AMT, every command wit
 (`perl -e 'alarm 120; exec @ARGV' <command>`): a hang costs the user far more than a retry.
 
 1. `cargo verify` builds the debug app (hidden window, MCP bridge on localhost, its own identifier so its own devices
-   and keychain, never the user's, and no dialogs: it picks the file `AMT_CONSOLE_PICK` names), `cargo build -p
+   and keychain, never the user's, and no dialogs: it picks the file `OOBLIN_PICK` names), `cargo build -p
    mock-amt` the mock.
 2. Run `target/debug/mock-amt run ms-02` (`go-wsman-messages` for Intel's samples) and
-   `TAURI_MCP_NO_FOREGROUND=1 target/debug/amt-console 127.0.0.1 --password 'P@ssw0rd'` as background tasks, the
+   `TAURI_MCP_NO_FOREGROUND=1 target/debug/ooblin 127.0.0.1 --password 'P@ssw0rd'` as background tasks, the
    binaries themselves so stopping a task stops it. The variable keeps screenshots from raising the window on macOS. A
    second session connects to the same mock as `localhost`.
 3. `npx -y -p @hypothesi/tauri-mcp-cli@0.13 tauri-mcp driver-session start --port 9223`, at most 20 tries a second

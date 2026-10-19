@@ -7,7 +7,7 @@ use std::path::Path;
 fn only_net_touches_the_network() {
     let crates = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
     let mut offenders = Vec::new();
-    for dir in ["amt-core/src", "amt-console/src"] {
+    for dir in ["amt-core/src", "ooblin/src"] {
         visit(&crates.join(dir), &mut offenders);
     }
     assert!(offenders.is_empty(), "network code outside amt-core/src/net: {offenders:#?}");

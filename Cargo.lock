@@ -44,24 +44,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "amt-console"
-version = "0.1.0"
-dependencies = [
- "amt-core",
- "clap",
- "keyring",
- "rfd",
- "serde",
- "serde_json",
- "tauri",
- "tauri-build",
- "tauri-plugin-mcp-bridge",
- "tauri-plugin-opener",
- "tauri-plugin-window-state",
- "ts-rs",
-]
-
-[[package]]
 name = "amt-core"
 version = "0.1.0"
 dependencies = [
@@ -3278,6 +3260,24 @@ name = "once_cell_polyfill"
 version = "1.70.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "384b8ab6d37215f3c5301a95a4accb5d64aa607f1fcb26a11b5303878451b4fe"
+
+[[package]]
+name = "ooblin"
+version = "0.1.0"
+dependencies = [
+ "amt-core",
+ "clap",
+ "keyring",
+ "rfd",
+ "serde",
+ "serde_json",
+ "tauri",
+ "tauri-build",
+ "tauri-plugin-mcp-bridge",
+ "tauri-plugin-opener",
+ "tauri-plugin-window-state",
+ "ts-rs",
+]
 
 [[package]]
 name = "open"

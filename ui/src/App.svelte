@@ -2,8 +2,8 @@
 <script lang="ts">
     import { LoaderCircle, PanelLeft, Search, Trash2, X } from "@lucide/svelte";
     import { Channel, invoke } from "@tauri-apps/api/core";
-    import type { CommandError, Device } from "./bindings/console";
-    import type { Found, Info, Power } from "./bindings/core";
+    import type { CommandError, Device } from "./bindings/ooblin";
+    import type { Found, Info } from "./bindings/core";
     import Connect from "./Connect.svelte";
     import Session, { type Session as Open } from "./Session.svelte";
 
@@ -99,7 +99,6 @@
     function show(host: string) {
         current = host;
         say("");
-        refreshPower(host);
         listDevices();
     }
 
@@ -143,44 +142,13 @@
         else say(failure.message, true);
     }
 
-    /** The hosts whose power we're asking for, one ask at a time: one that doesn't answer takes a while to say so. */
-    const asking = new Set<string>();
-
-    /** A device may not answer for a while (AMT can be busy while it resets), only after two minutes is it gone. Until
-     * then its power is unknown. */
-    async function refreshPower(host: string) {
-        const session = sessions[host];
-        if (asking.has(host)) return;
-        asking.add(host);
-        try {
-            session.power = await invoke<Power>("power", { host });
-            session.silent = undefined;
-            const changing = session.changing;
-            if (changing && (session.power.state !== changing.from || Date.now() > changing.until)) {
-                session.changing = undefined;
-            }
-        } catch (error) {
-            if ((error as CommandError).kind !== "Unreachable") {
-                if (host === current) say(explain(error, host).message, true);
-            } else if (Date.now() - (session.silent ??= Date.now()) > 120_000) {
-                lost(host, error as CommandError);
-            } else {
-                session.power = undefined;
-            }
-        } finally {
-            asking.delete(host);
-        }
-    }
-
     // The window is titled after the session on screen.
     $effect(() => {
         invoke("title", {
-            title: current ? `${sessions[current].info.name} – AMT Console` : "AMT Console",
+            title: current ? `${sessions[current].info.name} – Ooblin` : "Ooblin",
         });
     });
 
-    // Power changes from elsewhere (the OS shutting down, another console) show up within a few seconds.
-    setInterval(() => Object.keys(sessions).forEach(refreshPower), 15_000);
 
     function keydown(event: KeyboardEvent) {
         if ((event.metaKey || event.ctrlKey) && event.key === "b") {
@@ -200,7 +168,10 @@
 
 <div class={["grid h-screen grid-rows-[1fr_auto]", collapsed ? "grid-cols-[0_1fr]" : "grid-cols-[16rem_1fr]"]}>
     <nav
-        class={["flex min-w-0 flex-col gap-3 overflow-hidden border-r border-line bg-pane p-3", collapsed && "invisible"]}
+        class={[
+            "flex min-w-0 flex-col gap-3 overflow-hidden border-r border-line bg-pane p-3",
+            collapsed && "invisible",
+        ]}
     >
         <p class="px-2.5 pt-1 font-semibold text-muted">Devices</p>
         {#if listed.length}
@@ -208,6 +179,7 @@
                 {#each listed as device (device.host)}
                     {@const open = sessions[device.host]}
                     {@const answer = found[device.host]}
+                    {@const name = open?.info.name || device.name}
                     <!-- One action per device, on hover: disconnect an open one, forget a closed one. -->
                     <li
                         class="group flex items-center rounded-md pr-0.5 text-muted hover:bg-hover data-open:text-ink aria-current:bg-accent aria-current:text-white"
@@ -216,10 +188,8 @@
                     >
                         <button
                             type="button"
-                            class="flex h-8 min-w-0 flex-1 items-center gap-2.5 px-2.5"
-                            title={[device.name && device.host, answer?.provisioned === false && "not provisioned"]
-                                .filter(Boolean)
-                                .join(", ")}
+                            class="flex min-w-0 flex-1 items-center gap-2.5 px-2.5 py-1.5 text-left"
+                            title={answer?.provisioned === false ? "Not provisioned" : undefined}
                             onclick={() => select(device)}
                         >
                             {#if connecting === device.host}
@@ -231,10 +201,20 @@
                                     title={open?.power?.state}
                                 ></span>
                             {/if}
-                            <span class="truncate">{device.name || device.host}</span>
+                            <!-- Its name, and the address we reach it at. -->
+                            <span class="grid min-w-0">
+                                <span class="truncate">{name || device.host}</span>
+                                {#if name}
+                                    <span
+                                        class="truncate font-mono text-xs text-muted group-aria-current:text-white/80"
+                                    >
+                                        {device.host}
+                                    </span>
+                                {/if}
+                            </span>
                             {#if device.version || answer}
                                 <span
-                                    class="flex-none rounded-full bg-hover px-1.5 text-xs/4.5 tabular-nums group-aria-current:bg-white/20"
+                                    class="ml-auto flex-none rounded-full bg-hover px-1 text-[10px]/4 tabular-nums group-aria-current:bg-white/20"
                                     title="AMT version"
                                 >
                                     {device.version || answer?.version}
@@ -289,7 +269,12 @@ takes seconds, a /16 (the most at a time) minutes."
 
     <div class="grid min-w-0 overflow-hidden">
         {#each Object.keys(sessions) as host (host)}
-            <Session bind:session={sessions[host]} hidden={host !== current} {say} />
+            <Session
+                bind:session={sessions[host]}
+                hidden={host !== current}
+                {say}
+                lost={(error) => lost(host, error)}
+            />
         {/each}
         {#if !current}
             {#key form.key}

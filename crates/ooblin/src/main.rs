@@ -214,9 +214,14 @@ macro_rules! reads {
 reads!(power: Power, status: Status, hardware: Hardware, settings: Settings, event_log: Vec<Event>, audit_log: Vec<AuditRecord>);
 
 /// Changes a setting and says them all after, see `Client::change`. A disk image goes when they're turned off, the
-/// webview closes the screen and serial console.
+/// webview closes the screen and serial console. A new name goes in the device list.
 #[tauri::command]
-async fn change(sessions: State<'_, Sessions>, host: &str, change: Change) -> Result<Settings, CommandError> {
+async fn change(
+    app: AppHandle,
+    sessions: State<'_, Sessions>,
+    host: &str,
+    change: Change,
+) -> Result<Settings, CommandError> {
     let client = sessions.get(host)?.client;
     let mut client = client.lock().await;
     client.change(&change).await?;
@@ -225,7 +230,9 @@ async fn change(sessions: State<'_, Sessions>, host: &str, change: Change) -> Re
     {
         sessions.update(host, |session| session.image = None);
     }
-    Ok(client.settings().await?)
+    let settings = client.settings().await?;
+    Hosts::open(&app)?.renamed(host, &settings.general.name)?;
+    Ok(settings)
 }
 
 /// Writes the certificate as PEM to `path`.
@@ -327,11 +334,11 @@ async fn sol_close(sessions: State<'_, Sessions>, host: &str) -> Result<(), Comm
 }
 
 /// Asks for a file to open, of a `kind` ("Disk image") and its `extensions`. Native dialogs want the main thread, where
-/// a command that isn't async runs. The verify build never shows one, it picks the file `AMT_CONSOLE_PICK` names.
+/// a command that isn't async runs. The verify build never shows one, it picks the file `OOBLIN_PICK` names.
 #[tauri::command]
 fn pick(app: AppHandle, window: WebviewWindow, kind: &str, extensions: Vec<String>) -> Option<PathBuf> {
     if verify(&app) {
-        return std::env::var_os("AMT_CONSOLE_PICK").map(PathBuf::from);
+        return std::env::var_os("OOBLIN_PICK").map(PathBuf::from);
     }
     rfd::FileDialog::new().set_parent(&window).add_filter(kind, &extensions).pick_file()
 }
@@ -340,7 +347,7 @@ fn pick(app: AppHandle, window: WebviewWindow, kind: &str, extensions: Vec<Strin
 #[tauri::command]
 fn pick_save(app: AppHandle, window: WebviewWindow, name: &str) -> Option<PathBuf> {
     if verify(&app) {
-        return std::env::var_os("AMT_CONSOLE_PICK").map(PathBuf::from);
+        return std::env::var_os("OOBLIN_PICK").map(PathBuf::from);
     }
     rfd::FileDialog::new().set_parent(&window).set_file_name(name).save_file()
 }
@@ -391,7 +398,7 @@ fn fullscreen(window: WebviewWindow, on: bool) -> Result<(), CommandError> {
 /// `Unreachable` means the device stopped answering, even to a second try, `Consent` that someone at it has to read out
 /// a code first (see `consent_start`).
 #[derive(Serialize, TS)]
-#[ts(export, export_to = "console.ts")]
+#[ts(export, export_to = "ooblin.ts")]
 #[serde(tag = "kind")]
 enum CommandError {
     PinMismatch { message: String, expected: String, actual: String },

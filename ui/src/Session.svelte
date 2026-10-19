@@ -3,7 +3,7 @@
      Whether a device that doesn't answer is gone is App's to say. -->
 <script module lang="ts">
   import type { Snippet } from "svelte";
-  import type { CommandError } from "./bindings/console";
+  import type { CommandError } from "./bindings/ooblin";
   import type { Info, Power, PowerAction, PowerState, RemoteAccess, Settings as SettingsData } from "./bindings/core";
 
   /** What App shows of a session too: in the sidebar, the title and the footer. */
@@ -11,7 +11,7 @@
     host: string;
     info: Info;
     power?: Power;
-    /** Since when it hasn't answered, see App's `refreshPower`. */
+    /** Since when it hasn't answered, see Session's `readPower`. */
     silent?: number;
     /** Set from a power change until the state moves or a minute has passed, a reset never shows as another state. */
     changing?: { from: PowerState; until: number };
@@ -32,6 +32,7 @@
 <script lang="ts">
   import { ChevronDown, Disc3, LoaderCircle, RefreshCw, X } from "@lucide/svelte";
   import { Channel, invoke } from "@tauri-apps/api/core";
+  import { untrack } from "svelte";
   import { SvelteMap } from "svelte/reactivity";
   import AuditLog from "./pages/AuditLog.svelte";
   import EventLog from "./pages/EventLog.svelte";
@@ -45,7 +46,13 @@
     session = $bindable(),
     hidden,
     say,
-  }: { session: Session; hidden: boolean; say: (text: string, failed?: boolean) => void } = $props();
+    lost,
+  }: {
+    session: Session;
+    hidden: boolean;
+    say: (text: string, failed?: boolean) => void;
+    lost: (error: CommandError) => void;
+  } = $props();
   const id = $props.id();
   session.footer = status;
 
@@ -175,6 +182,40 @@
     invoke("consent_cancel", { host: session.host }).catch(() => {});
     answer(false);
   }
+
+  /** Its power, read every 15 seconds, shown or not, so changes from elsewhere (the OS shutting down, another console)
+   * show up in the sidebar too. And at once when it's shown, and when the power menu opens, which offers what AMT can
+   * do right now. One read at a time: a device that
+   * doesn't answer takes a while to say so. It may not for a while (AMT can be busy while it resets), only after two
+   * minutes is it `lost`, until then its power is unknown. */
+  let reading = false;
+  async function readPower() {
+    if (reading) return;
+    reading = true;
+    try {
+      session.power = await invoke<Power>("power", { host: session.host });
+      session.silent = undefined;
+      const changing = session.changing;
+      if (changing && (session.power.state !== changing.from || Date.now() > changing.until)) session.changing = undefined;
+    } catch (error) {
+      if ((error as CommandError).kind !== "Unreachable") {
+        if (!hidden) say(reason(error), true);
+      } else if (Date.now() - (session.silent ??= Date.now()) > 120_000) {
+        lost(error as CommandError);
+      } else {
+        session.power = undefined;
+      }
+    } finally {
+      reading = false;
+    }
+  }
+  $effect(() => {
+    if (!hidden) untrack(readPower);
+  });
+  $effect(() => {
+    const every = setInterval(readPower, 15_000);
+    return () => clearInterval(every);
+  });
 
   /** Powering on needs no second thought, everything else does. */
   async function choose(action: PowerAction, label: string) {
@@ -376,6 +417,7 @@
     <!-- Grouped: power on, asking the OS, acting at once, and booting elsewhere this once. -->
     <div
       id="{id}-power"
+      ontoggle={(event) => event.newState === "open" && readPower()}
       popover
       class="fixed inset-auto top-15 right-8 m-0 min-w-52 rounded-lg border border-line bg-canvas p-1 text-ink shadow-xl [&>hr]:my-1 [&>hr]:border-line"
     >

@@ -1,5 +1,5 @@
 /target
-/crates/amt-console/gen
+/crates/ooblin/gen
 /ui/node_modules
 /ui/dist
 .DS_Store

@@ -3,7 +3,7 @@
 # hidden so it never steals focus, and without CSP because the MCP bridge injects inline scripts.
 verify = [
   "tauri", "build", "--debug", "--no-bundle",
-  "--config", '{"identifier":"io.codean.amt-console.verify","app":{"windows":[{"width":1180,"height":860,"visible":false}],"security":{"csp":null}}}',
+  "--config", '{"identifier":"nl.kevinvalk.ooblin.verify","app":{"windows":[{"width":1180,"height":860,"visible":false}],"security":{"csp":null}}}',
 ]
 
 # The app as we ship it: bundled, and without Tauri's API on `window.__TAURI__`, which only debug builds' MCP bridge uses
