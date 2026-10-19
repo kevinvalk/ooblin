@@ -15,7 +15,7 @@
         {#if data}<span class="dot" data-power={data.power}></span>{data.power}{/if}
       </dd>
     </div>
-    <div><dt>System ID</dt><dd>{data?.systemId}</dd></div>
+    <div><dt>System ID</dt><dd>{data?.system_id}</dd></div>
     <div><dt>Clock</dt><dd>{data?.clock && new Date(data.clock * 1000).toLocaleString()}</dd></div>
   </dl>
 </section>
@@ -24,7 +24,7 @@
   <h2>Intel AMT</h2>
   <dl class="card">
     <div><dt>Version</dt><dd>{data && data.info.version + (data.info.build ? ` (build ${data.info.build})` : "")}</dd></div>
-    <div><dt>Control mode</dt><dd>{data?.info.controlMode}</dd></div>
+    <div><dt>Control mode</dt><dd>{data?.info.control_mode}</dd></div>
     <div><dt>Certificate</dt><dd>{data?.info.fingerprint}</dd></div>
   </dl>
 </section>
@@ -33,10 +33,10 @@
   <h2>Remote access</h2>
   <dl class="card">
     <div><dt>Redirection</dt><dd>{enabled(data?.redirection)}</dd></div>
-    <div><dt>Serial over LAN</dt><dd>{enabled(data?.serialOverLan)}</dd></div>
-    <div><dt>IDE redirection</dt><dd>{enabled(data?.ideRedirection)}</dd></div>
+    <div><dt>Serial over LAN</dt><dd>{enabled(data?.serial_over_lan)}</dd></div>
+    <div><dt>IDE redirection</dt><dd>{enabled(data?.ide_redirection)}</dd></div>
     <div><dt>KVM</dt><dd>{enabled(data?.kvm)}</dd></div>
-    <div><dt>User consent</dt><dd>{data?.userConsent}</dd></div>
+    <div><dt>User consent</dt><dd>{data?.user_consent}</dd></div>
   </dl>
 </section>
 
@@ -49,7 +49,7 @@
         <h3>Link</h3>
         <dl class="card">
           <div><dt>MAC address</dt><dd>{port?.mac}</dd></div>
-          <div><dt>Status</dt><dd>{port && (port.linkUp ? (port.mbps ? `Up, ${port.mbps} Mbit/s` : "Up") : "Down")}</dd></div>
+          <div><dt>Status</dt><dd>{port && (port.link_up ? (port.mbps ? `Up, ${port.mbps} Mbit/s` : "Up") : "Down")}</dd></div>
         </dl>
       </div>
       <div>
@@ -57,10 +57,10 @@
         <dl class="card">
           <div><dt>Configuration</dt><dd>{port && (port.ipv4.dhcp ? "Automatic (DHCP)" : "Manual")}</dd></div>
           <div><dt>Address</dt><dd>{port?.ipv4.address}</dd></div>
-          <div><dt>Subnet mask</dt><dd>{port?.ipv4.subnetMask}</dd></div>
+          <div><dt>Subnet mask</dt><dd>{port?.ipv4.subnet_mask}</dd></div>
           <div><dt>Gateway</dt><dd>{port?.ipv4.gateway}</dd></div>
-          <div><dt>Preferred DNS</dt><dd>{port?.ipv4.primaryDns}</dd></div>
-          <div><dt>Alternate DNS</dt><dd>{port?.ipv4.secondaryDns}</dd></div>
+          <div><dt>Preferred DNS</dt><dd>{port?.ipv4.primary_dns}</dd></div>
+          <div><dt>Alternate DNS</dt><dd>{port?.ipv4.secondary_dns}</dd></div>
         </dl>
       </div>
       <div>
@@ -71,8 +71,8 @@
           {:else}
             <div><dt>Addresses</dt><dd>{port?.ipv6?.addresses.join("\n")}</dd></div>
             <div><dt>Gateway</dt><dd>{port?.ipv6?.gateway}</dd></div>
-            <div><dt>Preferred DNS</dt><dd>{port?.ipv6?.primaryDns}</dd></div>
-            <div><dt>Alternate DNS</dt><dd>{port?.ipv6?.secondaryDns}</dd></div>
+            <div><dt>Preferred DNS</dt><dd>{port?.ipv6?.primary_dns}</dd></div>
+            <div><dt>Alternate DNS</dt><dd>{port?.ipv6?.secondary_dns}</dd></div>
           {/if}
         </dl>
       </div>

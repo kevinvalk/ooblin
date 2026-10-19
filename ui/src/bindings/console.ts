@@ -4,7 +4,7 @@
  * What the webview gets when a command fails: always a message, and both fingerprints when the certificate changed.
  * `Unreachable` means the device stopped answering, even to a second try.
  */
-export type CommandError = { "kind": "pinMismatch", message: string, expected: string, actual: string, } | { "kind": "unreachable", message: string, } | { "kind": "failed", message: string, };
+export type CommandError = { "kind": "PinMismatch", message: string, expected: string, actual: string, } | { "kind": "Unreachable", message: string, } | { "kind": "Failed", message: string, };
 
 /**
  * A device as the webview sees it. `remembered` means we can log in without asking for the password.

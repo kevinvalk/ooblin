@@ -2,6 +2,8 @@
 //! KVM and IDER redirection sessions on another, both over TLS with Digest. What a recording can't hold we answer by
 //! the spec: enumeration contexts, successful method calls, faults for classes the device lacks, and the handshakes.
 
+#![allow(non_snake_case, reason = "our XML types name their fields the way SOAP does, `Body` say")]
+
 mod record;
 mod redirection;
 mod scrub;
@@ -107,8 +109,9 @@ fn samples(dir: &Path) -> HashMap<(String, String), PathBuf> {
         if path.is_dir() {
             samples.extend(self::samples(&path));
         } else if let (Some(stem), Ok(xml)) = (path.file_stem(), std::fs::read_to_string(&path)) {
-            let uri = xml.split("ResourceURI>").nth(1).and_then(|uri| uri.split('<').next()).unwrap_or_default();
-            let class = uri.rsplit('/').next().unwrap_or_default().to_owned();
+            let Ok(doc) = roxmltree::Document::parse(xml.trim_start()) else { continue };
+            let uri = doc.descendants().find(|node| node.has_tag_name("ResourceURI")).and_then(|node| node.text());
+            let class = uri.and_then(|uri| uri.rsplit('/').next()).unwrap_or_default().to_owned();
             samples.entry((class, stem.to_string_lossy().to_lowercase())).or_insert(path);
         }
     }

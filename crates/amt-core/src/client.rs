@@ -1,6 +1,6 @@
-use crate::net::Connection;
 use instant_xml::ToXml;
 
+use crate::net::Connection;
 use crate::wsman::{self, Instance, Method};
 use crate::{Error, Result, Target};
 

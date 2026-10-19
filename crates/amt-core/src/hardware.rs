@@ -5,9 +5,8 @@ use crate::{Client, Result};
 
 /// Everything the device knows about its hardware, gathered by the BIOS at boot. Only what's installed: empty memory
 /// slots and drive bays never make it into WS-Man. Text the device left out is empty, numbers it left out are `None`.
-#[derive(Debug, Clone, Serialize, TS)]
+#[derive(Debug, Serialize, TS)]
 #[ts(export, export_to = "core.ts")]
-#[serde(rename_all = "camelCase")]
 pub struct Hardware {
     pub system: System,
     pub motherboard: Motherboard,
@@ -18,9 +17,8 @@ pub struct Hardware {
     pub batteries: Vec<Battery>,
 }
 
-#[derive(Debug, Clone, Serialize, TS)]
+#[derive(Debug, Serialize, TS)]
 #[ts(export, export_to = "core.ts")]
-#[serde(rename_all = "camelCase")]
 pub struct System {
     pub model: String,
     pub manufacturer: String,
@@ -29,9 +27,8 @@ pub struct System {
     pub id: String,
 }
 
-#[derive(Debug, Clone, Serialize, TS)]
+#[derive(Debug, Serialize, TS)]
 #[ts(export, export_to = "core.ts")]
-#[serde(rename_all = "camelCase")]
 pub struct Motherboard {
     pub product: String,
     pub manufacturer: String,
@@ -42,9 +39,8 @@ pub struct Motherboard {
 }
 
 /// `released` is a date, SMBIOS keeps no time.
-#[derive(Debug, Clone, Serialize, TS)]
+#[derive(Debug, Serialize, TS)]
 #[ts(export, export_to = "core.ts")]
-#[serde(rename_all = "camelCase")]
 pub struct Bios {
     pub vendor: String,
     pub version: String,
@@ -52,9 +48,8 @@ pub struct Bios {
     pub features: Vec<String>,
 }
 
-#[derive(Debug, Clone, Serialize, TS)]
+#[derive(Debug, Serialize, TS)]
 #[ts(export, export_to = "core.ts")]
-#[serde(rename_all = "camelCase")]
 pub struct Processor {
     pub model: String,
     pub manufacturer: String,
@@ -66,9 +61,8 @@ pub struct Processor {
     pub upgrade_method: String,
 }
 
-#[derive(Debug, Clone, Serialize, TS)]
+#[derive(Debug, Serialize, TS)]
 #[ts(export, export_to = "core.ts")]
-#[serde(rename_all = "camelCase")]
 pub struct Module {
     pub slot: String,
     pub bytes: Option<u64>,
@@ -81,18 +75,16 @@ pub struct Module {
     pub asset_tag: String,
 }
 
-#[derive(Debug, Clone, Serialize, TS)]
+#[derive(Debug, Serialize, TS)]
 #[ts(export, export_to = "core.ts")]
-#[serde(rename_all = "camelCase")]
 pub struct Disk {
     pub model: String,
     pub serial_number: String,
     pub bytes: Option<u64>,
 }
 
-#[derive(Debug, Clone, Serialize, TS)]
+#[derive(Debug, Serialize, TS)]
 #[ts(export, export_to = "core.ts")]
-#[serde(rename_all = "camelCase")]
 pub struct Battery {
     pub name: String,
     pub charge_percent: Option<u8>,

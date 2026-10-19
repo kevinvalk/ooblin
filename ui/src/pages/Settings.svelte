@@ -7,20 +7,20 @@
 
 <section>
   <h2>Power policy</h2>
-  <dl class="card"><div><dt>Active</dt><dd>{data?.powerPolicy}</dd></div></dl>
+  <dl class="card"><div><dt>Active</dt><dd>{data?.power_policy}</dd></div></dl>
 </section>
 
 <section>
   <h2>Network</h2>
-  <dl class="card"><div><dt>Respond to ping</dt><dd>{yes(data?.respondToPing)}</dd></div></dl>
+  <dl class="card"><div><dt>Respond to ping</dt><dd>{yes(data?.respond_to_ping)}</dd></div></dl>
 </section>
 
 <section>
   <h2>System name</h2>
   <dl class="card">
-    <div><dt>Host name</dt><dd>{data?.hostName}</dd></div>
-    <div><dt>Domain name</dt><dd>{data?.domainName}</dd></div>
-    <div><dt>Shared with the OS</dt><dd>{yes(data?.sharedWithOs)}</dd></div>
+    <div><dt>Host name</dt><dd>{data?.host_name}</dd></div>
+    <div><dt>Domain name</dt><dd>{data?.domain_name}</dd></div>
+    <div><dt>Shared with the OS</dt><dd>{yes(data?.shared_with_os)}</dd></div>
   </dl>
 </section>
 

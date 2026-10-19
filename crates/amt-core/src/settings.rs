@@ -7,9 +7,8 @@ use crate::wsman::Method;
 use crate::{Client, Result};
 
 /// How the device is set up: power policy, ping, name and accounts. What it allows remotely is in its status.
-#[derive(Debug, Clone, Serialize, TS)]
+#[derive(Debug, Serialize, TS)]
 #[ts(export, export_to = "core.ts")]
-#[serde(rename_all = "camelCase")]
 pub struct Settings {
     pub power_policy: String,
     pub respond_to_ping: bool,
@@ -22,9 +21,8 @@ pub struct Settings {
 
 /// The admin comes first and may do anything, the others what their realms allow, from where they may: "local only",
 /// "network only" or "local and network".
-#[derive(Debug, Clone, Serialize, TS)]
+#[derive(Debug, Serialize, TS)]
 #[ts(export, export_to = "core.ts")]
-#[serde(rename_all = "camelCase")]
 pub struct Account {
     pub name: String,
     pub admin: bool,
@@ -90,7 +88,6 @@ impl Method for GetAdminAclEntry {
     const NAME: &'static str = "GetAdminAclEntry";
 }
 
-#[allow(non_snake_case)]
 #[derive(ToXml)]
 #[xml(rename = "EnumerateUserAclEntries_INPUT", ns(AUTHORIZATION))]
 struct EnumerateUserAclEntries {
@@ -102,7 +99,6 @@ impl Method for EnumerateUserAclEntries {
     const NAME: &'static str = "EnumerateUserAclEntries";
 }
 
-#[allow(non_snake_case)]
 #[derive(ToXml)]
 #[xml(rename = "GetUserAclEntryEx_INPUT", ns(AUTHORIZATION))]
 struct GetUserAclEntryEx<'a> {

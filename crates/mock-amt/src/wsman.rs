@@ -137,11 +137,12 @@ const ENUMERATION: &str = "http://schemas.xmlsoap.org/ws/2004/09/enumeration";
 
 /// Our answers always serialize: their every part is a type of ours.
 fn envelope(body: impl ToXml) -> String {
-    let xml = instant_xml::to_string(&Envelope { Header, Body: Body { content: body } });
-    String::from(r#"<?xml version="1.0" encoding="UTF-8"?>"#) + &xml.expect("our answers serialize")
+    let mut xml = String::from(r#"<?xml version="1.0" encoding="UTF-8"?>"#);
+    instant_xml::to_writer(&Envelope { Header, Body: Body { content: body } }, &mut xml)
+        .expect("our answers serialize");
+    xml
 }
 
-#[allow(non_snake_case)]
 #[derive(ToXml)]
 #[xml(ns(SOAP))]
 struct Envelope<T> {
@@ -159,14 +160,12 @@ struct Body<T> {
     content: T,
 }
 
-#[allow(non_snake_case)]
 #[derive(ToXml)]
 #[xml(ns(ENUMERATION))]
 struct EnumerateResponse<'a> {
     EnumerationContext: &'a str,
 }
 
-#[allow(non_snake_case)]
 #[derive(ToXml)]
 #[xml(ns(ENUMERATION))]
 struct PullResponse {
@@ -199,7 +198,6 @@ impl ToXml for Output<'_> {
 }
 
 /// A SOAP fault, of which our client reads the reason.
-#[allow(non_snake_case)]
 #[derive(ToXml)]
 #[xml(ns(SOAP))]
 struct Fault<'a> {
@@ -217,7 +215,6 @@ impl<'a> Fault<'a> {
     }
 }
 
-#[allow(non_snake_case)]
 #[derive(ToXml)]
 #[xml(ns(SOAP))]
 struct Reason<'a> {

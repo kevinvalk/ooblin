@@ -6,7 +6,7 @@ use crate::wsman::{Instance, Method, Reference};
 use crate::{Client, Error, Result};
 
 /// The power state, and what the device offers to do about it right now.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, TS)]
+#[derive(Debug, Serialize, TS)]
 #[ts(export, export_to = "core.ts")]
 pub struct Power {
     pub state: PowerState,
@@ -18,10 +18,8 @@ pub struct Power {
 #[ts(export, export_to = "core.ts")]
 pub enum PowerState {
     On,
-    #[serde(rename = "Asleep")]
-    Sleep,
-    #[serde(rename = "Hibernating")]
-    Hibernate,
+    Asleep,
+    Hibernating,
     Off,
     Unknown,
 }
@@ -30,7 +28,6 @@ pub enum PowerState {
 /// into the BIOS setup or a network boot, once.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[ts(export, export_to = "core.ts")]
-#[serde(rename_all = "camelCase")]
 pub enum PowerAction {
     On,
     SoftOff,
@@ -87,8 +84,8 @@ impl Client {
         let association = association.ok_or_else(|| Error::Protocol("no PowerState on the device".into()))?;
         let state = match association.get("PowerState") {
             Some("2") => PowerState::On,
-            Some("3" | "4") => PowerState::Sleep,
-            Some("7") => PowerState::Hibernate,
+            Some("3" | "4") => PowerState::Asleep,
+            Some("7") => PowerState::Hibernating,
             Some("6" | "8" | "13") => PowerState::Off,
             _ => PowerState::Unknown,
         };
@@ -154,7 +151,6 @@ const SYSTEM: Reference = Reference {
     selectors: &[("CreationClassName", "CIM_ComputerSystem"), ("Name", "ManagedSystem")],
 };
 
-#[allow(non_snake_case)]
 #[derive(ToXml)]
 #[xml(rename = "RequestPowerStateChange_INPUT", ns(POWER_MANAGEMENT))]
 struct RequestPowerStateChange<'a> {
@@ -168,7 +164,6 @@ impl Method for RequestPowerStateChange<'_> {
 }
 
 /// Without a `Source`, it clears the boot order.
-#[allow(non_snake_case)]
 #[derive(ToXml)]
 #[xml(rename = "ChangeBootOrder_INPUT", ns(BOOT_CONFIG))]
 struct ChangeBootOrder<'a> {
@@ -180,7 +175,6 @@ impl Method for ChangeBootOrder<'_> {
     const NAME: &'static str = "ChangeBootOrder";
 }
 
-#[allow(non_snake_case)]
 #[derive(ToXml)]
 #[xml(rename = "SetBootConfigRole_INPUT", ns(BOOT_SERVICE))]
 struct SetBootConfigRole<'a> {
@@ -194,7 +188,6 @@ impl Method for SetBootConfigRole<'_> {
 }
 
 /// Exactly the settings AMT takes back.
-#[allow(non_snake_case)]
 #[derive(ToXml)]
 #[xml(rename = "AMT_BootSettingData", ns(BOOT_SETTINGS))]
 struct BootSettingData<'a> {

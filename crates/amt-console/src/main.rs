@@ -98,39 +98,21 @@ fn trust(app: AppHandle, host: &str, fingerprint: String) -> Result<(), CommandE
 }
 
 #[tauri::command]
-async fn power(sessions: State<'_, Sessions>, host: &str) -> Result<Power, CommandError> {
-    Ok(sessions.get(host)?.lock().await.power().await?)
-}
-
-#[tauri::command]
 async fn set_power(sessions: State<'_, Sessions>, host: &str, action: PowerAction) -> Result<(), CommandError> {
     Ok(sessions.get(host)?.lock().await.set_power(action).await?)
 }
 
-#[tauri::command]
-async fn status(sessions: State<'_, Sessions>, host: &str) -> Result<Status, CommandError> {
-    Ok(sessions.get(host)?.lock().await.status().await?)
+/// What the UI reads from a session: a command per `Client` read, named after it.
+macro_rules! reads {
+    ($($name:ident: $type:ty),*) => {$(
+        #[tauri::command]
+        async fn $name(sessions: State<'_, Sessions>, host: &str) -> Result<$type, CommandError> {
+            Ok(sessions.get(host)?.lock().await.$name().await?)
+        }
+    )*};
 }
 
-#[tauri::command]
-async fn hardware(sessions: State<'_, Sessions>, host: &str) -> Result<Hardware, CommandError> {
-    Ok(sessions.get(host)?.lock().await.hardware().await?)
-}
-
-#[tauri::command]
-async fn settings(sessions: State<'_, Sessions>, host: &str) -> Result<Settings, CommandError> {
-    Ok(sessions.get(host)?.lock().await.settings().await?)
-}
-
-#[tauri::command]
-async fn events(sessions: State<'_, Sessions>, host: &str) -> Result<Vec<Event>, CommandError> {
-    Ok(sessions.get(host)?.lock().await.event_log().await?)
-}
-
-#[tauri::command]
-async fn audit(sessions: State<'_, Sessions>, host: &str) -> Result<Vec<AuditRecord>, CommandError> {
-    Ok(sessions.get(host)?.lock().await.audit_log().await?)
-}
+reads!(power: Power, status: Status, hardware: Hardware, settings: Settings, event_log: Vec<Event>, audit_log: Vec<AuditRecord>);
 
 /// The window is titled after the session on screen.
 #[tauri::command]
@@ -142,7 +124,7 @@ fn title(window: WebviewWindow, title: &str) -> Result<(), CommandError> {
 /// `Unreachable` means the device stopped answering, even to a second try.
 #[derive(Serialize, TS)]
 #[ts(export, export_to = "console.ts")]
-#[serde(tag = "kind", rename_all = "camelCase")]
+#[serde(tag = "kind")]
 enum CommandError {
     PinMismatch { message: String, expected: String, actual: String },
     Unreachable { message: String },
@@ -193,8 +175,8 @@ fn main() {
         .manage(Args::parse())
         .manage(Sessions::default())
         .invoke_handler(tauri::generate_handler![
-            launch, devices, connect, disconnect, forget, trust, power, set_power, status, hardware, settings, events,
-            audit, title
+            launch, devices, connect, disconnect, forget, trust, power, set_power, status, hardware, settings,
+            event_log, audit_log, title
         ])
         .run(tauri::generate_context!())
         .expect("the Tauri runtime starts");

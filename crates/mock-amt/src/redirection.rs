@@ -4,6 +4,7 @@
 
 use std::path::{Path, PathBuf};
 
+use amt_core::{decode_fields, encode_fields};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::TcpListener;
 use tokio_rustls::TlsAcceptor;
@@ -45,9 +46,9 @@ async fn session<S: AsyncRead + AsyncWrite + Unpin>(mut stream: S, fixture: &Pat
         stream.read_exact(&mut header).await?;
         let mut data = vec![0; u32::from_le_bytes(header[5..9].try_into().unwrap()) as usize];
         stream.read_exact(&mut data).await?;
-        let (status, data) = match (header[4], fields(&data).as_slice()) {
+        let (status, data) = match (header[4], decode_fields(&data).as_slice()) {
             (0, _) => (0, vec![4]),
-            (4, [_, _, _, _, _, _, response, _]) if response.is_empty() => (1, encode(&[REALM, NONCE, "auth"])),
+            (4, [_, _, _, _, _, _, response, _]) if response.is_empty() => (1, encode_fields(&[REALM, NONCE, "auth"])),
             (4, [user, _, nonce, uri, cnonce, nc, response, qop])
                 if user == USER && nonce == NONCE && *response == digest(uri, nonce, nc, cnonce, qop) =>
             {
@@ -70,19 +71,4 @@ async fn session<S: AsyncRead + AsyncWrite + Unpin>(mut stream: S, fixture: &Pat
 async fn reply<S: AsyncWrite + Unpin>(stream: &mut S, status: u8, data: &[u8]) -> std::io::Result<()> {
     let header = [&[0x14, status, 0, 0, 4][..], &u32::try_from(data.len()).unwrap().to_le_bytes()].concat();
     stream.write_all(&[header.as_slice(), data].concat()).await
-}
-
-/// Authentication data is a run of length-prefixed strings.
-fn fields(mut data: &[u8]) -> Vec<String> {
-    let mut fields = Vec::new();
-    while let Some((&len, rest)) = data.split_first() {
-        let len = usize::from(len).min(rest.len());
-        fields.push(String::from_utf8_lossy(&rest[..len]).into_owned());
-        data = &rest[len..];
-    }
-    fields
-}
-
-fn encode(values: &[&str]) -> Vec<u8> {
-    values.iter().flat_map(|value| std::iter::once(value.len() as u8).chain(value.bytes())).collect()
 }

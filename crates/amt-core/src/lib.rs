@@ -1,5 +1,7 @@
 //! Intel AMT over TLS, without a webview. Every socket lives in `net`.
 
+#![allow(non_snake_case, reason = "our XML types name their fields the way CIM does, `PowerState` say")]
+
 mod client;
 mod hardware;
 mod info;
@@ -14,7 +16,7 @@ pub use client::Client;
 pub use hardware::{Battery, Bios, Disk, Hardware, Module, Motherboard, Processor, System};
 pub use info::Info;
 pub use logs::{AuditRecord, Event, Severity};
-pub use net::{Connection, Redirection, Session, fingerprint};
+pub use net::{Connection, Redirection, Session, decode_fields, encode_fields, fingerprint};
 pub use power::{Power, PowerAction, PowerState};
 pub use settings::{Account, Settings};
 pub use status::{Ipv4, Ipv6, Port, Status};

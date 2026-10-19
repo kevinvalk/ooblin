@@ -4,7 +4,7 @@
 
 use std::time::Duration;
 
-use md5::{Digest as _, Md5};
+use digest_auth::{AuthContext, Charset, Qop, WwwAuthenticateHeader};
 use rustls::pki_types::ServerName;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
@@ -89,14 +89,28 @@ impl Redirection {
 
         // Fields are user, realm, nonce, uri, cnonce, nc, response and qop. Sent empty, AMT answers with a challenge.
         let (user, uri) = (target.user.as_str(), AUTH_URI);
-        let (_, challenge) = self.authenticate(DIGEST, &fields(&[user, "", "", uri, "", "", "", ""])).await?;
-        let [realm, nonce, qop] = parse_fields(&challenge)?;
-        let (cnonce, nc) = (cnonce(), "00000002");
-        let ha1 = md5_hex(&format!("{user}:{realm}:{}", target.password));
-        let ha2 = md5_hex(&format!("POST:{uri}"));
-        let response = md5_hex(&format!("{ha1}:{nonce}:{nc}:{cnonce}:{qop}:{ha2}"));
-
-        let answer = fields(&[user, &realm, &nonce, uri, &cnonce, nc, &response, &qop]);
+        let (_, challenge) = self.authenticate(DIGEST, &encode_fields(&[user, "", "", uri, "", "", "", ""])).await?;
+        let Ok([realm, nonce, qop]) = <[String; 3]>::try_from(decode_fields(&challenge)) else {
+            return Err(Error::Protocol("not a Digest challenge".into()));
+        };
+        // This is the session's second message, so its count is 2, the way MeshCommander has it.
+        let mut challenge = WwwAuthenticateHeader {
+            domain: None,
+            realm,
+            nonce,
+            opaque: None,
+            stale: false,
+            algorithm: Default::default(),
+            qop: Some(vec![Qop::AUTH]),
+            userhash: false,
+            charset: Charset::ASCII,
+            nc: 1,
+        };
+        let digest = challenge
+            .respond(&AuthContext::new_post(user, &target.password, uri, None::<&[u8]>))
+            .map_err(|error| Error::Protocol(error.to_string()))?;
+        let (cnonce, nc) = (digest.cnonce.unwrap_or_default(), format!("{:08x}", digest.nc));
+        let answer = encode_fields(&[user, &digest.realm, &digest.nonce, uri, &cnonce, &nc, &digest.response, &qop]);
         match self.authenticate(DIGEST, &answer).await? {
             (0, _) => Ok(()),
             _ => Err(Error::Unauthorized),
@@ -119,30 +133,19 @@ impl Redirection {
     }
 }
 
-/// Length-prefixed strings, the way every authentication field travels.
-fn fields(values: &[&str]) -> Vec<u8> {
+/// Authentication fields travel as length-prefixed strings, both ways.
+pub fn encode_fields(values: &[&str]) -> Vec<u8> {
     values.iter().flat_map(|value| std::iter::once(value.len() as u8).chain(value.bytes())).collect()
 }
 
-fn parse_fields<const N: usize>(mut data: &[u8]) -> Result<[String; N]> {
-    let mut fields = std::array::from_fn(|_| String::new());
-    for field in &mut fields {
-        let (&len, rest) = data.split_first().ok_or_else(|| Error::Protocol("short Digest challenge".into()))?;
-        let value = rest.get(..usize::from(len)).ok_or_else(|| Error::Protocol("short Digest challenge".into()))?;
-        *field = String::from_utf8_lossy(value).into_owned();
-        data = &rest[usize::from(len)..];
+pub fn decode_fields(mut data: &[u8]) -> Vec<String> {
+    let mut fields = Vec::new();
+    while let Some((&len, rest)) = data.split_first() {
+        let len = usize::from(len).min(rest.len());
+        fields.push(String::from_utf8_lossy(&rest[..len]).into_owned());
+        data = &rest[len..];
     }
-    Ok(fields)
-}
-
-fn cnonce() -> String {
-    let mut bytes = [0u8; 16];
-    getrandom::fill(&mut bytes).expect("the OS has randomness");
-    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
-}
-
-fn md5_hex(input: &str) -> String {
-    format!("{:x}", Md5::digest(input))
+    fields
 }
 
 fn io(error: std::io::Error) -> Error {

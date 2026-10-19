@@ -3,9 +3,8 @@ use ts_rs::TS;
 
 use crate::{Client, Result};
 
-#[derive(Debug, Clone, Serialize, TS)]
+#[derive(Debug, Serialize, TS)]
 #[ts(export, export_to = "core.ts")]
-#[serde(rename_all = "camelCase")]
 pub struct Info {
     /// The host name, with its domain if it has one.
     pub name: String,

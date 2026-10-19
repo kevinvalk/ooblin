@@ -60,7 +60,7 @@
     {#if connecting}<LoaderCircle class="size-4 animate-spin" /> Connecting…{:else}Connect{/if}
   </button>
 
-  {#if error?.kind === "pinMismatch"}
+  {#if error?.kind === "PinMismatch"}
     <div class="grid gap-3">
       <p>
         <strong class="text-danger">The certificate has changed.</strong> That's expected after reprovisioning or

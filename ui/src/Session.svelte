@@ -18,8 +18,8 @@
   import { ChevronDown, RefreshCw } from "@lucide/svelte";
   import { invoke } from "@tauri-apps/api/core";
   import type { CommandError } from "./bindings/console";
-  import Audit from "./pages/Audit.svelte";
-  import Events from "./pages/Events.svelte";
+  import AuditLog from "./pages/AuditLog.svelte";
+  import EventLog from "./pages/EventLog.svelte";
   import Hardware from "./pages/Hardware.svelte";
   import Settings from "./pages/Settings.svelte";
   import Status from "./pages/Status.svelte";
@@ -34,8 +34,8 @@
   const TABS = {
     status: { label: "Status", page: Status, live: true },
     hardware: { label: "Hardware", page: Hardware, live: false },
-    events: { label: "Event log", page: Events, live: true },
-    audit: { label: "Audit log", page: Audit, live: true },
+    event_log: { label: "Event log", page: EventLog, live: true },
+    audit_log: { label: "Audit log", page: AuditLog, live: true },
     settings: { label: "Settings", page: Settings, live: false },
   };
   let tab: keyof typeof TABS = $state("status");
@@ -61,11 +61,11 @@
   }
 
   let dialog: HTMLDialogElement;
-  let confirming = $state({ action: "on" as PowerAction, label: "" });
+  let confirming = $state({ action: "On" as PowerAction, label: "" });
 
   /** Powering on needs no second thought, everything else does. */
   function choose(action: PowerAction, label: string) {
-    if (action.startsWith("on")) return change(action, label);
+    if (action.startsWith("On")) return change(action, label);
     confirming = { action, label };
     dialog.returnValue = "";
     dialog.showModal();
@@ -84,7 +84,7 @@
   /** A device that stopped answering is lost, anything else is said where it happened. */
   function failed(error: unknown, show: (message: string) => void) {
     const failure = error as CommandError;
-    if (failure.kind === "unreachable") onlost(failure);
+    if (failure.kind === "Unreachable") onlost(failure);
     else show(failure.message ?? String(error));
   }
 
@@ -131,22 +131,22 @@
       popover
       class="fixed inset-auto top-15 right-8 m-0 min-w-52 rounded-lg border border-line bg-canvas p-1 text-ink shadow-xl [&>hr]:my-1 [&>hr]:border-line"
     >
-      {@render action("on", "Power on", "Turns the device on.")}
+      {@render action("On", "Power on", "Turns the device on.")}
       <hr />
-      {@render action("softReset", "Restart", "Asks the OS to restart, while AMT can ask it.")}
-      {@render action("softOff", "Shut down", "Asks the OS to shut down, while AMT can ask it.")}
-      {@render action("sleep", "Sleep", "Asks the OS to sleep, while AMT can ask it.")}
-      {@render action("hibernate", "Hibernate", "Asks the OS to hibernate, while AMT can ask it.")}
+      {@render action("SoftReset", "Restart", "Asks the OS to restart, while AMT can ask it.")}
+      {@render action("SoftOff", "Shut down", "Asks the OS to shut down, while AMT can ask it.")}
+      {@render action("Sleep", "Sleep", "Asks the OS to sleep, while AMT can ask it.")}
+      {@render action("Hibernate", "Hibernate", "Asks the OS to hibernate, while AMT can ask it.")}
       <hr />
-      {@render action("reset", "Reset", "Restarts at once, like the reset button. Unsaved work is lost.")}
-      {@render action("cycle", "Power cycle", "Cuts the power, then turns it back on.")}
-      {@render action("off", "Power off", "Cuts the power at once, like holding the power button.")}
-      {@render action("nmi", "Send NMI", "Sends a non-maskable interrupt, on which most OSes write a crash dump.")}
+      {@render action("Reset", "Reset", "Restarts at once, like the reset button. Unsaved work is lost.")}
+      {@render action("Cycle", "Power cycle", "Cuts the power, then turns it back on.")}
+      {@render action("Off", "Power off", "Cuts the power at once, like holding the power button.")}
+      {@render action("Nmi", "Send NMI", "Sends a non-maskable interrupt, on which most OSes write a crash dump.")}
       <hr />
-      {@render action("onToBios", "Power on to BIOS", "Powers on into the BIOS setup, this once.")}
-      {@render action("resetToBios", "Reset to BIOS", "Resets at once into the BIOS setup, this once.")}
-      {@render action("onToPxe", "Power on to PXE", "Powers on and boots from the network, this once.")}
-      {@render action("resetToPxe", "Reset to PXE", "Resets at once and boots from the network, this once.")}
+      {@render action("OnToBios", "Power on to BIOS", "Powers on into the BIOS setup, this once.")}
+      {@render action("ResetToBios", "Reset to BIOS", "Resets at once into the BIOS setup, this once.")}
+      {@render action("OnToPxe", "Power on to PXE", "Powers on and boots from the network, this once.")}
+      {@render action("ResetToPxe", "Reset to PXE", "Resets at once and boots from the network, this once.")}
     </div>
   </header>
 

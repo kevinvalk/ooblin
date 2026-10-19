@@ -7,9 +7,8 @@ use crate::wsman::Method;
 use crate::{Client, Info, PowerState, Result};
 
 /// What the device's own status page shows, and a bit more: the AMT itself, remote access and the network.
-#[derive(Debug, Clone, Serialize, TS)]
+#[derive(Debug, Serialize, TS)]
 #[ts(export, export_to = "core.ts")]
-#[serde(rename_all = "camelCase")]
 pub struct Status {
     pub info: Info,
     pub power: PowerState,
@@ -26,9 +25,8 @@ pub struct Status {
 }
 
 /// AMT has one wired port and maybe a wireless one.
-#[derive(Debug, Clone, Serialize, TS)]
+#[derive(Debug, Serialize, TS)]
 #[ts(export, export_to = "core.ts")]
-#[serde(rename_all = "camelCase")]
 pub struct Port {
     pub wireless: bool,
     pub mac: String,
@@ -39,9 +37,8 @@ pub struct Port {
     pub ipv6: Option<Ipv6>,
 }
 
-#[derive(Debug, Clone, Serialize, TS)]
+#[derive(Debug, Serialize, TS)]
 #[ts(export, export_to = "core.ts")]
-#[serde(rename_all = "camelCase")]
 pub struct Ipv4 {
     pub dhcp: bool,
     pub address: String,
@@ -51,9 +48,8 @@ pub struct Ipv4 {
     pub secondary_dns: String,
 }
 
-#[derive(Debug, Clone, Serialize, TS)]
+#[derive(Debug, Serialize, TS)]
 #[ts(export, export_to = "core.ts")]
-#[serde(rename_all = "camelCase")]
 pub struct Ipv6 {
     pub addresses: Vec<String>,
     pub gateway: String,

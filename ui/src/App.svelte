@@ -54,8 +54,8 @@
 
   /** Our commands fail with a `CommandError`, Tauri itself with a string. A device that didn't answer gets named. */
   function explain(error: unknown, unreachable: string): CommandError {
-    const failure = typeof error === "string" ? { kind: "failed" as const, message: error } : (error as CommandError);
-    return failure.kind === "unreachable" ? { ...failure, message: `${unreachable}: ${failure.message}` } : failure;
+    const failure = typeof error === "string" ? { kind: "Failed" as const, message: error } : (error as CommandError);
+    return failure.kind === "Unreachable" ? { ...failure, message: `${unreachable}: ${failure.message}` } : failure;
   }
 
   function show(host: string) {
@@ -94,7 +94,7 @@
         session.changing = undefined;
       }
     } catch (error) {
-      if ((error as CommandError).kind === "unreachable") lost(host, error as CommandError);
+      if ((error as CommandError).kind === "Unreachable") lost(host, error as CommandError);
       else if (host === current) message = explain(error, host).message;
     }
   }

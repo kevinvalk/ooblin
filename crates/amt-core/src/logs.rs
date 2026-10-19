@@ -10,9 +10,8 @@ use ts_rs::TS;
 use crate::wsman::Method;
 use crate::{Client, Error, Result};
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, TS)]
+#[derive(Debug, Serialize, TS)]
 #[ts(export, export_to = "core.ts")]
-#[serde(rename_all = "camelCase")]
 pub struct Event {
     /// Unix seconds.
     pub time: u32,
@@ -30,9 +29,8 @@ pub enum Severity {
     Critical,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, TS)]
+#[derive(Debug, Serialize, TS)]
 #[ts(export, export_to = "core.ts")]
-#[serde(rename_all = "camelCase")]
 pub struct AuditRecord {
     /// Unix seconds.
     pub time: u32,
@@ -94,7 +92,6 @@ impl Method for PositionToFirstRecord {
     const NAME: &'static str = "PositionToFirstRecord";
 }
 
-#[allow(non_snake_case)]
 #[derive(ToXml)]
 #[xml(rename = "GetRecords_INPUT", ns(MESSAGE_LOG))]
 struct GetRecords<'a> {
@@ -107,7 +104,6 @@ impl Method for GetRecords<'_> {
     const NAME: &'static str = "GetRecords";
 }
 
-#[allow(non_snake_case)]
 #[derive(ToXml)]
 #[xml(rename = "ReadRecords_INPUT", ns(AUDIT_LOG))]
 struct ReadRecords {

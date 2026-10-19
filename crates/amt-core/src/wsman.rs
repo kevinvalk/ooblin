@@ -65,11 +65,12 @@ fn envelope(action: &str, uri: &str, message_id: u32, body: Option<impl ToXml>) 
         ReplyTo: ReplyTo { Address: "http://schemas.xmlsoap.org/ws/2004/08/addressing/role/anonymous" },
         OperationTimeout: "PT60S",
     };
-    let xml = instant_xml::to_string(&Envelope { Header: header, Body: Body { content: body } });
-    String::from(r#"<?xml version="1.0" encoding="utf-8"?>"#) + &xml.expect("our requests serialize")
+    let mut xml = String::from(r#"<?xml version="1.0" encoding="utf-8"?>"#);
+    instant_xml::to_writer(&Envelope { Header: header, Body: Body { content: body } }, &mut xml)
+        .expect("our requests serialize");
+    xml
 }
 
-#[allow(non_snake_case)]
 #[derive(ToXml)]
 #[xml(ns(SOAP, a = ADDRESSING, w = WSMAN))]
 struct Envelope<'a, T> {
@@ -77,7 +78,6 @@ struct Envelope<'a, T> {
     Body: Body<T>,
 }
 
-#[allow(non_snake_case)]
 #[derive(ToXml)]
 #[xml(ns(SOAP))]
 struct Header<'a> {
@@ -94,7 +94,6 @@ struct Header<'a> {
     OperationTimeout: &'a str,
 }
 
-#[allow(non_snake_case)]
 #[derive(ToXml)]
 #[xml(ns(ADDRESSING))]
 struct ReplyTo<'a> {
@@ -111,7 +110,6 @@ struct Body<T> {
 #[xml(ns(ENUMERATION))]
 struct Enumerate;
 
-#[allow(non_snake_case)]
 #[derive(ToXml)]
 #[xml(ns(ENUMERATION))]
 struct Pull<'a> {
@@ -154,7 +152,6 @@ struct Address<'a> {
     value: &'a str,
 }
 
-#[allow(non_snake_case)]
 #[derive(ToXml)]
 #[xml(ns(ADDRESSING))]
 struct ReferenceParameters<'a> {
@@ -163,14 +160,12 @@ struct ReferenceParameters<'a> {
     SelectorSet: SelectorSet<'a>,
 }
 
-#[allow(non_snake_case)]
 #[derive(ToXml)]
 #[xml(ns(WSMAN))]
 struct SelectorSet<'a> {
     Selector: &'a [Selector<'a>],
 }
 
-#[allow(non_snake_case)]
 #[derive(ToXml)]
 #[xml(ns(WSMAN))]
 struct Selector<'a> {
@@ -183,7 +178,7 @@ struct Selector<'a> {
 /// A CIM instance with its properties in document order, array properties appear once per element. Values are trimmed
 /// (AMT pads part numbers) and nested values collapse to their texts, a line each: `<ReleaseDate><Datetime>` to its
 /// date, a reference to its address, resource URI and selector values.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug)]
 pub struct Instance {
     pub class: String,
     pub properties: Vec<(String, String)>,

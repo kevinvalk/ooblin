@@ -11,12 +11,12 @@
     <div><dt>Model</dt><dd>{data?.system.model}</dd></div>
     <div><dt>Manufacturer</dt><dd>{data?.system.manufacturer}</dd></div>
     <div><dt>Version</dt><dd>{data?.system.version}</dd></div>
-    <div><dt>Serial number</dt><dd>{data?.system.serialNumber}</dd></div>
+    <div><dt>Serial number</dt><dd>{data?.system.serial_number}</dd></div>
     <div><dt>System ID</dt><dd>{data?.system.id}</dd></div>
     {#each data?.processors ?? [undefined] as processor, i}
       <div>
         <dt>CPU {i + 1}</dt>
-        <dd>{processor && `${processor.model} @ ${[processor.mhz, processor.maxMhz].filter(Boolean).join(" / ")} MHz`}</dd>
+        <dd>{processor && `${processor.model} @ ${[processor.mhz, processor.max_mhz].filter(Boolean).join(" / ")} MHz`}</dd>
       </div>
     {/each}
   </dl>
@@ -28,8 +28,8 @@
     <div><dt>Product</dt><dd>{data?.motherboard.product}</dd></div>
     <div><dt>Manufacturer</dt><dd>{data?.motherboard.manufacturer}</dd></div>
     <div><dt>Version</dt><dd>{data?.motherboard.version}</dd></div>
-    <div><dt>Serial number</dt><dd>{data?.motherboard.serialNumber}</dd></div>
-    <div><dt>Asset tag</dt><dd>{data?.motherboard.assetTag}</dd></div>
+    <div><dt>Serial number</dt><dd>{data?.motherboard.serial_number}</dd></div>
+    <div><dt>Asset tag</dt><dd>{data?.motherboard.asset_tag}</dd></div>
     <div><dt>Replaceable</dt><dd>{data && (data.motherboard.replaceable ? "Yes" : "No")}</dd></div>
   </dl>
 </section>
@@ -56,9 +56,9 @@
           <div><dt>Family</dt><dd>{processor?.family}</dd></div>
           <div><dt>Socket</dt><dd>{processor?.socket}</dd></div>
           <div><dt>Speed</dt><dd>{processor?.mhz && `${processor.mhz} MHz`}</dd></div>
-          <div><dt>Maximum speed</dt><dd>{processor?.maxMhz && `${processor.maxMhz} MHz`}</dd></div>
+          <div><dt>Maximum speed</dt><dd>{processor?.max_mhz && `${processor.max_mhz} MHz`}</dd></div>
           <div><dt>Status</dt><dd>{processor?.status}</dd></div>
-          <div><dt>Upgrade method</dt><dd>{processor?.upgradeMethod}</dd></div>
+          <div><dt>Upgrade method</dt><dd>{processor?.upgrade_method}</dd></div>
         </dl>
       </div>
     {/each}
@@ -75,11 +75,11 @@
           <div><dt>Size</dt><dd>{module?.bytes && `${module.bytes / 2 ** 30} GB`}</dd></div>
           <div><dt>Speed</dt><dd>{module?.mhz && `${module.mhz} MHz`}</dd></div>
           <div><dt>Type</dt><dd>{module?.kind}</dd></div>
-          <div><dt>Form factor</dt><dd>{module?.formFactor}</dd></div>
+          <div><dt>Form factor</dt><dd>{module?.form_factor}</dd></div>
           <div><dt>Manufacturer</dt><dd>{module?.manufacturer}</dd></div>
-          <div><dt>Part number</dt><dd>{module?.partNumber}</dd></div>
-          <div><dt>Serial number</dt><dd>{module?.serialNumber}</dd></div>
-          <div><dt>Asset tag</dt><dd>{module?.assetTag}</dd></div>
+          <div><dt>Part number</dt><dd>{module?.part_number}</dd></div>
+          <div><dt>Serial number</dt><dd>{module?.serial_number}</dd></div>
+          <div><dt>Asset tag</dt><dd>{module?.asset_tag}</dd></div>
         </dl>
       </div>
     {/each}
@@ -94,7 +94,7 @@
         <h3>Disk {i + 1}</h3>
         <dl class="card">
           <div><dt>Model</dt><dd>{disk?.model}</dd></div>
-          <div><dt>Serial number</dt><dd>{disk?.serialNumber}</dd></div>
+          <div><dt>Serial number</dt><dd>{disk?.serial_number}</dd></div>
           <div><dt>Size</dt><dd>{disk?.bytes && `${Math.round(disk.bytes / 1e9)} GB`}</dd></div>
         </dl>
       </div>
@@ -111,8 +111,8 @@
         <h3>Battery {i + 1}</h3>
         <dl class="card">
           <div><dt>Name</dt><dd>{battery.name}</dd></div>
-          <div><dt>Charge</dt><dd>{battery.chargePercent && `${battery.chargePercent} %`}</dd></div>
-          <div><dt>Design capacity</dt><dd>{battery.designCapacityMwh && `${battery.designCapacityMwh / 1000} Wh`}</dd></div>
+          <div><dt>Charge</dt><dd>{battery.charge_percent && `${battery.charge_percent} %`}</dd></div>
+          <div><dt>Design capacity</dt><dd>{battery.design_capacity_mwh && `${battery.design_capacity_mwh / 1000} Wh`}</dd></div>
         </dl>
       </div>
     {:else}

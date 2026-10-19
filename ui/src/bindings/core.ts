@@ -12,14 +12,14 @@ export type AuditRecord = {
  */
 time: number, application: string, event: string, initiator: string, address: string, details: string, };
 
-export type Battery = { name: string, chargePercent: number | null, designCapacityMwh: number | null, };
+export type Battery = { name: string, charge_percent: number | null, design_capacity_mwh: number | null, };
 
 /**
  * `released` is a date, SMBIOS keeps no time.
  */
 export type Bios = { vendor: string, version: string, released: string, features: Array<string>, };
 
-export type Disk = { model: string, serialNumber: string, bytes: number | null, };
+export type Disk = { model: string, serial_number: string, bytes: number | null, };
 
 export type Event = { 
 /**
@@ -41,24 +41,24 @@ name: string, version: string, build: string | null,
 /**
  * "Admin" or "Client", only admin control mode redirects without asking someone at the device for consent.
  */
-controlMode: string, 
+control_mode: string, 
 /**
  * The pinned certificate's, see `fingerprint`.
  */
 fingerprint: string, };
 
-export type Ipv4 = { dhcp: boolean, address: string, subnetMask: string, gateway: string, primaryDns: string, secondaryDns: string, };
+export type Ipv4 = { dhcp: boolean, address: string, subnet_mask: string, gateway: string, primary_dns: string, secondary_dns: string, };
 
-export type Ipv6 = { addresses: Array<string>, gateway: string, primaryDns: string, secondaryDns: string, };
+export type Ipv6 = { addresses: Array<string>, gateway: string, primary_dns: string, secondary_dns: string, };
 
-export type Module = { slot: string, bytes: number | null, mhz: number | null, kind: string, formFactor: string, manufacturer: string, partNumber: string, serialNumber: string, assetTag: string, };
+export type Module = { slot: string, bytes: number | null, mhz: number | null, kind: string, form_factor: string, manufacturer: string, part_number: string, serial_number: string, asset_tag: string, };
 
-export type Motherboard = { product: string, manufacturer: string, version: string, serialNumber: string, assetTag: string, replaceable: boolean, };
+export type Motherboard = { product: string, manufacturer: string, version: string, serial_number: string, asset_tag: string, replaceable: boolean, };
 
 /**
  * AMT has one wired port and maybe a wireless one.
  */
-export type Port = { wireless: boolean, mac: string, linkUp: boolean, mbps: number | null, ipv4: Ipv4, 
+export type Port = { wireless: boolean, mac: string, link_up: boolean, mbps: number | null, ipv4: Ipv4, 
 /**
  * `None` when IPv6 is off.
  */
@@ -73,23 +73,23 @@ export type Power = { state: PowerState, actions: Array<PowerAction>, };
  * The power changes AMT can make. The `Soft` ones, `Sleep` and `Hibernate` ask the OS, the `To` ones power on or reset
  * into the BIOS setup or a network boot, once.
  */
-export type PowerAction = "on" | "softOff" | "off" | "softReset" | "reset" | "cycle" | "sleep" | "hibernate" | "nmi" | "onToBios" | "onToPxe" | "resetToBios" | "resetToPxe";
+export type PowerAction = "On" | "SoftOff" | "Off" | "SoftReset" | "Reset" | "Cycle" | "Sleep" | "Hibernate" | "Nmi" | "OnToBios" | "OnToPxe" | "ResetToBios" | "ResetToPxe";
 
 /**
  * The CIM `PowerState`s AMT reports, folded into what a person cares about and named the way they'd say it.
  */
 export type PowerState = "On" | "Asleep" | "Hibernating" | "Off" | "Unknown";
 
-export type Processor = { model: string, manufacturer: string, family: string, socket: string, mhz: number | null, maxMhz: number | null, status: string, upgradeMethod: string, };
+export type Processor = { model: string, manufacturer: string, family: string, socket: string, mhz: number | null, max_mhz: number | null, status: string, upgrade_method: string, };
 
 /**
  * How the device is set up: power policy, ping, name and accounts. What it allows remotely is in its status.
  */
-export type Settings = { powerPolicy: string, respondToPing: boolean, hostName: string, domainName: string, 
+export type Settings = { power_policy: string, respond_to_ping: boolean, host_name: string, domain_name: string, 
 /**
  * Whether the OS's name is AMT's too.
  */
-sharedWithOs: boolean, accounts: Array<Account>, };
+shared_with_os: boolean, accounts: Array<Account>, };
 
 /**
  * MeshCommander's three icons for the PET event severity.
@@ -99,14 +99,14 @@ export type Severity = "Info" | "Warning" | "Critical";
 /**
  * What the device's own status page shows, and a bit more: the AMT itself, remote access and the network.
  */
-export type Status = { info: Info, power: PowerState, systemId: string, 
+export type Status = { info: Info, power: PowerState, system_id: string, 
 /**
  * Unix seconds.
  */
-clock: number | null, redirection: boolean, serialOverLan: boolean, ideRedirection: boolean, kvm: boolean, 
+clock: number | null, redirection: boolean, serial_over_lan: boolean, ide_redirection: boolean, kvm: boolean, 
 /**
  * When someone at the device has to read out a code first: "Not required", "For KVM" or "For all redirection".
  */
-userConsent: string, ports: Array<Port>, };
+user_consent: string, ports: Array<Port>, };
 
-export type System = { model: string, manufacturer: string, version: string, serialNumber: string, id: string, };
+export type System = { model: string, manufacturer: string, version: string, serial_number: string, id: string, };

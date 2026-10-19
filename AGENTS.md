@@ -6,8 +6,8 @@ the UI puts it in words.
 
 ## Working here
 
-- **Rule one, above all others: elegance.** Run the `elegance` skill (`.claude/skills/elegance/SKILL.md`) on every
-  change before calling it done, and whenever the user asks for elegance.
+- **Rule one, above all others: elegance.** Run the `elegance` skill (`.claude/skills/elegance/SKILL.md`), at least
+  three rounds, on every change before calling it done, and whenever the user asks for elegance.
 - Tauri drives everything, `cargo tauri dev` and `build` start Vite. Cross-platform from day one.
 - `cargo test` runs the library against the mock AMT and writes the UI's types to `ui/src/bindings` (ts-rs, committed),
   `npm run build --prefix ui` typechecks the UI. Only `crates/amt-core/src/net/` may touch the network, tests enforce it.
