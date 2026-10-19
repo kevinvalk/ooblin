@@ -3,11 +3,13 @@
 //! Apache-2.0). Times are UTC, as AMT keeps them and MeshCommander shows them.
 
 use base64::prelude::{BASE64_STANDARD, Engine as _};
+use instant_xml::ToXml;
 use serde::Serialize;
 use ts_rs::TS;
 
 use crate::decode::utc;
-use crate::{Client, Error, Result, wsman};
+use crate::wsman::Method;
+use crate::{Client, Error, Result};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, TS)]
 #[ts(export, export_to = "core.ts")]
@@ -46,7 +48,7 @@ pub struct AuditRecord {
 /// a page or two (AMT 19: 235 events, 76 audit records in one).
 impl Client {
     pub async fn event_log(&mut self) -> Result<Vec<Event>> {
-        let first = match self.query("AMT_MessageLog", "PositionToFirstRecord", &position_to_first_record()).await {
+        let first = match self.query(&PositionToFirstRecord).await {
             // 2 is NoRecordExists.
             Err(Error::Method { code, .. }) if code == "2" => return Ok(Vec::new()),
             first => first?,
@@ -54,7 +56,8 @@ impl Client {
         let mut iteration = first.text("IterationIdentifier");
         let mut events = Vec::new();
         loop {
-            let page = self.query("AMT_MessageLog", "GetRecords", &get_records(&iteration)).await?;
+            // 390 is the most AMT returns at once.
+            let page = self.query(&GetRecords { IterationIdentifier: &iteration, MaxReadRecords: 390 }).await?;
             let records: Vec<_> = page.all("RecordArray").collect();
             events.extend(records.iter().filter_map(|record| event(&base64(record)?)));
             if page.get("NoMoreRecords") == Some("true") || records.is_empty() {
@@ -67,7 +70,7 @@ impl Client {
     pub async fn audit_log(&mut self) -> Result<Vec<AuditRecord>> {
         let (mut records, mut read) = (Vec::new(), 0);
         loop {
-            let page = self.query("AMT_AuditLog", "ReadRecords", &read_records(read + 1)).await?;
+            let page = self.query(&ReadRecords { StartIndex: read + 1 }).await?;
             let page_records: Vec<_> = page.all("EventRecords").collect();
             records.extend(page_records.iter().filter_map(|record| audit_record(&base64(record)?)));
             read += page_records.len();
@@ -80,17 +83,41 @@ impl Client {
     }
 }
 
-fn position_to_first_record() -> String {
-    wsman::input("AMT_MessageLog", "PositionToFirstRecord", &[])
+const MESSAGE_LOG: &str = "http://intel.com/wbem/wscim/1/amt-schema/1/AMT_MessageLog";
+const AUDIT_LOG: &str = "http://intel.com/wbem/wscim/1/amt-schema/1/AMT_AuditLog";
+
+#[derive(ToXml)]
+#[xml(rename = "PositionToFirstRecord_INPUT", ns(MESSAGE_LOG))]
+struct PositionToFirstRecord;
+
+impl Method for PositionToFirstRecord {
+    const URI: &'static str = MESSAGE_LOG;
+    const NAME: &'static str = "PositionToFirstRecord";
 }
 
-/// 390 is the most AMT returns at once.
-fn get_records(iteration: &str) -> String {
-    wsman::input("AMT_MessageLog", "GetRecords", &[("IterationIdentifier", iteration), ("MaxReadRecords", "390")])
+#[allow(non_snake_case)]
+#[derive(ToXml)]
+#[xml(rename = "GetRecords_INPUT", ns(MESSAGE_LOG))]
+struct GetRecords<'a> {
+    IterationIdentifier: &'a str,
+    MaxReadRecords: u16,
 }
 
-fn read_records(start: usize) -> String {
-    wsman::input("AMT_AuditLog", "ReadRecords", &[("StartIndex", &start.to_string())])
+impl Method for GetRecords<'_> {
+    const URI: &'static str = MESSAGE_LOG;
+    const NAME: &'static str = "GetRecords";
+}
+
+#[allow(non_snake_case)]
+#[derive(ToXml)]
+#[xml(rename = "ReadRecords_INPUT", ns(AUDIT_LOG))]
+struct ReadRecords {
+    StartIndex: usize,
+}
+
+impl Method for ReadRecords {
+    const URI: &'static str = AUDIT_LOG;
+    const NAME: &'static str = "ReadRecords";
 }
 
 fn base64(record: &str) -> Option<Vec<u8>> {

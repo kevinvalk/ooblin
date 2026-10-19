@@ -1,8 +1,10 @@
+use instant_xml::ToXml;
 use serde::Serialize;
 use ts_rs::TS;
 
 use crate::decode::{guid, utc};
-use crate::{Client, Info, PowerState, Result, wsman};
+use crate::wsman::Method;
+use crate::{Client, Info, PowerState, Result};
 
 /// What the device's own status page shows, and a bit more: the AMT itself, remote access and the network. Like all we
 /// hand the UI, it reads the way a person would say it, empty where the device left something out.
@@ -74,7 +76,7 @@ impl Client {
         let info = self.info().await?;
         let power = self.power().await?;
         let package = self.enumerate("CIM_ComputerSystemPackage").await?;
-        let clock = self.query("AMT_TimeSynchronizationService", "GetLowAccuracyTimeSynch", &clock_input()).await?;
+        let clock = self.query(&GetLowAccuracyTimeSynch).await?;
         let settings = self.enumerate("AMT_EthernetPortSettings").await?;
         let ports = self.enumerate("CIM_EthernetPort").await?;
         let ipv6 = self.enumerate("IPS_IPv6PortSettings").await?;
@@ -149,6 +151,13 @@ impl Client {
     }
 }
 
-fn clock_input() -> String {
-    wsman::input("AMT_TimeSynchronizationService", "GetLowAccuracyTimeSynch", &[])
+const TIME_SYNCHRONIZATION: &str = "http://intel.com/wbem/wscim/1/amt-schema/1/AMT_TimeSynchronizationService";
+
+#[derive(ToXml)]
+#[xml(rename = "GetLowAccuracyTimeSynch_INPUT", ns(TIME_SYNCHRONIZATION))]
+struct GetLowAccuracyTimeSynch;
+
+impl Method for GetLowAccuracyTimeSynch {
+    const URI: &'static str = TIME_SYNCHRONIZATION;
+    const NAME: &'static str = "GetLowAccuracyTimeSynch";
 }

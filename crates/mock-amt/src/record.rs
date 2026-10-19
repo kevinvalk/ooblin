@@ -9,12 +9,10 @@
 //!   up on the host. Message layouts from MeshCommander (Apache-2.0).
 
 use std::io::Write as _;
-use std::ops::Range;
 use std::path::Path;
 use std::time::Duration;
 
 use amt_core::{Client, Connection, Error, Fingerprint, Redirection, Session, Target, wsman};
-use roxmltree::Document;
 
 use crate::scrub::scrub;
 use crate::transcript::{Direction, Transcript};
@@ -338,34 +336,18 @@ pub async fn crawl(device: &mut Connection, dir: &Path) -> anyhow::Result<usize>
         }
         let enumerate = fetch(device, wsman::enumerate(class, 0)).await?;
         let mut context = enumerate.as_deref().map(wsman::parse_enumerate).transpose()?;
-        let mut pages = Vec::new();
+        // Pages as `Class.Pull.xml`, `Class.Pull.2.xml` and so on, the replay serves them in turn.
+        let mut pages = 0;
         while let Some(current) = context {
             let xml = device.post(wsman::pull(class, &current, 0)).await?;
             context = wsman::parse_pull(&xml)?.next;
-            pages.push(xml);
+            pages += 1;
+            save(class, &if pages == 1 { "Pull".to_owned() } else { format!("Pull.{pages}") }, &xml)?;
         }
-        if !pages.is_empty() {
-            save(class, "Pull", &merge(&pages))?;
-        }
-        answered += usize::from(get.is_some() || !pages.is_empty());
+        answered += usize::from(get.is_some() || pages > 0);
     }
     eprintln!("\r WS-Man  {answered} of {} classes answered\x1b[K", CLASSES.len());
     Ok(answered)
-}
-
-/// Pages of one enumeration as one: the last page (it carries EndOfSequence) with everyone's items.
-fn merge(pages: &[String]) -> String {
-    let last = pages.last().expect("at least one page");
-    let Some(range) = items(last) else { return last.clone() };
-    let all: String = pages.iter().filter_map(|page| Some(&page[items(page)?])).collect();
-    format!("{}{all}{}", &last[..range.start], &last[range.end..])
-}
-
-/// Where the instances inside a page's `<Items>` start and end.
-fn items(page: &str) -> Option<Range<usize>> {
-    let doc = Document::parse(page).ok()?;
-    let items = doc.descendants().find(|node| node.has_tag_name("Items"))?;
-    Some(items.first_child()?.range().start..items.last_child()?.range().end)
 }
 
 /// A fault means the device doesn't have this, anything else (unreachable, wrong password) ends the crawl.

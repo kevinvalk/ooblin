@@ -4,6 +4,7 @@ use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 
+use amt_core::wsman::parse_instance;
 use amt_core::{Client, Error, Fingerprint, PowerAction, PowerState, Redirection, Session, Target, Trust};
 use anyhow::{Context, Result, bail};
 use mock_amt::{Amt, Direction, PASSWORD, Transcript, USER};
@@ -63,16 +64,24 @@ async fn reads_and_changes_the_power() -> Result<()> {
     assert_eq!(power.state, PowerState::On);
     assert!(power.actions.contains(&PowerAction::Reset) && !power.actions.contains(&PowerAction::On));
 
+    // What we sent, by the input or instance in each request's body.
+    let sent = || -> Vec<_> {
+        amt.requests.lock().unwrap().iter().filter_map(|request| parse_instance(request).ok()).collect()
+    };
     client.set_power(PowerAction::Reset).await?;
-    assert!(amt.requests.lock().unwrap().last().context("no request")?.contains("<h:PowerState>10</h:PowerState>"));
+    let last = sent().pop().context("no request")?;
+    assert_eq!((&*last.class, last.get("PowerState")), ("RequestPowerStateChange_INPUT", Some("10")));
 
     assert!(power.actions.contains(&PowerAction::ResetToBios));
     amt.requests.lock().unwrap().clear();
     client.set_power(PowerAction::ResetToBios).await?;
-    let requests = amt.requests.lock().unwrap();
-    let steps = ["ChangeBootOrder_INPUT", "<h:BIOSSetup>true", "<h:Role>1", "<h:PowerState>10"];
-    let sent: Vec<_> = steps.iter().map(|step| requests.iter().position(|request| request.contains(step))).collect();
-    assert!(sent.is_sorted() && !sent.contains(&None), "in order: {sent:?}");
+    let steps: Vec<_> = sent().into_iter().map(|input| input.class).collect();
+    assert_eq!(
+        steps,
+        ["ChangeBootOrder_INPUT", "AMT_BootSettingData", "SetBootConfigRole_INPUT", "RequestPowerStateChange_INPUT"]
+    );
+    let put = sent().into_iter().find(|input| input.class == "AMT_BootSettingData").context("no boot settings")?;
+    assert_eq!(put.get("BIOSSetup"), Some("true"));
     Ok(())
 }
 

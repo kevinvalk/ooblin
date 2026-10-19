@@ -2,7 +2,7 @@ use serde::Serialize;
 use ts_rs::TS;
 
 use crate::net::{Connection, Fingerprint};
-use crate::wsman::{self, Instance};
+use crate::wsman::{self, Instance, Method, Resource};
 use crate::{Error, Result, Target};
 
 pub struct Client {
@@ -42,22 +42,22 @@ impl Client {
         wsman::parse_instance(&self.read(envelope).await?)
     }
 
-    pub async fn put(&mut self, class: &str, instance: &str) -> Result<()> {
-        let envelope = wsman::put(class, instance, self.next_message_id());
+    pub async fn put(&mut self, instance: &impl Resource) -> Result<()> {
+        let envelope = wsman::put(instance, self.next_message_id());
         self.connection.post(envelope).await?;
         Ok(())
     }
 
     /// Calls a method that changes something, once. A non-zero `ReturnValue` is an error.
-    pub async fn invoke(&mut self, class: &str, method: &str, input: &str) -> Result<Instance> {
-        let envelope = wsman::invoke(class, method, input, self.next_message_id());
-        output(method, &self.connection.post(envelope).await?)
+    pub async fn invoke<T: Method>(&mut self, input: &T) -> Result<Instance> {
+        let envelope = wsman::invoke(input, self.next_message_id());
+        output(T::NAME, &self.connection.post(envelope).await?)
     }
 
     /// Calls a method that only reads, like `invoke` but tried twice if need be (see `read`).
-    pub async fn query(&mut self, class: &str, method: &str, input: &str) -> Result<Instance> {
-        let envelope = wsman::invoke(class, method, input, self.next_message_id());
-        output(method, &self.read(envelope).await?)
+    pub async fn query<T: Method>(&mut self, input: &T) -> Result<Instance> {
+        let envelope = wsman::invoke(input, self.next_message_id());
+        output(T::NAME, &self.read(envelope).await?)
     }
 
     pub async fn enumerate(&mut self, class: &str) -> Result<Vec<Instance>> {

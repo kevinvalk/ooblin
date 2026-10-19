@@ -1,7 +1,8 @@
+use instant_xml::ToXml;
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
-use crate::wsman::{self, Instance};
+use crate::wsman::{Instance, Method, Reference, Resource};
 use crate::{Client, Error, Result};
 
 /// The power state, and what the device offers to do about it right now.
@@ -113,8 +114,7 @@ impl Client {
             PowerAction::OnToPxe | PowerAction::ResetToPxe => self.boot_once(false).await?,
             _ => {}
         }
-        let input = request_power_state_change(action.state());
-        self.invoke("CIM_PowerManagementService", "RequestPowerStateChange", &input).await?;
+        self.invoke(&RequestPowerStateChange { PowerState: action.state(), ManagedElement: SYSTEM }).await?;
         Ok(())
     }
 
@@ -122,66 +122,166 @@ impl Client {
     /// put the boot settings, make that configuration the next boot's, and boot from PXE unless it's the BIOS setup.
     async fn boot_once(&mut self, bios: bool) -> Result<()> {
         let current = self.get("AMT_BootSettingData").await?;
-        self.invoke("CIM_BootConfigSetting", "ChangeBootOrder", &change_boot_order(None)).await?;
-        self.put("AMT_BootSettingData", &boot_setting_data(&current, bios)).await?;
-        let role = [("BootConfigSetting", BOOT_CONFIG_SETTING), ("Role", "1")];
-        self.invoke(
-            "CIM_BootService",
-            "SetBootConfigRole",
-            &wsman::input("CIM_BootService", "SetBootConfigRole", &role),
-        )
-        .await?;
+        self.invoke(&ChangeBootOrder { Source: None }).await?;
+        self.put(&BootSettingData::once(&current, bios)).await?;
+        let configuration = Reference {
+            class: "CIM_BootConfigSetting",
+            selectors: &[("InstanceID", "Intel(r) AMT: Boot Configuration 0")],
+        };
+        self.invoke(&SetBootConfigRole { BootConfigSetting: configuration, Role: 1 }).await?;
         if !bios {
-            let pxe = change_boot_order(Some("Intel(r) AMT: Force PXE Boot"));
-            self.invoke("CIM_BootConfigSetting", "ChangeBootOrder", &pxe).await?;
+            let pxe = Reference {
+                class: "CIM_BootSourceSetting",
+                selectors: &[("InstanceID", "Intel(r) AMT: Force PXE Boot")],
+            };
+            self.invoke(&ChangeBootOrder { Source: Some(pxe) }).await?;
         }
         Ok(())
     }
 }
 
-/// The boot settings go-wsman-messages puts (`pkg/wsman/amt/boot/settingdata.go`, Copyright Intel Corporation,
-/// Apache-2.0), AMT takes exactly these. Intel's console keeps the device's own names and secure boot, clears the rest.
-fn boot_setting_data(current: &Instance, bios: bool) -> String {
-    let (name, id, owner) = (current.text("ElementName"), current.text("InstanceID"), current.text("OwningEntity"));
-    let secure = current.get("EnforceSecureBoot") == Some("true");
-    format!(
-        r#"<h:AMT_BootSettingData xmlns:h="http://intel.com/wbem/wscim/1/amt-schema/1/AMT_BootSettingData"><h:BIOSPause>false</h:BIOSPause><h:BIOSSetup>{bios}</h:BIOSSetup><h:BootMediaIndex>0</h:BootMediaIndex><h:ConfigurationDataReset>false</h:ConfigurationDataReset><h:ElementName>{name}</h:ElementName><h:EnforceSecureBoot>{secure}</h:EnforceSecureBoot><h:FirmwareVerbosity>0</h:FirmwareVerbosity><h:ForcedProgressEvents>false</h:ForcedProgressEvents><h:IDERBootDevice>0</h:IDERBootDevice><h:InstanceID>{id}</h:InstanceID><h:LockKeyboard>false</h:LockKeyboard><h:LockPowerButton>false</h:LockPowerButton><h:LockResetButton>false</h:LockResetButton><h:LockSleepButton>false</h:LockSleepButton><h:OwningEntity>{owner}</h:OwningEntity><h:PlatformErase>false</h:PlatformErase><h:RSEPassword></h:RSEPassword><h:ReflashBIOS>false</h:ReflashBIOS><h:SecureErase>false</h:SecureErase><h:UefiBootParametersArray></h:UefiBootParametersArray><h:UefiBootNumberOfParams>0</h:UefiBootNumberOfParams><h:UseIDER>false</h:UseIDER><h:UseSOL>false</h:UseSOL><h:UseSafeMode>false</h:UseSafeMode><h:UserPasswordBypass>false</h:UserPasswordBypass></h:AMT_BootSettingData>"#
-    )
+// The inputs and settings below are go-wsman-messages' (`pkg/wsman/cim/power`, `cim/boot`, `amt/boot`), Copyright Intel
+// Corporation, Apache-2.0.
+
+const POWER_MANAGEMENT: &str = "http://schemas.dmtf.org/wbem/wscim/1/cim-schema/2/CIM_PowerManagementService";
+const BOOT_CONFIG: &str = "http://schemas.dmtf.org/wbem/wscim/1/cim-schema/2/CIM_BootConfigSetting";
+const BOOT_SERVICE: &str = "http://schemas.dmtf.org/wbem/wscim/1/cim-schema/2/CIM_BootService";
+const BOOT_SETTINGS: &str = "http://intel.com/wbem/wscim/1/amt-schema/1/AMT_BootSettingData";
+
+/// The host, the one system AMT changes the power of.
+const SYSTEM: Reference = Reference {
+    class: "CIM_ComputerSystem",
+    selectors: &[("CreationClassName", "CIM_ComputerSystem"), ("Name", "ManagedSystem")],
+};
+
+#[allow(non_snake_case)]
+#[derive(ToXml)]
+#[xml(rename = "RequestPowerStateChange_INPUT", ns(POWER_MANAGEMENT))]
+struct RequestPowerStateChange<'a> {
+    PowerState: u8,
+    ManagedElement: Reference<'a>,
 }
 
-/// From go-wsman-messages (`pkg/wsman/cim/boot/configsetting.go`), Copyright Intel Corporation, Apache-2.0.
-fn change_boot_order(source: Option<&str>) -> String {
-    let source = source.map(|source| format!(r#"<h:Source><Address xmlns="http://schemas.xmlsoap.org/ws/2004/08/addressing">http://schemas.xmlsoap.org/ws/2004/08/addressing</Address><ReferenceParameters xmlns="http://schemas.xmlsoap.org/ws/2004/08/addressing"><ResourceURI xmlns="http://schemas.dmtf.org/wbem/wsman/1/wsman.xsd">http://schemas.dmtf.org/wbem/wscim/1/cim-schema/2/CIM_BootSourceSetting</ResourceURI><SelectorSet xmlns="http://schemas.dmtf.org/wbem/wsman/1/wsman.xsd"><Selector Name="InstanceID">{source}</Selector></SelectorSet></ReferenceParameters></h:Source>"#));
-    format!(
-        r#"<h:ChangeBootOrder_INPUT xmlns:h="http://schemas.dmtf.org/wbem/wscim/1/cim-schema/2/CIM_BootConfigSetting">{}</h:ChangeBootOrder_INPUT>"#,
-        source.unwrap_or_default()
-    )
+impl Method for RequestPowerStateChange<'_> {
+    const URI: &'static str = POWER_MANAGEMENT;
+    const NAME: &'static str = "RequestPowerStateChange";
 }
 
-/// From go-wsman-messages (`pkg/wsman/cim/boot/service.go`), Copyright Intel Corporation, Apache-2.0.
-const BOOT_CONFIG_SETTING: &str = r#"<Address xmlns="http://schemas.xmlsoap.org/ws/2004/08/addressing">http://schemas.xmlsoap.org/ws/2004/08/addressing</Address><ReferenceParameters xmlns="http://schemas.xmlsoap.org/ws/2004/08/addressing"><ResourceURI xmlns="http://schemas.dmtf.org/wbem/wsman/1/wsman.xsd">http://schemas.dmtf.org/wbem/wscim/1/cim-schema/2/CIM_BootConfigSetting</ResourceURI><SelectorSet xmlns="http://schemas.dmtf.org/wbem/wsman/1/wsman.xsd"><Selector Name="InstanceID">Intel(r) AMT: Boot Configuration 0</Selector></SelectorSet></ReferenceParameters>"#;
+/// Without a `Source`, it clears the boot order.
+#[allow(non_snake_case)]
+#[derive(ToXml)]
+#[xml(rename = "ChangeBootOrder_INPUT", ns(BOOT_CONFIG))]
+struct ChangeBootOrder<'a> {
+    Source: Option<Reference<'a>>,
+}
 
-/// From go-wsman-messages (`pkg/wsman/cim/power/managementservice.go`), Copyright Intel Corporation, Apache-2.0.
-fn request_power_state_change(state: u8) -> String {
-    format!(
-        r#"<h:RequestPowerStateChange_INPUT xmlns:h="http://schemas.dmtf.org/wbem/wscim/1/cim-schema/2/CIM_PowerManagementService"><h:PowerState>{state}</h:PowerState><h:ManagedElement><Address xmlns="http://schemas.xmlsoap.org/ws/2004/08/addressing">http://schemas.xmlsoap.org/ws/2004/08/addressing</Address><ReferenceParameters xmlns="http://schemas.xmlsoap.org/ws/2004/08/addressing"><ResourceURI xmlns="http://schemas.dmtf.org/wbem/wsman/1/wsman.xsd">http://schemas.dmtf.org/wbem/wscim/1/cim-schema/2/CIM_ComputerSystem</ResourceURI><SelectorSet xmlns="http://schemas.dmtf.org/wbem/wsman/1/wsman.xsd"><Selector Name="CreationClassName">CIM_ComputerSystem</Selector><Selector Name="Name">ManagedSystem</Selector></SelectorSet></ReferenceParameters></h:ManagedElement></h:RequestPowerStateChange_INPUT>"#
-    )
+impl Method for ChangeBootOrder<'_> {
+    const URI: &'static str = BOOT_CONFIG;
+    const NAME: &'static str = "ChangeBootOrder";
+}
+
+#[allow(non_snake_case)]
+#[derive(ToXml)]
+#[xml(rename = "SetBootConfigRole_INPUT", ns(BOOT_SERVICE))]
+struct SetBootConfigRole<'a> {
+    BootConfigSetting: Reference<'a>,
+    Role: u8,
+}
+
+impl Method for SetBootConfigRole<'_> {
+    const URI: &'static str = BOOT_SERVICE;
+    const NAME: &'static str = "SetBootConfigRole";
+}
+
+/// Exactly the settings AMT takes back.
+#[allow(non_snake_case)]
+#[derive(ToXml)]
+#[xml(rename = "AMT_BootSettingData", ns(BOOT_SETTINGS))]
+struct BootSettingData<'a> {
+    BIOSPause: bool,
+    BIOSSetup: bool,
+    BootMediaIndex: u8,
+    ConfigurationDataReset: bool,
+    ElementName: &'a str,
+    EnforceSecureBoot: bool,
+    FirmwareVerbosity: u8,
+    ForcedProgressEvents: bool,
+    IDERBootDevice: u8,
+    InstanceID: &'a str,
+    LockKeyboard: bool,
+    LockPowerButton: bool,
+    LockResetButton: bool,
+    LockSleepButton: bool,
+    OwningEntity: &'a str,
+    PlatformErase: bool,
+    RSEPassword: &'a str,
+    ReflashBIOS: bool,
+    SecureErase: bool,
+    UefiBootParametersArray: &'a str,
+    UefiBootNumberOfParams: u8,
+    UseIDER: bool,
+    UseSOL: bool,
+    UseSafeMode: bool,
+    UserPasswordBypass: bool,
+}
+
+impl Resource for BootSettingData<'_> {
+    const URI: &'static str = BOOT_SETTINGS;
+}
+
+impl<'a> BootSettingData<'a> {
+    /// Intel's console keeps the device's own names and secure boot, clears the rest, and boots into the BIOS setup
+    /// or not.
+    fn once(current: &'a Instance, bios: bool) -> Self {
+        let kept = |name| current.get(name).unwrap_or_default();
+        Self {
+            BIOSPause: false,
+            BIOSSetup: bios,
+            BootMediaIndex: 0,
+            ConfigurationDataReset: false,
+            ElementName: kept("ElementName"),
+            EnforceSecureBoot: current.get("EnforceSecureBoot") == Some("true"),
+            FirmwareVerbosity: 0,
+            ForcedProgressEvents: false,
+            IDERBootDevice: 0,
+            InstanceID: kept("InstanceID"),
+            LockKeyboard: false,
+            LockPowerButton: false,
+            LockResetButton: false,
+            LockSleepButton: false,
+            OwningEntity: kept("OwningEntity"),
+            PlatformErase: false,
+            RSEPassword: "",
+            ReflashBIOS: false,
+            SecureErase: false,
+            UefiBootParametersArray: "",
+            UefiBootNumberOfParams: 0,
+            UseIDER: false,
+            UseSOL: false,
+            UseSafeMode: false,
+            UserPasswordBypass: false,
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+    use crate::wsman::{self, body_meaning, meaning};
+
     #[test]
     fn requests_a_power_state_change_like_go_wsman_messages() {
         // `RequestPowerStateChangeBODY` from go-wsman-messages' own tests, for a hard power off.
         let expected = r#"<h:RequestPowerStateChange_INPUT xmlns:h="http://schemas.dmtf.org/wbem/wscim/1/cim-schema/2/CIM_PowerManagementService"><h:PowerState>8</h:PowerState><h:ManagedElement><Address xmlns="http://schemas.xmlsoap.org/ws/2004/08/addressing">http://schemas.xmlsoap.org/ws/2004/08/addressing</Address><ReferenceParameters xmlns="http://schemas.xmlsoap.org/ws/2004/08/addressing"><ResourceURI xmlns="http://schemas.dmtf.org/wbem/wsman/1/wsman.xsd">http://schemas.dmtf.org/wbem/wscim/1/cim-schema/2/CIM_ComputerSystem</ResourceURI><SelectorSet xmlns="http://schemas.dmtf.org/wbem/wsman/1/wsman.xsd"><Selector Name="CreationClassName">CIM_ComputerSystem</Selector><Selector Name="Name">ManagedSystem</Selector></SelectorSet></ReferenceParameters></h:ManagedElement></h:RequestPowerStateChange_INPUT>"#;
-        assert_eq!(super::request_power_state_change(8), expected);
+        let request = wsman::invoke(&RequestPowerStateChange { PowerState: 8, ManagedElement: SYSTEM }, 0);
+        assert_eq!(body_meaning(&request), meaning(expected));
     }
 
     #[test]
     fn puts_boot_settings_like_go_wsman_messages() {
         // From go-wsman-messages' `settingdata_test.go`.
         let expected = r#"<h:AMT_BootSettingData xmlns:h="http://intel.com/wbem/wscim/1/amt-schema/1/AMT_BootSettingData"><h:BIOSPause>false</h:BIOSPause><h:BIOSSetup>false</h:BIOSSetup><h:BootMediaIndex>0</h:BootMediaIndex><h:ConfigurationDataReset>false</h:ConfigurationDataReset><h:ElementName>Intel(r) AMT Boot Configuration Settings</h:ElementName><h:EnforceSecureBoot>false</h:EnforceSecureBoot><h:FirmwareVerbosity>0</h:FirmwareVerbosity><h:ForcedProgressEvents>false</h:ForcedProgressEvents><h:IDERBootDevice>0</h:IDERBootDevice><h:InstanceID>Intel(r) AMT:BootSettingData 0</h:InstanceID><h:LockKeyboard>false</h:LockKeyboard><h:LockPowerButton>false</h:LockPowerButton><h:LockResetButton>false</h:LockResetButton><h:LockSleepButton>false</h:LockSleepButton><h:OwningEntity>Intel(r) AMT</h:OwningEntity><h:PlatformErase>false</h:PlatformErase><h:RSEPassword></h:RSEPassword><h:ReflashBIOS>false</h:ReflashBIOS><h:SecureErase>false</h:SecureErase><h:UefiBootParametersArray></h:UefiBootParametersArray><h:UefiBootNumberOfParams>0</h:UefiBootNumberOfParams><h:UseIDER>false</h:UseIDER><h:UseSOL>false</h:UseSOL><h:UseSafeMode>false</h:UseSafeMode><h:UserPasswordBypass>false</h:UserPasswordBypass></h:AMT_BootSettingData>"#;
-        let current = crate::wsman::Instance {
+        let current = Instance {
             class: "AMT_BootSettingData".into(),
             properties: [
                 ("ElementName", "Intel(r) AMT Boot Configuration Settings"),
@@ -192,6 +292,7 @@ mod tests {
             .map(|(name, value)| (name.into(), value.into()))
             .into(),
         };
-        assert_eq!(super::boot_setting_data(&current, false), expected);
+        let request = wsman::put(&BootSettingData::once(&current, false), 0);
+        assert_eq!(body_meaning(&request), meaning(expected));
     }
 }

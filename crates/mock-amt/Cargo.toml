@@ -12,6 +12,7 @@ clap = { version = "4", features = ["derive"] }
 http-body-util = "0.1"
 hyper = { version = "1", features = ["server", "http1"] }
 hyper-util = { version = "0.1", features = ["tokio"] }
+instant-xml = "0.7"
 md-5 = "0.10"
 rcgen = "0.14"
 roxmltree = "0.21"

@@ -1,11 +1,11 @@
+use instant_xml::ToXml;
 use serde::Serialize;
 use ts_rs::TS;
 
 use crate::decode::yes;
 use crate::logs::REALMS;
-use crate::{Client, Result, wsman};
-
-const AUTHORIZATION: &str = "AMT_AuthorizationService";
+use crate::wsman::Method;
+use crate::{Client, Result};
 
 /// How the device is set up: power policy, ping, name and accounts. What it allows remotely is in its status.
 #[derive(Debug, Clone, Serialize, TS)]
@@ -55,15 +55,11 @@ impl Client {
 
     /// The admin and every other account, hidden ones (named `$$…`, AMT's own) left out.
     async fn accounts(&mut self) -> Result<Vec<Account>> {
-        let admin = self.query(AUTHORIZATION, "GetAdminAclEntry", &input("GetAdminAclEntry", &[])).await?;
+        let admin = self.query(&GetAdminAclEntry).await?;
         let mut accounts = vec![Account { name: admin.text("Username"), role: "Administrator".to_owned() }];
-        let handles = self
-            .query(AUTHORIZATION, "EnumerateUserAclEntries", &input("EnumerateUserAclEntries", &[("StartIndex", "1")]))
-            .await?;
+        let handles = self.query(&EnumerateUserAclEntries { StartIndex: 1 }).await?;
         for handle in handles.all("Handles").map(str::to_owned).collect::<Vec<_>>() {
-            let entry = self
-                .query(AUTHORIZATION, "GetUserAclEntryEx", &input("GetUserAclEntryEx", &[("Handle", &handle)]))
-                .await?;
+            let entry = self.query(&GetUserAclEntryEx { Handle: &handle }).await?;
             let name = entry.get("DigestUsername").unwrap_or("Kerberos user").to_owned();
             if name.starts_with("$$") {
                 continue;
@@ -81,6 +77,37 @@ impl Client {
     }
 }
 
-fn input(method: &str, fields: &[(&str, &str)]) -> String {
-    wsman::input(AUTHORIZATION, method, fields)
+const AUTHORIZATION: &str = "http://intel.com/wbem/wscim/1/amt-schema/1/AMT_AuthorizationService";
+
+#[derive(ToXml)]
+#[xml(rename = "GetAdminAclEntry_INPUT", ns(AUTHORIZATION))]
+struct GetAdminAclEntry;
+
+impl Method for GetAdminAclEntry {
+    const URI: &'static str = AUTHORIZATION;
+    const NAME: &'static str = "GetAdminAclEntry";
+}
+
+#[allow(non_snake_case)]
+#[derive(ToXml)]
+#[xml(rename = "EnumerateUserAclEntries_INPUT", ns(AUTHORIZATION))]
+struct EnumerateUserAclEntries {
+    StartIndex: u32,
+}
+
+impl Method for EnumerateUserAclEntries {
+    const URI: &'static str = AUTHORIZATION;
+    const NAME: &'static str = "EnumerateUserAclEntries";
+}
+
+#[allow(non_snake_case)]
+#[derive(ToXml)]
+#[xml(rename = "GetUserAclEntryEx_INPUT", ns(AUTHORIZATION))]
+struct GetUserAclEntryEx<'a> {
+    Handle: &'a str,
+}
+
+impl Method for GetUserAclEntryEx<'_> {
+    const URI: &'static str = AUTHORIZATION;
+    const NAME: &'static str = "GetUserAclEntryEx";
 }
