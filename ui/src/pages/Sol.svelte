@@ -5,7 +5,7 @@
   import "@xterm/xterm/css/xterm.css";
   import { invoke } from "@tauri-apps/api/core";
   import { Terminal } from "@xterm/xterm";
-  import { stayOpen } from "../redirection";
+  import Redirection from "../Redirection.svelte";
 
   let {
     host,
@@ -13,10 +13,6 @@
     consent,
     status,
   }: { host: string; hidden: boolean; consent: () => Promise<boolean>; status: (text: string) => void } = $props();
-
-  let element: HTMLDivElement;
-  /** Why it stopped, until connected again. */
-  let stopped = $state("");
 
   const terminal = new Terminal({
     cols: 80,
@@ -33,36 +29,20 @@
     typing = typing.then(() => invoke("sol_write", { host, data }).catch(() => {}));
   });
 
-  $effect(() => {
-    terminal.open(element);
-    return () => terminal.dispose();
-  });
-
-  $effect(() => {
-    if (stopped) return;
-    const target = host;
-    return stayOpen(
-      "sol",
-      target,
-      async (open) => {
-        terminal.focus();
-        while (open()) terminal.write(new Uint8Array(await invoke<ArrayBuffer>("sol_read", { host: target })));
-      },
-      status,
-      consent,
-      (reason) => (stopped = reason),
-    );
-  });
+  /** What the device writes, while it's open. */
+  async function read(open: () => boolean) {
+    terminal.focus();
+    while (open()) terminal.write(new Uint8Array(await invoke<ArrayBuffer>("sol_read", { host })));
+  }
 </script>
 
 <main class="grid min-h-0 px-8 pt-6 pb-8" {hidden}>
-  <div class="relative grid min-h-0 place-items-center overflow-auto bg-black">
-    <div bind:this={element}></div>
-    {#if stopped}
-      <div class="absolute inset-0 grid place-content-center justify-items-center gap-3 bg-black/80 text-white/80">
-        <p>{stopped}</p>
-        <button type="button" class="btn btn-primary" onclick={() => (stopped = "")}>Connect</button>
-      </div>
-    {/if}
-  </div>
+  <Redirection kind="sol" {host} {consent} {status} {read}>
+    <div
+      {@attach (element) => {
+        terminal.open(element);
+        return () => terminal.dispose();
+      }}
+    ></div>
+  </Redirection>
 </main>

@@ -19,18 +19,23 @@
     Settings,
   } from "../bindings/core";
   import { reason, type Session } from "../Session.svelte";
+  import { CONFIGURATIONS } from "./Status.svelte";
 
   let {
     data,
     session,
     say,
     ask,
+    saved,
   }: {
     data?: Settings;
     session: Session;
     say: (text: string, failed?: boolean) => void;
     ask: (question: string, answers: string[], safe?: boolean) => Promise<string>;
+    saved: (data: Settings) => void;
   } = $props();
+  /** Ours, as another session's settings may be open too. */
+  const id = $props.id();
 
   let saving = $state(false);
   /** The forms of fields that go together with changes of their own. */
@@ -40,10 +45,8 @@
   async function save(done: string, change: Change) {
     saving = true;
     try {
-      const data = await invoke<Settings>("change", { host: session.host, change });
-      session.pages.settings = { data, read: new Date() };
+      saved(await invoke<Settings>("change", { host: session.host, change }));
       say(done);
-      return data;
     } catch (error) {
       say(reason(error), true);
     } finally {
@@ -68,7 +71,6 @@
   /** A text field's value, trimmed. */
   const text = (fields: FormData, name: string) => ((fields.get(name) as string | null) ?? "").trim();
 
-  /** What's turned off goes: the screen, the serial console and the disk image (which Rust ejects). */
   async function remoteAccess(fields: FormData, done: string) {
     if (!data) return;
     const was = data.remote_access;
@@ -79,10 +81,7 @@
       ider: fields.has("ider"),
       consent: (fields.get("consent") as Consent | null) ?? was.consent,
     };
-    if (!(await save(done, { RemoteAccess: access }))) return;
-    session.kvm &&= !!access.kvm;
-    session.sol &&= access.sol;
-    if (!access.ider) session.image = undefined;
+    await save(done, { RemoteAccess: access });
   }
 
   async function recovery(fields: FormData, done: string) {
@@ -98,9 +97,7 @@
   /** The name, ping and how long AMT stays awake are one setting in AMT, which `change` changes some of. */
   async function general(change: Partial<General>, done: string) {
     if (!data) return;
-    const saved = await save(done, { General: { ...data.general, ...change } });
-    // The header says the name the device has now.
-    if (saved) session.info.name = saved.general.name;
+    await save(done, { General: { ...data.general, ...change } });
   }
 
   const WHEN = [
@@ -242,7 +239,7 @@
 
 <!-- Saves together from its title's Save and Cancel, there all along so it's clear what saves this way. -->
 {#snippet grouped(
-  id: string,
+  form: string,
   title: string,
   change: (fields: FormData, done: string) => Promise<unknown>,
   rows: Snippet,
@@ -253,30 +250,30 @@
       {title}
       <button
         type="reset"
-        form={id}
+        form="{id}-{form}"
         class="btn-icon -my-1 ml-auto size-7"
-        disabled={!changed[id]}
+        disabled={!changed[form]}
         title="Cancel (Esc)"
       >
         <X class="size-4" />
       </button>
       <button
-        form={id}
+        form="{id}-{form}"
         class="btn btn-primary -my-1 size-7 px-0"
-        disabled={!changed[id] || saving}
+        disabled={!changed[form] || saving}
         title="Save (Enter)"
       >
-        {#if saving && changed[id]}<LoaderCircle class="size-4 animate-spin" />{:else}<Check class="size-4" />{/if}
+        {#if saving && changed[form]}<LoaderCircle class="size-4 animate-spin" />{:else}<Check class="size-4" />{/if}
       </button>
     </h3>
     <!-- Escape comes from its fields. -->
     <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
     <form
-      {id}
+      id="{id}-{form}"
       class="card"
       inert={!data || saving}
-      oninput={() => (changed[id] = true)}
-      onreset={() => ((changed[id] = false), reset())}
+      oninput={() => (changed[form] = true)}
+      onreset={() => ((changed[form] = false), reset())}
       onkeydown={(event) => event.key === "Escape" && event.currentTarget.reset()}
       onsubmit={(event) => {
         event.preventDefault();
@@ -291,15 +288,15 @@
 <!-- A switch, which can't be switched where the device has none (`null`). -->
 {#snippet check(name: string, label: string, checked: boolean | null | undefined, help?: string)}
   <div title={checked === null ? "This device can't." : help}>
-    <label for={name}>{label}</label>
-    <input id={name} {name} type="checkbox" defaultChecked={checked} disabled={checked === null} />
+    <label for="{id}-{name}">{label}</label>
+    <input id="{id}-{name}" {name} type="checkbox" defaultChecked={checked} disabled={checked === null} />
   </div>
 {/snippet}
 
 <!-- A select's options, the device's `current` one selected: unlike the select's own default, a selected option counts
      when it comes in after the select, the settings being read. -->
 {#snippet choices(current: string | undefined, options: Record<string, string>)}
-  {#each Object.entries(options) as [value, label]}
+  {#each Object.entries(options) as [value, label] (value)}
     <option {value} selected={value === current}>{label}</option>
   {/each}
 {/snippet}
@@ -307,9 +304,9 @@
 <!-- An address field, which only a manual configuration takes. -->
 {#snippet address(name: string, label: string, value: string | undefined, manual: boolean)}
   <div>
-    <label for={name}>{label}</label>
+    <label for="{id}-{name}">{label}</label>
     <input
-      id={name}
+      id="{id}-{name}"
       {name}
       class="field font-mono"
       autocapitalize="off"
@@ -330,8 +327,8 @@
     {@render check("sol", "Serial console", access?.sol, "Its serial port, for consoles that write to one.")}
     {@render check("ider", "Disk images", access?.ider, "Booting it from a disk image on this computer (IDE redirection).")}
     <div title={access?.consent_fixed ? "In client control mode it's always asked for." : "Someone at the device reads out a code first."}>
-      <label for="consent">User consent</label>
-      <select id="consent" name="consent" class="field" disabled={access?.consent_fixed}>
+      <label for="{id}-consent">User consent</label>
+      <select id="{id}-consent" name="consent" class="field" disabled={access?.consent_fixed}>
         {@render choices(access?.consent, { None: "Not required", Kvm: "For KVM", All: "For all redirection" })}
       </select>
     </div>
@@ -352,7 +349,7 @@
       <div title="When AMT is on the network: with the device on, or asleep or off, and on mains power or a battery.">
         <span class="text-muted">Reachable</span>
         <span class="flex flex-wrap gap-x-5 gap-y-1">
-          {#each WHEN as [when, label]}
+          {#each WHEN as [when, label] (when)}
             <label class="flex items-center gap-2">
               <input name={when} type="checkbox" defaultChecked={data?.network.available[when]} />
               {label}
@@ -372,9 +369,9 @@
 
     {#snippet naming()}
       <div title="The host name, with its domain if it has one.">
-        <label for="name">Host name</label>
+        <label for="{id}-name">Host name</label>
         <input
-          id="name"
+          id="{id}-name"
           name="name"
           class="field"
           autocapitalize="off"
@@ -386,8 +383,8 @@
       </div>
       {@render check("shared", "Shared with the OS", data?.general.shared_with_os, "Whether the OS goes by the same name.")}
       <div title="Who puts AMT's name and address in DNS: the DHCP server when AMT asks it to, or AMT itself (DDNS).">
-        <label for="dns">Registered in DNS by</label>
-        <select id="dns" name="dns" class="field">
+        <label for="{id}-dns">Registered in DNS by</label>
+        <select id="{id}-dns" name="dns" class="field">
           {@render choices(data?.general.dns_update, { Off: "Nobody", Dhcp: "The DHCP server", Amt: "AMT itself" })}
         </select>
       </div>
@@ -408,17 +405,17 @@
     {#snippet v4()}
       {@const ipv4 = data?.network.ipv4}
       <div>
-        <label for="ipv4">Configuration</label>
+        <label for="{id}-ipv4">Configuration</label>
         <select
-          id="ipv4"
+          id="{id}-ipv4"
           name="ipv4"
           class="field"
           oninput={(event) => (ipv4Configuration = event.currentTarget.value as Configuration)}
         >
-          {@render choices(ipv4?.configuration, { Dhcp: "Automatic (DHCP)", Os: "Same as the OS", Manual: "Manual" })}
+          {@render choices(ipv4?.configuration, CONFIGURATIONS)}
         </select>
       </div>
-      {#each ADDRESSES as [name, label]}
+      {#each ADDRESSES as [name, label] (name)}
         {@render address(`ipv4_${name}`, label, ipv4?.[name], ipv4Configuration === "Manual")}
       {/each}
     {/snippet}
@@ -427,9 +424,9 @@
     {#snippet v6()}
       {@const ipv6 = data?.network.ipv6}
       <div>
-        <label for="ipv6">Configuration</label>
+        <label for="{id}-ipv6">Configuration</label>
         <select
-          id="ipv6"
+          id="{id}-ipv6"
           name="ipv6"
           class="field"
           oninput={(event) => (ipv6Configuration = event.currentTarget.value as Ipv6Configuration)}
@@ -437,7 +434,7 @@
           {@render choices(ipv6?.configuration, { Off: "Off", Automatic: "Automatic", Manual: "Automatic and manual" })}
         </select>
       </div>
-      {#each ADDRESSES as [name, label]}
+      {#each ADDRESSES as [name, label] (name)}
         {#if name !== "subnet_mask"}
           {@render address(`ipv6_${name}`, label, ipv6?.[name], ipv6Configuration === "Manual")}
         {/if}
@@ -451,8 +448,8 @@
   <h2>Clock and power</h2>
   {#snippet power()}
     <div title="When AMT itself is powered, and so reachable: the device's maker offers these.">
-      <label for="power_policy">Power policy</label>
-      <select id="power_policy" name="power_policy" class="field" disabled={data && data.power_policies.length < 2}>
+      <label for="{id}-power_policy">Power policy</label>
+      <select id="{id}-power_policy" name="power_policy" class="field" disabled={data && data.power_policies.length < 2}>
         {@render choices(
           data?.power_policies.find((policy) => policy.active)?.id,
           Object.fromEntries(data?.power_policies.map((policy) => [policy.id, policy.description]) ?? []),
@@ -460,10 +457,10 @@
       </select>
     </div>
     <div title="How long AMT stays powered after the device sleeps, or after it woke the device for us, in minutes.">
-      <label for="awake">Awake after</label>
+      <label for="{id}-awake">Awake after</label>
       <span class="flex items-center gap-2">
         <input
-          id="awake"
+          id="{id}-awake"
           name="awake"
           type="number"
           class="field w-24"
@@ -521,7 +518,7 @@
         </button>
       </h3>
       <dl class="card" inert={saving}>
-        {#each data?.alarms ?? [undefined] as alarm}
+        {#each data?.alarms ?? [undefined] as alarm (alarm?.name)}
           <div>
             <dt>{alarm?.name}</dt>
             <dd class="flex items-center gap-1">
@@ -546,7 +543,7 @@
 <section>
   <h2>Security</h2>
   <div class="grid gap-x-4 gap-y-6 @3xl:grid-cols-2">
-    {#each data?.tls ?? [undefined] as tls}
+    {#each data?.tls ?? [undefined] as tls (tls?.local)}
       <div title="As AMT was set up: changing it would lock us out, or isn't supported.">
         <h3>{tls && (tls.local ? "TLS on the device" : "TLS on the network")}</h3>
         <dl class="card">
@@ -570,7 +567,7 @@
         </button>
       </h3>
       <dl class="card" inert={saving}>
-        {#each data?.certificates ?? [undefined] as certificate}
+        {#each data?.certificates ?? [undefined] as certificate (certificate?.id)}
           <div title={certificate && `Issued by ${certificate.issuer}`}>
             <dt>{certificate?.name}</dt>
             <dd class="flex items-center gap-1">
@@ -616,7 +613,7 @@
   >.
 </p>
 
-<dialog bind:this={alarmDialog} class="dialog w-96">
+<dialog bind:this={alarmDialog}>
   <form method="dialog" class="grid gap-4" onsubmit={addAlarm}>
     <p class="font-medium">Schedule a wake-up</p>
     <p class="text-muted">AMT turns {session.info.name} on then, or wakes it from sleep.</p>
@@ -628,7 +625,7 @@
     <label class="grid gap-1.5">
       Then
       <select name="every" class="field">
-        {#each Object.entries(EVERY) as [minutes, label]}<option value={minutes}>{label}</option>{/each}
+        {#each Object.entries(EVERY) as [minutes, label] (minutes)}<option value={minutes}>{label}</option>{/each}
       </select>
     </label>
     <div class="flex justify-end gap-2">

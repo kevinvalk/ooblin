@@ -8,7 +8,7 @@
     import Session, { type Session as Open } from "./Session.svelte";
 
     /** Every device we logged in to, the open ones by host, and the one on screen (none: the connect form). */
-    let devices: Device[] = $state([]);
+    let devices: Device[] = $state.raw([]);
     let sessions: Record<string, Open> = $state({});
     let current: string | null = $state(null);
     /** What answered our presence pings by host, the networks we look on and whether we are, see `discover`. */
@@ -38,15 +38,7 @@
     /** The device we're connecting to: it spins, and a second click on it does nothing. */
     let connecting: string | null = $state(null);
     let collapsed = $state(false);
-    /** The disk image in the drive of the device on screen, see Session. */
-    let image = $derived(current ? sessions[current]?.image : undefined);
-    /** How fast AMT reads a disk image at most, bytes a second. */
-    const TOP = 1.1e6;
-    /** And its screen, while shown, see Kvm. */
-    let screen = $derived(current ? sessions[current]?.screen : undefined);
     let message = $state({ text: "", failed: false });
-    /** What the screen or serial console of the device on screen waits for, under what was just said. */
-    let waiting = $derived(Object.values((current && sessions[current]?.status) || {}).find(Boolean));
     let hide = 0;
 
     /** Says `text` in the footer for as long as it takes to read: five seconds, more for more words, fifteen at most.
@@ -88,11 +80,7 @@
         connecting = host;
         form.error = undefined;
         try {
-            sessions[host] = {
-                host,
-                info: await invoke<Info>("connect", login),
-                pages: {},
-            };
+            sessions[host] = { host, info: await invoke<Info>("connect", login) };
             show(host);
         } catch (error) {
             form.error = explain(error, `Couldn't reach ${host}`);
@@ -212,8 +200,7 @@
 
 <div class={["grid h-screen grid-rows-[1fr_auto]", collapsed ? "grid-cols-[0_1fr]" : "grid-cols-[16rem_1fr]"]}>
     <nav
-        class="flex min-w-0 flex-col gap-3 overflow-hidden border-r border-line bg-pane p-3"
-        class:invisible={collapsed}
+        class={["flex min-w-0 flex-col gap-3 overflow-hidden border-r border-line bg-pane p-3", collapsed && "invisible"]}
     >
         <p class="px-2.5 pt-1 font-semibold text-muted">Devices</p>
         {#if listed.length}
@@ -239,9 +226,7 @@
                                 <LoaderCircle class="-mx-0.5 size-3.5 flex-none animate-spin" />
                             {:else}
                                 <span
-                                    class="dot"
-                                    class:invisible={!open}
-                                    class:animate-pulse={open?.changing}
+                                    class={["dot", !open && "invisible", open?.changing && "animate-pulse"]}
                                     data-power={open?.power?.state}
                                     title={open?.power?.state}
                                 ></span>
@@ -303,9 +288,10 @@ takes seconds, a /16 (the most at a time) minutes."
     </nav>
 
     <div class="grid min-w-0 overflow-hidden">
-        {#if current}
-            <Session bind:session={sessions[current]} {say} />
-        {:else}
+        {#each Object.keys(sessions) as host (host)}
+            <Session bind:session={sessions[host]} hidden={host !== current} {say} />
+        {/each}
+        {#if !current}
             {#key form.key}
                 <Connect
                     device={form.device}
@@ -330,10 +316,6 @@ takes seconds, a /16 (the most at a time) minutes."
         <!-- What's true now outlasts what just happened. -->
         {#if current && sessions[current].silent}
             <output class="truncate text-muted">{current} isn't answering, trying again…</output>
-        {:else if !message.text && waiting}
-            <output class="flex min-w-0 items-center gap-1.5 text-muted">
-                <LoaderCircle class="size-3.5 flex-none animate-spin" /><span class="truncate">{waiting}</span>
-            </output>
         {:else}
             <!-- Selectable, and kept while the pointer is on it, to copy. -->
             <output
@@ -344,36 +326,7 @@ takes seconds, a /16 (the most at a time) minutes."
                 {message.text}
             </output>
         {/if}
-        <div class="ml-auto flex items-center gap-6 pr-1.5 whitespace-nowrap text-muted tabular-nums">
-            <!-- While the screen is shown. -->
-            {#if screen}
-                <span title="The device's screen, and the updates a second it sends">
-                    KVM {screen.width} × {screen.height}, {screen.fps} fps
-                </span>
-            {/if}
-            <!-- The disk image as the device reads it, like a defragmenter's map: its stretches fade for as long as
-                 reading all of it at the top speed would take, so a whole read leaves a trail across them. -->
-            {#if image}
-                <div
-                    class="flex gap-0.75"
-                    style:--speed={Math.min(image.rate / TOP, 1)}
-                    style:--decay="{image.size / TOP}s"
-                    title="Disk read {(image.rate / 1e6).toFixed(2)} MB/s which top out at about {TOP /
-                        1e6} MB/s as each read goes through a small management engine."
-                >
-                    <div class="disk-speed"></div>
-                    <div class="disk-map">
-                        {#each image.cells as read}
-                            <!-- Each read restarts its animation, which shown again (another device was) goes on
-                                 where it is by now. -->
-                            {#key read}<div
-                                    data-read={read || undefined}
-                                    style:animation-delay="{read - Date.now()}ms"
-                                ></div>{/key}
-                        {/each}
-                    </div>
-                </div>
-            {/if}
-        </div>
+        <!-- Then what the session on screen says. -->
+        {#if current}{@render sessions[current].footer?.()}{/if}
     </footer>
 </div>

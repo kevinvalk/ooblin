@@ -6,7 +6,7 @@
   import { ChevronDown, Maximize, Minimize, SendHorizontal } from "@lucide/svelte";
   import { invoke } from "@tauri-apps/api/core";
   import type { Input, Screens } from "../bindings/core";
-  import { stayOpen } from "../redirection";
+  import Redirection from "../Redirection.svelte";
 
   let {
     host,
@@ -27,29 +27,16 @@
   let width = $state(0);
   let shown = $state(0);
   let fullscreen = $state(false);
-  /** Why it stopped, until connected again. */
-  let stopped = $state("");
   /** The device's screens, to pick one of where there are several. */
   let screens = $state<Screens>();
 
-  // The screen is painted until we leave, each change asked for once the one before is painted.
-  $effect(() => {
-    if (stopped) return;
-    const target = host;
+  /** The screen is painted while it's open, each change asked for once the one before is painted. */
+  async function read(open: () => boolean) {
     const context = canvas.getContext("2d")!;
-    return stayOpen(
-      "kvm",
-      target,
-      async (open) => {
-        canvas.focus();
-        invoke<Screens>("screens", { host: target }).then((found) => (screens = found), () => {});
-        while (open()) paint(context, await invoke<ArrayBuffer>("kvm_frame", { host: target }));
-      },
-      status,
-      consent,
-      (reason) => (stopped = reason),
-    );
-  });
+    canvas.focus();
+    invoke<Screens>("screens", { host }).then((found) => (screens = found), () => {});
+    while (open()) paint(context, await invoke<ArrayBuffer>("kvm_frame", { host }));
+  }
 
   /** Updates painted this second, said each second with the screen's size, for the footer while it's shown: a screen
    * that doesn't change has none. */
@@ -182,7 +169,7 @@
           invoke("show_screen", { host, screen }).then(() => screens && (screens.shown = screen));
         }}
       >
-        {#each screens.active.length ? screens.active : [screens.shown] as screen}
+        {#each screens.active.length ? screens.active : [screens.shown] as screen (screen)}
           <option value={screen} selected={screen === screens.shown}>Screen {screen + 1}</option>
         {/each}
       </select>
@@ -217,7 +204,7 @@
 
   <!-- The device's own screen, so its own pointer: ours stays visible on top, as it moves without delay. At its own
        size on black, shrunk only to fit, and its pixels kept sharp (not smoothed onto a Retina display's) unless it is. -->
-  <div class="relative grid min-h-0 place-items-center overflow-hidden bg-black">
+  <Redirection kind="kvm" {host} {consent} {status} {read}>
   <canvas
     bind:this={canvas}
     bind:clientWidth={shown}
@@ -232,11 +219,5 @@
     onwheel={wheel}
     oncontextmenu={(event) => event.preventDefault()}
   ></canvas>
-  {#if stopped}
-    <div class="absolute inset-0 grid place-content-center justify-items-center gap-3 bg-black/80 text-white/80">
-      <p>{stopped}</p>
-      <button type="button" class="btn btn-primary" onclick={() => (stopped = "")}>Connect</button>
-    </div>
-  {/if}
-  </div>
+  </Redirection>
 </main>

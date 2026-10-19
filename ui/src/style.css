@@ -67,6 +67,10 @@
   td {
     @apply border-b border-line py-2.5 pr-4 align-top wrap-anywhere select-text first:whitespace-nowrap;
   }
+
+  dialog {
+    @apply m-auto w-96 rounded-xl border border-line bg-canvas p-5 text-ink shadow-2xl backdrop:bg-black/30;
+  }
 }
 
 @layer components {
@@ -161,10 +165,6 @@
 
   .btn-icon {
     @apply grid size-8 place-items-center rounded-md text-muted hover:bg-hover hover:text-ink;
-  }
-
-  .dialog {
-    @apply m-auto rounded-xl border border-line bg-canvas p-5 text-ink shadow-2xl backdrop:bg-black/30;
   }
 
   /* An input, or a group of one with its button (the focus taking them both in), which then has no look of its own. */

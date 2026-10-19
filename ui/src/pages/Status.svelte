@@ -1,8 +1,12 @@
+<script module lang="ts">
+  /** How an IPv4 address is set, in words, Settings' too. */
+  export const CONFIGURATIONS = { Dhcp: "Automatic (DHCP)", Os: "Same as the OS", Manual: "Manual" };
+</script>
+
 <script lang="ts">
   import type { Status } from "../bindings/core";
 
   let { data }: { data?: Status } = $props();
-  const CONFIGURATIONS = { Dhcp: "Automatic (DHCP)", Os: "Same as the OS", Manual: "Manual" };
 </script>
 
 <section>
@@ -29,7 +33,7 @@
 </section>
 
 <!-- While loading we show one wired port. -->
-{#each data?.ports ?? [undefined] as port}
+{#each data?.ports ?? [undefined] as port (port?.mac)}
   <section>
     <h2>{port?.wireless ? "Wireless network" : "Wired network"}</h2>
     <div class="grid gap-x-4 gap-y-6 @3xl:grid-cols-2">

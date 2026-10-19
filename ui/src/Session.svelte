@@ -1,9 +1,12 @@
-<!-- An open session: its power, the disk image in its drive and a tab at a time. Pages stay until refreshed, so going
-     back to a tab shows it at once. Whether a device that doesn't answer is gone is App's to say. -->
+<!-- An open session: its power, the disk image in its drive and a tab at a time. There's one per open device, shown or
+     not, so all of it stays as it was while another one is: pages until refreshed, the screen and serial console open.
+     Whether a device that doesn't answer is gone is App's to say. -->
 <script module lang="ts">
+  import type { Snippet } from "svelte";
   import type { CommandError } from "./bindings/console";
-  import type { Info, Power, PowerAction, PowerState, RemoteAccess } from "./bindings/core";
+  import type { Info, Power, PowerAction, PowerState, RemoteAccess, Settings as SettingsData } from "./bindings/core";
 
+  /** What App shows of a session too: in the sidebar, the title and the footer. */
   export interface Session {
     host: string;
     info: Info;
@@ -12,24 +15,13 @@
     silent?: number;
     /** Set from a power change until the state moves or a minute has passed, a reset never shows as another state. */
     changing?: { from: PowerState; until: number };
-    /** By tab: what it read, or why it couldn't, and when. */
-    pages: Record<string, { data?: unknown; error?: string; read?: Date }>;
-    /** The disk image in its drive: its name and size, how much of it the device read and how fast (bytes a second),
-     * and when it last read each of its `CELLS` stretches (`Date.now()`, 0 for never). */
-    image?: { name: string; size: number; read: number; rate: number; cells: number[] };
-    /** Whether a disk image is on its way into its drive. */
-    mounting?: boolean;
-    /** Whether its screen and serial console were opened: they stay open across tabs. */
-    kvm?: boolean;
-    sol?: boolean;
-    /** What they wait for while they're not open, for the footer. */
-    status?: { kvm?: string; sol?: string };
-    /** The screen's size and updates a second while it's shown, for the footer. */
-    screen?: { width: number; height: number; fps: number };
+    /** What it says in the footer while it's on screen. */
+    footer?: Snippet;
   }
 
-  /** The stretches a disk image is shown in, as read. */
-  export const CELLS = 128;
+  /** The stretches a disk image is shown in, as read, and how fast AMT reads one at most, bytes a second. */
+  const CELLS = 128;
+  const TOP = 1.1e6;
 
   /** Our commands fail with a `CommandError`, Tauri itself with a string. */
   export function reason(error: unknown) {
@@ -40,6 +32,7 @@
 <script lang="ts">
   import { ChevronDown, Disc3, LoaderCircle, RefreshCw, X } from "@lucide/svelte";
   import { Channel, invoke } from "@tauri-apps/api/core";
+  import { SvelteMap } from "svelte/reactivity";
   import AuditLog from "./pages/AuditLog.svelte";
   import EventLog from "./pages/EventLog.svelte";
   import Hardware from "./pages/Hardware.svelte";
@@ -48,7 +41,13 @@
   import Sol from "./pages/Sol.svelte";
   import Status from "./pages/Status.svelte";
 
-  let { session = $bindable(), say }: { session: Session; say: (text: string, failed?: boolean) => void } = $props();
+  let {
+    session = $bindable(),
+    hidden,
+    say,
+  }: { session: Session; hidden: boolean; say: (text: string, failed?: boolean) => void } = $props();
+  const id = $props.id();
+  session.footer = status;
 
   /** The commands are named after the tabs that read. All but the hardware change often enough to want a refresh. The
    * KVM tab is a screen of its own, for devices that have one. */
@@ -60,25 +59,42 @@
     settings: { label: "Settings", page: Settings, live: true },
   };
   let tab = $state<keyof typeof TABS | "kvm" | "sol">("status");
-  let page = $derived(tab === "kvm" || tab === "sol" ? undefined : session.pages[tab]);
+  /** By tab: what it read, or why it couldn't, and when, as it came. */
+  const pages = new SvelteMap<string, { data?: unknown; error?: string; read?: Date }>();
+  let page = $derived(tab === "kvm" || tab === "sol" ? undefined : pages.get(tab));
   let live = $derived(tab !== "kvm" && tab !== "sol" && TABS[tab].live);
+  /** Whether its screen and serial console were opened: they stay open across tabs. What they wait for while they're
+   * not open, and the screen's size and updates a second while it's shown, for the footer. */
+  let opened = $state({ kvm: false, sol: false });
+  let waiting = $state({ kvm: "", sol: "" });
+  let screen = $state<{ width: number; height: number; fps: number }>();
 
-  // Whatever is on screen gets read, unless we have it. A screen or serial console, once opened, stays open.
-  $effect(() => {
-    if (tab === "kvm" || tab === "sol") session[tab] = true;
-    else if (!session.pages[tab]) read();
-  });
+  /** Shows a tab: a screen or serial console opens, a page is read unless we have it. */
+  function show(name: typeof tab) {
+    tab = name;
+    if (name === "kvm" || name === "sol") opened[name] = true;
+    else if (!pages.has(name)) read(name);
+  }
+  read();
 
   function close(kind: "kvm" | "sol") {
-    session[kind] = false;
-    if (tab === kind) tab = "status";
+    opened[kind] = false;
+    if (tab === kind) show("status");
   }
 
   /** What the device lets us redirect, as the settings last said. */
   let access: RemoteAccess = $derived(
-    (session.pages.settings?.data as { remote_access?: RemoteAccess } | undefined)?.remote_access ??
-      session.info.remote_access,
+    (pages.get("settings")?.data as SettingsData | undefined)?.remote_access ?? session.info.remote_access,
   );
+
+  /** What Settings saved, which it then shows: the name, and what's turned off goes (Rust ejects the image itself). */
+  function saved(data: SettingsData) {
+    pages.set("settings", { data, read: new Date() });
+    session.info.name = data.general.name;
+    opened.kvm &&= !!data.remote_access.kvm;
+    opened.sol &&= data.remote_access.sol;
+    if (!data.remote_access.ider) image = undefined;
+  }
 
   /** Why the screen, serial console or a disk image can't open, if it can't: it's off until turned on in Settings. */
   function off(kind: "kvm" | "sol" | "ider") {
@@ -88,17 +104,15 @@
     return `${what} turned off, in Settings under Remote access.`;
   }
 
-  /** Reads the tab afresh. It starts blank, so a refresh shows it happened, and replaces the page, so whatever the one
-   * before it still reads lands nowhere. */
+  /** Reads the tab afresh. It starts blank, so a refresh shows it happened, and only the last read lands. */
   async function read(name = tab) {
-    session.pages[name] = {};
-    const page = session.pages[name];
-    try {
-      page.data = await invoke(name, { host: session.host });
-      page.read = new Date();
-    } catch (error) {
-      page.error = reason(error);
-    }
+    const blank = {};
+    pages.set(name, blank);
+    const page = await invoke(name, { host: session.host }).then(
+      (data) => ({ data, read: new Date() }),
+      (error) => ({ error: reason(error) }),
+    );
+    if (pages.get(name) === blank) pages.set(name, page);
   }
 
   let dialog: HTMLDialogElement;
@@ -164,69 +178,69 @@
 
   /** Powering on needs no second thought, everything else does. */
   async function choose(action: PowerAction, label: string) {
-    if (action.startsWith("On") || (await ask(`${label} ${session.info.name}?`, [label]))) change(action, label);
-  }
-
-  async function change(action: PowerAction, label: string) {
+    if (!action.startsWith("On") && !(await ask(`${label} ${session.info.name}?`, [label]))) return;
     try {
       await invoke("set_power", { host: session.host, action });
       if (session.power) session.changing = { from: session.power.state, until: Date.now() + 60_000 };
       say(`${label} sent.`);
       // The BIOS's screen goes there.
-      if (action.endsWith("Serial")) tab = "sol";
+      if (action.endsWith("Serial")) show("sol");
     } catch (error) {
       say(reason(error), true);
     }
   }
 
+  /** The disk image in its drive: its name and size, how much of it the device read and how fast (bytes a second), and
+   * when it last read each of its `CELLS` stretches (`Date.now()`, 0 for never). And whether one is on its way in. */
+  let image: { name: string; size: number; read: number; rate: number; cells: number[] } | undefined = $state();
+  let mounting = $state(false);
+
   /** The image is read from here as the device asks for it, the file never goes through the webview. Rust tells us what
-   * of it each read was, how fast it reads we work out every second while it does. All of it for the device it went
-   * into, whichever one is shown by then. */
+   * of it each read was, how fast it reads we work out every second while it does. */
   async function mount(path?: string | null) {
     path ??= await invoke<string | null>("pick", { kind: "Disk image", extensions: ["iso"] });
     if (!path) return;
-    const device = session;
-    device.mounting = true;
-    const image = $state({ name: "", size: 0, read: 0, rate: 0, cells: Array<number>(CELLS).fill(0) });
+    mounting = true;
+    const mounted = $state({ name: "", size: 0, read: 0, rate: 0, cells: Array<number>(CELLS).fill(0) });
     let [tick, last] = [0, 0];
     const reads = new Channel<{ start: number; end: number } | null>();
     reads.onmessage = (read) => {
       // Until it's in, and once it's out, it's not ours to show.
-      if (device.image !== image) return;
+      if (image !== mounted) return;
       if (!read) {
-        device.image = undefined;
-        return say(`${device.info.name} closed the disk image (a reset, say), mount it again to use it.`);
+        image = undefined;
+        return say(`${session.info.name} closed the disk image (a reset, say), mount it again to use it.`);
       }
-      image.read += read.end - read.start;
-      const cell = (at: number) => (at * CELLS) / image.size;
-      for (let i = Math.floor(cell(read.start)); i < cell(read.end); i++) image.cells[i] = Date.now();
+      mounted.read += read.end - read.start;
+      const cell = (at: number) => (at * CELLS) / mounted.size;
+      for (let i = Math.floor(cell(read.start)); i < cell(read.end); i++) mounted.cells[i] = Date.now();
       tick ||= setInterval(() => {
-        [image.rate, last] = [image.read - last, image.read];
-        if (image.rate) return;
+        [mounted.rate, last] = [mounted.read - last, mounted.read];
+        if (mounted.rate) return;
         clearInterval(tick);
         tick = 0;
       }, 1000);
     };
     try {
-      [image.name, image.size] = await invoke<[string, number]>("ider_mount", { host: device.host, path, reads });
-      device.image = image;
-      say(`${image.name} is in the drive, the device sees it from its next boot on.`);
+      [mounted.name, mounted.size] = await invoke<[string, number]>("ider_mount", { host: session.host, path, reads });
+      image = mounted;
+      say(`${mounted.name} is in the drive, the device sees it from its next boot on.`);
     } catch (error) {
       if ((error as CommandError).kind === "Consent" && (await consent("ider"))) return await mount(path);
       say(reason(error), true);
     } finally {
-      device.mounting = false;
+      mounting = false;
     }
   }
 
   function eject() {
     invoke("ider_eject", { host: session.host });
-    session.image = undefined;
+    image = undefined;
   }
 
-  // ⌘R would reload the whole app, we read the tab again instead.
+  // ⌘R would reload the whole app, we read the tab on screen again instead.
   function keydown(event: KeyboardEvent) {
-    if ((event.metaKey || event.ctrlKey) && event.key === "r") {
+    if (!hidden && (event.metaKey || event.ctrlKey) && event.key === "r") {
       event.preventDefault();
       if (live) read();
     }
@@ -244,7 +258,7 @@
     aria-selected={name === tab}
     aria-disabled={!!off}
     title={off}
-    onclick={() => (off ? say(off) : (tab = name))}
+    onclick={() => (off ? say(off) : show(name))}
   >
     {label}
   </button>
@@ -252,7 +266,7 @@
 
 <!-- An open screen or serial console stays open across tabs, until closed here. -->
 {#snippet closeButton(kind: "kvm" | "sol", help: string)}
-  {#if session[kind]}
+  {#if opened[kind]}
     <button
       type="button"
       class="btn-icon -ml-5 size-5"
@@ -268,10 +282,10 @@
   <button
     type="button"
     class="block h-8 w-full rounded-md px-3 text-left hover:bg-accent hover:text-white disabled:text-muted"
-    popovertarget="power-menu"
+    popovertarget="{id}-power"
     popovertargetaction="hide"
     disabled={!session.power?.actions.includes(name) ||
-      (name.endsWith("Image") && !session.image) ||
+      (name.endsWith("Image") && !image) ||
       (name.endsWith("Serial") && !!off("sol"))}
     title={help}
     onclick={() => choose(name, label)}
@@ -280,41 +294,76 @@
   </button>
 {/snippet}
 
-<section class="grid min-h-0 grid-rows-[auto_auto_1fr]">
+<!-- What the footer says of it while it's on screen: what its screen and serial console wait for, how large its screen
+     is, and its disk image as the device reads it, like a defragmenter's map: its stretches fade for as long as reading
+     all of it at the top speed would take, so a whole read leaves a trail across them. -->
+{#snippet status()}
+  {@const opening = waiting.kvm || waiting.sol}
+  {#if opening}
+    <output class="flex min-w-0 items-center gap-1.5 text-muted">
+      <LoaderCircle class="size-3.5 flex-none animate-spin" /><span class="truncate">{opening}</span>
+    </output>
+  {/if}
+  <div class="ml-auto flex items-center gap-6 pr-1.5 whitespace-nowrap text-muted tabular-nums">
+    {#if screen}
+      <span title="The device's screen, and the updates a second it sends">
+        KVM {screen.width} × {screen.height}, {screen.fps} fps
+      </span>
+    {/if}
+    {#if image}
+      <div
+        class="flex gap-0.75"
+        style:--speed={Math.min(image.rate / TOP, 1)}
+        style:--decay="{image.size / TOP}s"
+        title="Disk read {(image.rate / 1e6).toFixed(2)} MB/s which top out at about {TOP /
+          1e6} MB/s as each read goes through a small management engine."
+      >
+        <div class="disk-speed"></div>
+        <div class="disk-map">
+          {#each image.cells as read}
+            <!-- Each read restarts its animation, which shown again goes on where it is by now. -->
+            {#key read}<div data-read={read || undefined} style:animation-delay="{read - Date.now()}ms"></div>{/key}
+          {/each}
+        </div>
+      </div>
+    {/if}
+  </div>
+{/snippet}
+
+<section class="grid min-h-0 grid-rows-[auto_auto_1fr]" {hidden}>
   <header class="flex items-center gap-3 px-8 pt-6 pb-4">
     <span
-      class="dot"
-      class:animate-pulse={session.changing}
+      class={["dot", session.changing && "animate-pulse"]}
       data-power={session.power?.state}
       title={session.power && session.power.state + (session.changing ? ", changing…" : "")}
     ></span>
     <h1 class="truncate text-xl font-semibold">{session.info.name}</h1>
     <!-- The disk image in the device's drive, for booting from (IDER). -->
-    {#if session.image}
+    {#if image}
       <!-- Lit while the device reads, like a drive's light. -->
       <span class="ml-auto flex min-w-0 items-center gap-2 text-muted" title="In the device's drive">
-        <Disc3 class={["size-4 flex-none", session.image.rate && "text-accent"]} />
-        <span class="truncate">{session.image.name}</span>
+        <Disc3 class={["size-4 flex-none", image.rate && "text-accent"]} />
+        <span class="truncate">{image.name}</span>
         <button type="button" class="btn-icon size-7 flex-none" title="Eject" onclick={eject}><X class="size-4" /></button>
       </span>
     {:else}
       <button
         type="button"
         class="btn btn-secondary ml-auto"
-        disabled={session.mounting}
+        disabled={mounting}
         aria-disabled={!!off("ider")}
         title={off("ider")}
         onclick={() => (off("ider") ? say(off("ider")!) : mount())}
       >
-        {#if session.mounting}<LoaderCircle class="size-4 animate-spin" />{:else}<Disc3 class="size-4" />{/if} Disk image…
+        {#if mounting}<LoaderCircle class="size-4 animate-spin" />{:else}<Disc3 class="size-4" />{/if} Disk image…
       </button>
     {/if}
-    <button type="button" class="btn btn-secondary" popovertarget="power-menu">
+    <button type="button" class="btn btn-secondary" popovertarget="{id}-power">
       Power <ChevronDown class="size-4" />
     </button>
     <!-- Grouped: power on, asking the OS, acting at once, and booting elsewhere this once. -->
     <div
-      id="power-menu"
+      id="{id}-power"
       popover
       class="fixed inset-auto top-15 right-8 m-0 min-w-52 rounded-lg border border-line bg-canvas p-1 text-ink shadow-xl [&>hr]:my-1 [&>hr]:border-line"
     >
@@ -342,7 +391,7 @@
   </header>
 
   <div class="mx-8 flex items-center gap-6 border-b border-line" role="tablist">
-    {#each Object.entries(TABS) as [name, { label }]}
+    {#each Object.entries(TABS) as [name, { label }] (name)}
       {#if name !== "settings"}{@render tabButton(name as keyof typeof TABS, label)}{/if}
     {/each}
     {@render tabButton("kvm", "KVM", off("kvm"))}
@@ -365,21 +414,21 @@
     {/if}
   </div>
 
-  {#if session.kvm}
+  {#if opened.kvm}
     <Kvm
       host={session.host}
       hidden={tab !== "kvm"}
       consent={() => consent("kvm")}
-      status={(text) => ((session.status ??= {}).kvm = text)}
-      measured={(screen) => (session.screen = screen)}
+      status={(text) => (waiting.kvm = text)}
+      measured={(measured) => (screen = measured)}
     />
   {/if}
-  {#if session.sol}
+  {#if opened.sol}
     <Sol
       host={session.host}
       hidden={tab !== "sol"}
       consent={() => consent("sol")}
-      status={(text) => ((session.status ??= {}).sol = text)}
+      status={(text) => (waiting.sol = text)}
     />
   {/if}
   {#if tab !== "kvm" && tab !== "sol"}
@@ -393,19 +442,19 @@
           </div>
         {:else}
           <!-- Each page knows the shape of its own data, the ones that change something take the rest too. -->
-          <Page data={page?.data as never} {session} {say} {ask} />
+          <Page data={page?.data as never} {session} {say} {ask} {saved} />
         {/if}
       </div>
     </main>
   {/if}
 </section>
 
-<dialog bind:this={dialog} class="dialog w-96">
+<dialog bind:this={dialog}>
   <form method="dialog" class="grid gap-5">
     <p class="font-medium">{asking.question}</p>
     <div class="flex justify-end gap-2">
       <button value="" class="btn btn-secondary">Cancel</button>
-      {#each asking.answers as answer, i}
+      {#each asking.answers as answer, i (answer)}
         {@const last = i === asking.answers.length - 1}
         <button value={answer} class={["btn", !last ? "btn-secondary" : asking.safe ? "btn-primary" : "btn-danger"]}>
           {answer}
@@ -416,7 +465,7 @@
 </dialog>
 
 <!-- Escape is a no, like Cancel. -->
-<dialog bind:this={consentDialog} class="dialog w-96" oncancel={decline}>
+<dialog bind:this={consentDialog} oncancel={decline}>
   <form class="grid gap-4" onsubmit={sendCode}>
     <p class="font-medium">Ask someone at {session.info.name}</p>
     <p>
