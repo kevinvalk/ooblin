@@ -8,9 +8,7 @@ use std::collections::HashMap;
 use std::fmt::Display;
 use std::sync::Arc;
 
-use amt_core::{
-    AuditRecord, Client, Error, Event, Fingerprint, Hardware, Info, Power, PowerAction, Settings, Status, Target,
-};
+use amt_core::{AuditRecord, Client, Error, Event, Hardware, Info, Power, PowerAction, Settings, Status, Target};
 use clap::Parser;
 use hosts::{Device, Hosts};
 use serde::Serialize;
@@ -54,44 +52,32 @@ fn devices(app: AppHandle) -> Result<Vec<Device>, CommandError> {
     Ok(Hosts::open(&app)?.devices())
 }
 
+/// Without a `password`, with the one we have: from the command line or the OS credential store. `remember` keeps
+/// a typed one there.
 #[tauri::command]
 async fn connect(
     app: AppHandle,
     sessions: State<'_, Sessions>,
-    host: String,
-    user: String,
-    password: String,
-    remember: bool,
-) -> Result<Info, CommandError> {
-    let target = Target::new(host, user, password);
-    let info = open(&app, &sessions, &target).await?;
-    if remember {
-        Hosts::open(&app)?.remember(&target)?;
-    }
-    Ok(info)
-}
-
-/// Connects with the password we already have, from the command line or the OS credential store.
-#[tauri::command]
-async fn reconnect(
-    app: AppHandle,
-    sessions: State<'_, Sessions>,
     args: State<'_, Args>,
     host: String,
+    user: String,
+    password: Option<String>,
+    remember: bool,
 ) -> Result<Info, CommandError> {
-    let target = match &args.password {
-        Some(password) if args.host.as_ref() == Some(&host) => Target::new(host, &args.user, password),
-        _ => Hosts::open(&app)?.target(&host)?,
+    let mut hosts = Hosts::open(&app)?;
+    let remember = remember && password.is_some();
+    let target = match (password, &args.password) {
+        (Some(password), _) => Target::new(host, user, password),
+        (None, Some(password)) if args.host.as_ref() == Some(&host) => Target::new(host, &args.user, password),
+        (None, _) => hosts.target(&host)?,
     };
-    open(&app, &sessions, &target).await
-}
-
-async fn open(app: &AppHandle, sessions: &Sessions, target: &Target) -> Result<Info, CommandError> {
-    let mut hosts = Hosts::open(app)?;
-    let mut client = Client::new(target, hosts.pin(&target.host))?;
+    let mut client = Client::new(&target, hosts.pin(&target.host))?;
     let info = client.info().await?;
-    hosts.connected(target, info.fingerprint)?;
-    sessions.0.lock().unwrap().insert(target.host.clone(), Arc::new(Mutex::new(client)));
+    hosts.connected(&target, info.fingerprint.clone())?;
+    if remember {
+        hosts.remember(&target)?;
+    }
+    sessions.0.lock().unwrap().insert(target.host, Arc::new(Mutex::new(client)));
     Ok(info)
 }
 
@@ -107,7 +93,7 @@ fn forget(app: AppHandle, sessions: State<'_, Sessions>, host: &str) -> Result<(
 }
 
 #[tauri::command]
-fn trust(app: AppHandle, host: &str, fingerprint: Fingerprint) -> Result<(), CommandError> {
+fn trust(app: AppHandle, host: &str, fingerprint: String) -> Result<(), CommandError> {
     Ok(Hosts::open(&app)?.trust(host, fingerprint)?)
 }
 
@@ -158,7 +144,7 @@ fn title(window: WebviewWindow, title: &str) -> Result<(), CommandError> {
 #[ts(export, export_to = "console.ts")]
 #[serde(tag = "kind", rename_all = "camelCase")]
 enum CommandError {
-    PinMismatch { message: String, expected: Fingerprint, actual: Fingerprint },
+    PinMismatch { message: String, expected: String, actual: String },
     Unreachable { message: String },
     Failed { message: String },
 }
@@ -171,12 +157,11 @@ impl CommandError {
 
 impl From<Error> for CommandError {
     fn from(error: Error) -> Self {
+        let message = error.to_string();
         match error {
-            Error::PinMismatch { expected, actual } => {
-                Self::PinMismatch { message: error.to_string(), expected, actual }
-            }
-            Error::Transport(_) | Error::Timeout => Self::Unreachable { message: error.to_string() },
-            error => Self::failed(error),
+            Error::PinMismatch { expected, actual } => Self::PinMismatch { message, expected, actual },
+            Error::Transport(_) | Error::Timeout => Self::Unreachable { message },
+            _ => Self::Failed { message },
         }
     }
 }
@@ -208,8 +193,8 @@ fn main() {
         .manage(Args::parse())
         .manage(Sessions::default())
         .invoke_handler(tauri::generate_handler![
-            launch, devices, connect, reconnect, disconnect, forget, trust, power, set_power, status, hardware,
-            settings, events, audit, title
+            launch, devices, connect, disconnect, forget, trust, power, set_power, status, hardware, settings, events,
+            audit, title
         ])
         .run(tauri::generate_context!())
         .expect("the Tauri runtime starts");

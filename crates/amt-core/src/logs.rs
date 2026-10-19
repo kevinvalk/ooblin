@@ -7,7 +7,6 @@ use instant_xml::ToXml;
 use serde::Serialize;
 use ts_rs::TS;
 
-use crate::decode::utc;
 use crate::wsman::Method;
 use crate::{Client, Error, Result};
 
@@ -15,8 +14,8 @@ use crate::{Client, Error, Result};
 #[ts(export, export_to = "core.ts")]
 #[serde(rename_all = "camelCase")]
 pub struct Event {
-    /// UTC, see `utc`.
-    pub time: String,
+    /// Unix seconds.
+    pub time: u32,
     pub source: String,
     pub description: String,
     pub severity: Severity,
@@ -35,12 +34,12 @@ pub enum Severity {
 #[ts(export, export_to = "core.ts")]
 #[serde(rename_all = "camelCase")]
 pub struct AuditRecord {
-    /// UTC, see `utc`.
-    pub time: String,
+    /// Unix seconds.
+    pub time: u32,
     pub application: String,
     pub event: String,
-    /// Who did it, and from where: "admin, 192.168.88.10".
-    pub by: String,
+    pub initiator: String,
+    pub address: String,
     pub details: String,
 }
 
@@ -133,7 +132,7 @@ fn event(record: &[u8]) -> Option<Event> {
         return None;
     }
     Some(Event {
-        time: utc(time),
+        time,
         source: ENTITIES.get(usize::from(entity)).copied().unwrap_or("Unknown").to_owned(),
         description: describe(sensor, offset, data),
         severity: match severity {
@@ -270,10 +269,11 @@ fn audit_record(record: &[u8]) -> Option<AuditRecord> {
     let address = text(prefixed(&mut rest)?).replace("0000:0000:0000:0000:0000:0000:0000:0001", "::1");
     let extended = prefixed(&mut rest)?;
     Some(AuditRecord {
-        time: utc(u32::from_be_bytes(time)),
+        time: u32::from_be_bytes(time),
         application: audit_name(application.into()).map_or_else(|| format!("#{application}"), str::to_owned),
         event: audit_name(id).map_or_else(|| format!("#{event}"), str::to_owned),
-        by: [initiator, address].into_iter().filter(|part| !part.is_empty()).collect::<Vec<_>>().join(", "),
+        initiator,
+        address,
         details: details(id, extended).unwrap_or_default(),
     })
 }
@@ -321,7 +321,9 @@ fn details(id: u32, data: &[u8]) -> Option<String> {
             let v: Vec<_> = data.get(..16)?.as_chunks().0.iter().map(|&v| u16::from_be_bytes(v)).collect();
             Some(format!("From {}.{}.{}.{} to {}.{}.{}.{}", v[0], v[1], v[2], v[3], v[4], v[5], v[6], v[7]))
         }
-        2100 => Some(utc(u32::from_be_bytes(*data.first_chunk::<4>()?))),
+        2100 => {
+            Some(jiff::Timestamp::from_second(u32::from_be_bytes(*data.first_chunk::<4>()?).into()).ok()?.to_string())
+        }
         3000 => Some(format!("From {} to {}", pick(&OPT_IN, 0)?, pick(&OPT_IN, 1)?)),
         3001 => pick(&["Success", "Failed 3 times"], 0),
         _ => None,

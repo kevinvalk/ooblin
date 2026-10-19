@@ -2,7 +2,7 @@ use instant_xml::ToXml;
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
-use crate::wsman::{Instance, Method, Reference, Resource};
+use crate::wsman::{Instance, Method, Reference};
 use crate::{Client, Error, Result};
 
 /// The power state, and what the device offers to do about it right now.
@@ -123,7 +123,7 @@ impl Client {
     async fn boot_once(&mut self, bios: bool) -> Result<()> {
         let current = self.get("AMT_BootSettingData").await?;
         self.invoke(&ChangeBootOrder { Source: None }).await?;
-        self.put(&BootSettingData::once(&current, bios)).await?;
+        self.put(BOOT_SETTINGS, &BootSettingData::once(&current, bios)).await?;
         let configuration = Reference {
             class: "CIM_BootConfigSetting",
             selectors: &[("InstanceID", "Intel(r) AMT: Boot Configuration 0")],
@@ -225,10 +225,6 @@ struct BootSettingData<'a> {
     UserPasswordBypass: bool,
 }
 
-impl Resource for BootSettingData<'_> {
-    const URI: &'static str = BOOT_SETTINGS;
-}
-
 impl<'a> BootSettingData<'a> {
     /// Intel's console keeps the device's own names and secure boot, clears the rest, and boots into the BIOS setup
     /// or not.
@@ -292,7 +288,7 @@ mod tests {
             .map(|(name, value)| (name.into(), value.into()))
             .into(),
         };
-        let request = wsman::put(&BootSettingData::once(&current, false), 0);
+        let request = wsman::put(BOOT_SETTINGS, &BootSettingData::once(&current, false), 0);
         assert_eq!(body_meaning(&request), meaning(expected));
     }
 }

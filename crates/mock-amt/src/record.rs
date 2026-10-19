@@ -12,7 +12,7 @@ use std::io::Write as _;
 use std::path::Path;
 use std::time::Duration;
 
-use amt_core::{Client, Connection, Error, Fingerprint, Redirection, Session, Target, wsman};
+use amt_core::{Client, Connection, Error, Redirection, Session, Target, wsman};
 
 use crate::scrub::scrub;
 use crate::transcript::{Direction, Transcript};
@@ -290,7 +290,7 @@ pub async fn record(target: &Target, fixture: &Path) -> anyhow::Result<()> {
     let mut device = Connection::new(target, None)?;
     crawl(&mut device, &fixture.join("wsman")).await?;
     let pin = device.fingerprint();
-    eprintln!("Certificate {}", pin.map(|pin| pin.to_string()).unwrap_or_default());
+    eprintln!("Certificate {}", pin.as_deref().unwrap_or_default());
 
     eprint!("methods  recording…");
     let proxy = Amt::forward(device, fixture).await;
@@ -309,7 +309,7 @@ pub async fn record(target: &Target, fixture: &Path) -> anyhow::Result<()> {
     for (session, name) in [(Session::Sol, "sol"), (Session::Kvm, "kvm"), (Session::Ider, "ider")] {
         eprint!("{name:>6}  recording…");
         // A session the device refuses (not enabled, say) is skipped, the replay refuses it the same way.
-        match Recording::run(target, pin, session).await {
+        match Recording::run(target, pin.clone(), session).await {
             Ok(transcript) => {
                 transcript.save(&fixture.join(format!("{name}.transcript")))?;
                 eprintln!("\r{name:>6}  {} bytes", transcript.0.iter().map(|(_, data)| data.len()).sum::<usize>());
@@ -366,7 +366,7 @@ struct Recording {
 }
 
 impl Recording {
-    async fn run(target: &Target, pin: Option<Fingerprint>, session: Session) -> Result<Transcript, Error> {
+    async fn run(target: &Target, pin: Option<String>, session: Session) -> Result<Transcript, Error> {
         let redirection = Redirection::open(target, pin, session).await?;
         let mut recording = Self { redirection, transcript: Transcript::default() };
         match session {

@@ -5,7 +5,7 @@ use std::sync::Arc;
 use std::sync::atomic::Ordering;
 
 use amt_core::wsman::parse_instance;
-use amt_core::{Client, Error, Fingerprint, PowerAction, PowerState, Redirection, Session, Target, Trust};
+use amt_core::{Client, Error, PowerAction, PowerState, Redirection, Session, Target, fingerprint};
 use anyhow::{Context, Result, bail};
 use mock_amt::{Amt, Direction, PASSWORD, Transcript, USER};
 
@@ -21,21 +21,20 @@ fn target(amt: &Amt, password: &str) -> Target {
     Target { wsman_port: amt.port, redirection_port: amt.redirection_port, ..Target::new("127.0.0.1", USER, password) }
 }
 
-fn client(amt: &Amt, password: &str, pin: Option<Fingerprint>) -> Result<Client> {
+fn client(amt: &Amt, password: &str, pin: Option<String>) -> Result<Client> {
     Ok(Client::new(&target(amt, password), pin)?)
 }
 
 #[tokio::test]
 async fn pins_the_certificate_on_first_use_and_refuses_another() -> Result<()> {
     let amt = samples().await;
-    let pin = Fingerprint::of(&Amt::certificate());
+    let pin = fingerprint(&Amt::certificate());
 
-    let info = client(&amt, PASSWORD, None)?.info().await?;
-    assert_eq!((info.fingerprint, info.trust), (pin, Trust::FirstUse));
-    assert_eq!(client(&amt, PASSWORD, Some(pin))?.info().await?.trust, Trust::Pinned);
+    assert_eq!(client(&amt, PASSWORD, None)?.info().await?.fingerprint, pin);
+    assert_eq!(client(&amt, PASSWORD, Some(pin.clone()))?.info().await?.fingerprint, pin);
 
-    let old = Fingerprint::of(b"the certificate before reprovisioning");
-    match client(&amt, PASSWORD, Some(old))?.info().await {
+    let old = fingerprint(b"the certificate before reprovisioning");
+    match client(&amt, PASSWORD, Some(old.clone()))?.info().await {
         Err(Error::PinMismatch { expected, actual }) => assert_eq!((expected, actual), (old, pin)),
         other => bail!("expected a pin mismatch, got {other:?}"),
     }
@@ -117,7 +116,7 @@ async fn reads_what_intels_samples_say() -> Result<()> {
     let module = hardware.memory.iter().find(|module| module.slot == "BANK 2").context("no BANK 2")?;
     assert_eq!(module.part_number, "CT16G4SFD824A.M16FE");
     let admin = &client.settings().await?.accounts[0];
-    assert_eq!((&*admin.name, &*admin.role), ("admin", "Administrator"));
+    assert!(admin.admin && admin.name == "admin");
     let times: Vec<_> = client.audit_log().await?.into_iter().map(|record| record.time).collect();
     assert!(times.len() == 2 && times[0] > times[1], "newest first: {times:?}");
     Ok(())
@@ -134,8 +133,8 @@ async fn reads_what_the_ms_02_says() -> Result<()> {
         (&*processor.family, &*processor.socket, &*processor.upgrade_method),
         ("Core Ultra 9", "U3E1", "Socket BGA2114")
     );
-    assert_eq!(processor.summary, "Intel(R) Core(TM) Ultra 9 285HX @ 4600 / 8500 MHz");
-    assert_eq!((&*hardware.memory[0].size, &*hardware.disks[0].size), ("32 GB", "2 TB"));
+    assert_eq!((processor.mhz, processor.max_mhz), (Some(4600), Some(8500)));
+    assert_eq!((hardware.memory[0].bytes, hardware.disks[0].bytes), (Some(32 << 30), Some(2_000_398_934_000)));
     assert!(hardware.batteries.is_empty());
     let port = &client.status().await?.ports[0];
     assert_eq!(port.ipv4.subnet_mask, "255.255.192.0");

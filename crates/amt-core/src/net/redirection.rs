@@ -11,7 +11,7 @@ use tokio::net::TcpStream;
 use tokio_rustls::TlsConnector;
 use tokio_rustls::client::TlsStream;
 
-use super::{Fingerprint, Pin};
+use super::Pin;
 use crate::{Error, Result, Target};
 
 pub const REDIRECTION_PORT: u16 = 16995;
@@ -42,7 +42,7 @@ pub struct Redirection {
 }
 
 impl Redirection {
-    pub async fn open(target: &Target, pin: Option<Fingerprint>, session: Session) -> Result<Self> {
+    pub async fn open(target: &Target, pin: Option<String>, session: Session) -> Result<Self> {
         let pin = Pin::new(pin);
         let address = (target.host.as_str(), target.redirection_port);
         let tcp = tokio::time::timeout(Duration::from_secs(10), TcpStream::connect(address))

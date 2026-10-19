@@ -1,39 +1,22 @@
-use serde::Serialize;
-use ts_rs::TS;
+use crate::net::Connection;
+use instant_xml::ToXml;
 
-use crate::net::{Connection, Fingerprint};
-use crate::wsman::{self, Instance, Method, Resource};
+use crate::wsman::{self, Instance, Method};
 use crate::{Error, Result, Target};
 
 pub struct Client {
     connection: Connection,
-    trust: Trust,
     message_id: u32,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, TS)]
-#[ts(export, export_to = "core.ts")]
-#[serde(rename_all = "camelCase")]
-pub enum Trust {
-    /// The certificate matched the pin we were given.
-    Pinned,
-    /// We had no pin, so we trusted the first certificate we saw.
-    FirstUse,
-}
-
 impl Client {
-    /// Connects lazily, the first call does the TLS handshake and pin check.
-    pub fn new(target: &Target, pin: Option<Fingerprint>) -> Result<Self> {
-        let trust = if pin.is_some() { Trust::Pinned } else { Trust::FirstUse };
-        Ok(Self { connection: Connection::new(target, pin)?, trust, message_id: 0 })
-    }
-
-    pub(crate) fn trust(&self) -> Trust {
-        self.trust
+    /// Connects lazily, the first call does the TLS handshake and checks the certificate against `pin`.
+    pub fn new(target: &Target, pin: Option<String>) -> Result<Self> {
+        Ok(Self { connection: Connection::new(target, pin)?, message_id: 0 })
     }
 
     /// Known after the first successful call.
-    pub(crate) fn fingerprint(&self) -> Option<Fingerprint> {
+    pub(crate) fn fingerprint(&self) -> Option<String> {
         self.connection.fingerprint()
     }
 
@@ -42,8 +25,8 @@ impl Client {
         wsman::parse_instance(&self.read(envelope).await?)
     }
 
-    pub async fn put(&mut self, instance: &impl Resource) -> Result<()> {
-        let envelope = wsman::put(instance, self.next_message_id());
+    pub async fn put(&mut self, uri: &str, instance: &impl ToXml) -> Result<()> {
+        let envelope = wsman::put(uri, instance, self.next_message_id());
         self.connection.post(envelope).await?;
         Ok(())
     }

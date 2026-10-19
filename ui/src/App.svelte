@@ -27,7 +27,7 @@
     if (sessions[device.host]) return show(device.host);
     if (connecting === device.host) return;
     showForm(device);
-    if (device.remembered) connect(device.host, "reconnect", { host: device.host });
+    if (device.remembered) connect({ host: device.host, user: device.user, password: null, remember: false });
   }
 
   function showForm(device?: Device, error?: CommandError) {
@@ -37,18 +37,13 @@
     listDevices();
   }
 
-  /** Logs in with what's typed, or with the saved password when none is. */
-  function submit({ host, user, password, remember }: { host: string; user: string; password: string; remember: boolean }) {
-    const saved = devices.some((device) => device.host === host && device.remembered);
-    if (saved && !password) connect(host, "reconnect", { host });
-    else connect(host, "connect", { host, user, password, remember });
-  }
-
-  async function connect(host: string, command: "connect" | "reconnect", args: Record<string, unknown>) {
+  /** Without a `password` with the one we have, see the `connect` command. */
+  async function connect(login: { host: string; user: string; password: string | null; remember: boolean }) {
+    const host = login.host;
     connecting = host;
     form.error = undefined;
     try {
-      sessions[host] = { host, info: await invoke<Info>(command, args), pages: {} };
+      sessions[host] = { host, info: await invoke<Info>("connect", login), pages: {} };
       show(host);
     } catch (error) {
       form.error = explain(error, `Couldn't reach ${host}`);
@@ -182,7 +177,7 @@
           device={form.device}
           connecting={connecting !== null}
           error={form.error}
-          onsubmit={submit}
+          onsubmit={(login) => connect({ ...login, password: login.password || null })}
           ontrust={(host, fingerprint) => invoke("trust", { host, fingerprint })}
         />
       {/key}

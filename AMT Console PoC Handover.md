@@ -1,6 +1,6 @@
 # AMT Console PoC Handover
 
-Oct 18, 2026 · @Kevin Valk
+Oct 18, 2026
 
 ## Goal
 
@@ -87,9 +87,9 @@ When a detail below disagrees with the reference code in section 5, the referenc
 
 ## Reference code
 
-All protocol logic already exists in the open; the job is porting, not inventing. Order of trust when sources disagree: observed MS-02 behaviour, then DMT (maintained, tested on AMT 19), then MeshCommander (last touched 2023), then the SDK text.
+All protocol logic already exists in the open; the job is porting, not inventing. Order of trust when sources disagree: observed MS-02 behavior, then DMT (maintained, tested on AMT 19), then MeshCommander (last touched 2023), then the SDK text.
 
-| What | Where | Use it for | Licence |
+| What | Where | Use it for | License |
 | --- | --- | --- | --- |
 | Redirection handshake: START, AUTH, Digest over the socket | `amt-redir-ws-0.1.0.js` in [Ylianst/MeshCommander](https://github.com/Ylianst/MeshCommander) | Port to Rust 1:1 | Apache-2.0 |
 | KVM: RFB state machine, ZRLE decode, keysym table | `amt-desktop-0.0.2.js` in MeshCommander | Port decode to Rust; reuse the input mapping in TS | Apache-2.0 |
@@ -98,7 +98,7 @@ All protocol logic already exists in the open; the job is porting, not inventing
 | High-level AMT helpers (enable KVM, power, boot options) | `amt-0.2.0.js` in MeshCommander | Call order and parameter values | Apache-2.0 |
 | WS-Man bodies for every AMT, IPS and CIM class | [go-wsman-messages](https://github.com/device-management-toolkit/go-wsman-messages) | Copy the XML templates for the calls in section 4 | Apache-2.0 |
 | Current KVM, SOL, IDER components in TypeScript | [ui-toolkit](https://github.com/device-management-toolkit/ui-toolkit) | Second opinion when MeshCommander disagrees with the firmware | Apache-2.0 |
-| A working app against AMT 19 | [console](https://github.com/device-management-toolkit/console) (Go) | Read the usecase layer for sequences; run it to compare behaviour | Apache-2.0 |
+| A working app against AMT 19 | [console](https://github.com/device-management-toolkit/console) (Go) | Read the usecase layer for sequences; run it to compare behavior | Apache-2.0 |
 | Official protocol text | [Intel AMT SDK: KVM Application Developers Guide](https://software.intel.com/sites/manageability/AMT_Implementation_and_Reference_Guide/WordDocuments/kvmapplicationdevelopersguide.htm) and the Redirection Library chapters beside it | Resolve ambiguity in the ports | Intel |
 
 What not to use: MeshCommander's `webrelay.ashx` relay and `amt-wsman-comm-*.js` transport (replaced by Rust), its firmware edition (needs AMT web storage, gone since 16.1), and anything in the DMT that assumes MPS/RPS or CIRA.
@@ -107,7 +107,7 @@ What not to use: MeshCommander's `webrelay.ashx` relay and `amt-wsman-comm-*.js`
 
 Default path is Tauri v2 binary IPC: Rust to webview through a `Channel` carrying raw bytes, webview to Rust through `invoke` with a raw request body. A user benchmark quoted by the Tauri maintainers puts this at about 5 ms per 10 MB on macOS and about 200 ms on Windows, which is why Windows is out of scope. Verify early whether channel messages actually take the raw path or get JSON-encoded on the way; if the latter, go straight to lever 2.
 
-Measure before optimising, in M3: log socket-read-to-canvas-paint latency and CPU for a 1080p desktop with a window being dragged. Pick levers from the numbers:
+Measure before optimizing, in M3: log socket-read-to-canvas-paint latency and CPU for a 1080p desktop with a window being dragged. Pick levers from the numbers:
 
 1. Decode RFB in Rust, ship pixels. Rust keeps the framebuffer, decodes Raw and ZRLE, and sends only dirty rectangles as RGBA (a small x, y, w, h header plus bytes), coalesced per FramebufferUpdate. The webview does one `putImageData` per rect. This removes JS inflate and per-pixel loops and is the expected winner.
 2. Pull instead of push. Register a custom URI scheme (`kvm://frame?seq=N`) with `register_uri_scheme_protocol` and let the webview `fetch` each frame as an ArrayBuffer. Fetch bodies are the cheapest path into WebKit.
@@ -150,7 +150,7 @@ If M3 latency is bad on the plain Channel, spend the time on lever 1 and 2 from 
 - Digest nonces go stale quickly; handle `stale=true` without surfacing an error.
 - Enable the redirection listener and KVM over WS-Man before opening 16995, or the TCP connect succeeds and the handshake fails.
 - If the box is not in admin control mode or consent is not None, the firmware demands an opt-in code; detect `OptInRequired` and show a clear message instead of hanging.
-- AMT's HTTP server: no chunked encoding, few concurrent connections, keep-alive helps; a burst of parallel enumerates gets 503s. Serialise WS-Man calls.
+- AMT's HTTP server: no chunked encoding, few concurrent connections, keep-alive helps; a burst of parallel enumerates gets 503s. Serialize WS-Man calls.
 - WKWebView swallows Cmd-key shortcuts; map Cmd to Ctrl in the KVM view and document that Cmd-Tab cannot be forwarded.
 - The ZRLE inflater is per session, not per rectangle.
 - IDER chunk sizes and the floppy/CD slot semantics come from the START\_IDER reply; do not hardcode.

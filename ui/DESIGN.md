@@ -1,6 +1,6 @@
 # Design
 
-Calm, native-feeling, one look everywhere. Tailwind's own scale, our colours from `src/style.css`, no one-off sizes.
+Calm, native-feeling, one look everywhere. Tailwind's own scale, our colors from `src/style.css`, no one-off sizes.
 
 ## Type
 
@@ -25,8 +25,9 @@ Everything is `text-sm` (14px) unless it's a title. Sentence case, never upperca
 
 ## States
 
-- Values come from Rust as a person reads them ("4600 MHz", "Enabled"), the UI only lays them out.
-- Loading: the page itself, `aria-busy`, with grey bars where values go. Left out by the device: a dash. Both are CSS on
+- Values come from Rust as data, the page says them in words right where it shows them: `{mhz && `${mhz} MHz`}`,
+  Yes or No, times with `toLocaleString()` in the reader's own zone.
+- Loading: the page itself, `aria-busy`, with gray bars where values go. Left out by the device: a dash. Both are CSS on
   empty `dt`, `dd`, `td` and `h3`, so markup just writes `{value}`. Not there at all (no battery): say so in words.
 - Waiting on the device after a click: a spinning `LoaderCircle` where the click was (button, sidebar entry).
 - Errors: in the page or form with a way to try again, in the footer for actions. A device that stops answering is let

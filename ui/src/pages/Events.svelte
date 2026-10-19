@@ -8,13 +8,13 @@
   <p class="py-16 text-center text-muted">Nothing logged.</p>
 {:else}
   <table class="w-full border-separate border-spacing-0">
-    <thead><tr><th>Time (UTC)</th><th>Source</th><th>Description</th></tr></thead>
+    <thead><tr><th>Time</th><th>Source</th><th>Description</th></tr></thead>
     <tbody>
       {#each data ?? Array(12) as event}
         <tr>
-          <td>{event?.time}</td>
+          <td>{event && new Date(event.time * 1000).toLocaleString()}</td>
           <td>{event?.source}</td>
-          <!-- Warnings and critical events stand out by colour. -->
+          <!-- Warnings and critical events stand out by color. -->
           <td
             class="data-[severity=Critical]:text-danger data-[severity=Warning]:text-asleep"
             data-severity={event?.severity}

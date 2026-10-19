@@ -2,7 +2,6 @@ use instant_xml::ToXml;
 use serde::Serialize;
 use ts_rs::TS;
 
-use crate::decode::yes;
 use crate::logs::REALMS;
 use crate::wsman::Method;
 use crate::{Client, Result};
@@ -13,22 +12,24 @@ use crate::{Client, Result};
 #[serde(rename_all = "camelCase")]
 pub struct Settings {
     pub power_policy: String,
-    pub respond_to_ping: String,
+    pub respond_to_ping: bool,
     pub host_name: String,
     pub domain_name: String,
     /// Whether the OS's name is AMT's too.
-    pub shared_with_os: String,
+    pub shared_with_os: bool,
     pub accounts: Vec<Account>,
 }
 
-/// The admin comes first and may do anything, the others what their realms allow, from where they may.
+/// The admin comes first and may do anything, the others what their realms allow, from where they may: "local only",
+/// "network only" or "local and network".
 #[derive(Debug, Clone, Serialize, TS)]
 #[ts(export, export_to = "core.ts")]
 #[serde(rename_all = "camelCase")]
 pub struct Account {
     pub name: String,
-    /// "Administrator", or "Redirection, Hardware Asset, … (network only)".
-    pub role: String,
+    pub admin: bool,
+    pub realms: Vec<String>,
+    pub access: String,
 }
 
 impl Client {
@@ -45,10 +46,10 @@ impl Client {
         let scheme = schemes.iter().find(|scheme| scheme.get("SchemeGUID") == active);
         Ok(Settings {
             power_policy: scheme.map(|scheme| scheme.text("Description")).unwrap_or_default(),
-            respond_to_ping: yes(general.get("PingResponseEnabled")),
+            respond_to_ping: general.parse("PingResponseEnabled").unwrap_or_default(),
             host_name: general.text("HostName"),
             domain_name: general.text("DomainName"),
-            shared_with_os: yes(general.get("SharedFQDN")),
+            shared_with_os: general.parse("SharedFQDN").unwrap_or_default(),
             accounts: self.accounts().await?,
         })
     }
@@ -56,7 +57,8 @@ impl Client {
     /// The admin and every other account, hidden ones (named `$$…`, AMT's own) left out.
     async fn accounts(&mut self) -> Result<Vec<Account>> {
         let admin = self.query(&GetAdminAclEntry).await?;
-        let mut accounts = vec![Account { name: admin.text("Username"), role: "Administrator".to_owned() }];
+        let mut accounts =
+            vec![Account { name: admin.text("Username"), admin: true, realms: Vec::new(), access: String::new() }];
         let handles = self.query(&EnumerateUserAclEntries { StartIndex: 1 }).await?;
         for handle in handles.all("Handles").map(str::to_owned).collect::<Vec<_>>() {
             let entry = self.query(&GetUserAclEntryEx { Handle: &handle }).await?;
@@ -65,13 +67,13 @@ impl Client {
                 continue;
             }
             let realms = entry.all("Realms").filter_map(|realm| REALMS.get(realm.parse::<usize>().ok()?));
-            let realms: Vec<_> = realms.filter(|name| !name.is_empty()).copied().collect();
+            let realms = realms.filter(|name| !name.is_empty()).map(|name| (*name).to_owned()).collect();
             let access = match entry.get("AccessPermission") {
                 Some("0") => "local only",
                 Some("1") => "network only",
                 _ => "local and network",
             };
-            accounts.push(Account { name, role: format!("{} ({access})", realms.join(", ")) });
+            accounts.push(Account { name, admin: false, realms, access: access.to_owned() });
         }
         Ok(accounts)
     }

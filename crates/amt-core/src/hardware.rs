@@ -1,7 +1,6 @@
 use serde::Serialize;
 use ts_rs::TS;
 
-use crate::decode::{guid, yes};
 use crate::{Client, Result};
 
 /// Everything the device knows about its hardware, gathered by the BIOS at boot. Only what's installed: empty memory
@@ -39,10 +38,10 @@ pub struct Motherboard {
     pub version: String,
     pub serial_number: String,
     pub asset_tag: String,
-    pub replaceable: String,
+    pub replaceable: bool,
 }
 
-/// `released` is a date, SMBIOS keeps no time. `features` are what the BIOS supports, comma separated.
+/// `released` is a date, SMBIOS keeps no time.
 #[derive(Debug, Clone, Serialize, TS)]
 #[ts(export, export_to = "core.ts")]
 #[serde(rename_all = "camelCase")]
@@ -50,21 +49,19 @@ pub struct Bios {
     pub vendor: String,
     pub version: String,
     pub released: String,
-    pub features: String,
+    pub features: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, TS)]
 #[ts(export, export_to = "core.ts")]
 #[serde(rename_all = "camelCase")]
 pub struct Processor {
-    /// "Intel(R) Core(TM) Ultra 9 285HX @ 4600 / 8500 MHz"
-    pub summary: String,
     pub model: String,
     pub manufacturer: String,
     pub family: String,
     pub socket: String,
-    pub speed: String,
-    pub max_speed: String,
+    pub mhz: Option<u32>,
+    pub max_mhz: Option<u32>,
     pub status: String,
     pub upgrade_method: String,
 }
@@ -74,8 +71,8 @@ pub struct Processor {
 #[serde(rename_all = "camelCase")]
 pub struct Module {
     pub slot: String,
-    pub size: String,
-    pub speed: String,
+    pub bytes: Option<u64>,
+    pub mhz: Option<u32>,
     pub kind: String,
     pub form_factor: String,
     pub manufacturer: String,
@@ -90,7 +87,7 @@ pub struct Module {
 pub struct Disk {
     pub model: String,
     pub serial_number: String,
-    pub size: String,
+    pub bytes: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize, TS)]
@@ -98,8 +95,8 @@ pub struct Disk {
 #[serde(rename_all = "camelCase")]
 pub struct Battery {
     pub name: String,
-    pub charge: String,
-    pub design_capacity: String,
+    pub charge_percent: Option<u8>,
+    pub design_capacity_mwh: Option<u32>,
 }
 
 impl Client {
@@ -130,32 +127,21 @@ impl Client {
                 let chip = location.get("Element")?.lines().last();
                 location.get("PhysicalLocation")?.lines().last().filter(|_| chip == tag)
             });
-            let (model, mhz, max_mhz) = (
-                chip("Version").unwrap_or_default(),
-                processor.get("CurrentClockSpeed"),
-                processor.get("MaxClockSpeed"),
-            );
-            let speeds: Vec<_> = mhz.into_iter().chain(max_mhz).collect();
             Processor {
-                summary: if speeds.is_empty() {
-                    model.clone()
-                } else {
-                    format!("{model} @ {} MHz", speeds.join(" / "))
-                },
-                model,
+                model: chip("Version").unwrap_or_default(),
                 manufacturer: chip("Manufacturer").unwrap_or_default(),
                 family: family(processor.get("Family")),
                 socket: socket.unwrap_or_default().to_owned(),
-                speed: unit(mhz, "MHz"),
-                max_speed: unit(max_mhz, "MHz"),
+                mhz: processor.parse("CurrentClockSpeed"),
+                max_mhz: processor.parse("MaxClockSpeed"),
                 status: named(CPU_STATUS, processor.get("CPUStatus")),
                 upgrade_method: named(UPGRADE_METHOD, processor.get("UpgradeMethod")),
             }
         });
         let memory = memory.iter().enumerate().map(|(i, module)| Module {
             slot: module.get("BankLabel").map_or(format!("Module {}", i + 1), str::to_owned),
-            size: module.parse("Capacity").map(|bytes| size(bytes, 1 << 30)).unwrap_or_default(),
-            speed: unit(module.get("ConfiguredMemoryClockSpeed"), "MHz"),
+            bytes: module.parse("Capacity"),
+            mhz: module.parse("ConfiguredMemoryClockSpeed"),
             kind: named(MEMORY_TYPE, module.get("MemoryType")),
             form_factor: named(FORM_FACTOR, module.get("FormFactor")),
             manufacturer: module.text("Manufacturer"),
@@ -168,18 +154,12 @@ impl Client {
             model: package.text("Model"),
             serial_number: package.text("SerialNumber"),
             // MaxMediaSize is in kilobytes.
-            size: disk
-                .parse::<u64>("MaxMediaSize")
-                .map(|kilobytes| size(kilobytes * 1000, 1_000_000_000))
-                .unwrap_or_default(),
+            bytes: disk.parse::<u64>("MaxMediaSize").map(|kilobytes| kilobytes * 1000),
         });
         let batteries = batteries.iter().map(|battery| Battery {
             name: battery.text("DeviceID"),
-            charge: unit(battery.get("EstimatedChargeRemaining"), "%"),
-            design_capacity: battery
-                .parse::<f64>("DesignCapacity")
-                .map(|mwh| format!("{} Wh", mwh / 1000.0))
-                .unwrap_or_default(),
+            charge_percent: battery.parse("EstimatedChargeRemaining"),
+            design_capacity_mwh: battery.parse("DesignCapacity"),
         });
 
         let features = features.iter().flat_map(|feature| feature.all("Characteristics"));
@@ -197,13 +177,13 @@ impl Client {
                 version: board.text("Version"),
                 serial_number: board.text("SerialNumber"),
                 asset_tag: board.text("Tag"),
-                replaceable: yes(board.get("CanBeFRUed")),
+                replaceable: board.parse("CanBeFRUed").unwrap_or_default(),
             },
             bios: Bios {
                 vendor: bios.text("Manufacturer"),
                 version: bios.text("Version"),
                 released: bios.text("ReleaseDate").split('T').next().unwrap_or_default().to_owned(),
-                features: features.map(|code| named(BIOS_FEATURES, Some(code))).collect::<Vec<_>>().join(", "),
+                features: features.map(|code| named(BIOS_FEATURES, Some(code))).collect(),
             },
             processors: processors.collect(),
             memory: memory.collect(),
@@ -427,18 +407,15 @@ fn family(code: Option<&str>) -> String {
     name.to_owned()
 }
 
-fn unit(value: Option<&str>, unit: &str) -> String {
-    value.map(|value| format!("{value} {unit}")).unwrap_or_default()
-}
-
-/// Memory counts in binary gigabytes, disks in decimal ones, both say GB.
-fn size(bytes: u64, gigabyte: u64) -> String {
-    let gigabytes = bytes as f64 / gigabyte as f64;
-    if gigabytes >= 1000.0 {
-        format!("{} TB", (gigabytes / 100.0).round() / 10.0)
-    } else {
-        format!("{} GB", gigabytes.round())
+/// SMBIOS keeps a GUID's first three fields little-endian, so the hex AMT gives us reads back to front there.
+pub(crate) fn guid(hex: &str) -> String {
+    if hex.len() != 32 {
+        return hex.to_owned();
     }
+    let swapped = |range: std::ops::Range<usize>| -> String {
+        hex[range].as_bytes().chunks(2).rev().flat_map(|pair| pair.iter().map(|&byte| byte as char)).collect()
+    };
+    format!("{}-{}-{}-{}-{}", swapped(0..8), swapped(8..12), swapped(12..16), &hex[16..20], &hex[20..]).to_lowercase()
 }
 
 fn named(table: &[&str], code: Option<&str>) -> String {

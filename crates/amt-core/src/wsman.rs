@@ -33,11 +33,6 @@ pub trait Method: ToXml {
     const NAME: &'static str;
 }
 
-/// An instance we write back whole: in its class's namespace, `URI`.
-pub trait Resource: ToXml {
-    const URI: &'static str;
-}
-
 pub fn get(class: &str, message_id: u32) -> String {
     envelope(&format!("{TRANSFER}/Get"), &resource_uri(class), message_id, None::<Enumerate>)
 }
@@ -51,8 +46,9 @@ pub fn pull(class: &str, context: &str, message_id: u32) -> String {
     envelope(&format!("{ENUMERATION}/Pull"), &resource_uri(class), message_id, Some(pull))
 }
 
-pub fn put<T: Resource>(instance: &T, message_id: u32) -> String {
-    envelope(&format!("{TRANSFER}/Put"), T::URI, message_id, Some(instance))
+/// Writes back an instance of the class at `uri`, whole.
+pub fn put(uri: &str, instance: &impl ToXml, message_id: u32) -> String {
+    envelope(&format!("{TRANSFER}/Put"), uri, message_id, Some(instance))
 }
 
 pub fn invoke<T: Method>(input: &T, message_id: u32) -> String {

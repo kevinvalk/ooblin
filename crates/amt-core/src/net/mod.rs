@@ -6,8 +6,6 @@ mod redirection;
 
 pub use redirection::{REDIRECTION_PORT, Redirection, Session};
 
-use std::fmt;
-use std::str::FromStr;
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
@@ -36,7 +34,7 @@ pub struct Connection {
 
 impl Connection {
     /// Without a `pin` we pin whatever certificate we see first, so it can't change under us mid-session.
-    pub fn new(target: &Target, pin: Option<Fingerprint>) -> Result<Self> {
+    pub fn new(target: &Target, pin: Option<String>) -> Result<Self> {
         let pin = Pin::new(pin);
         let http = reqwest::Client::builder()
             .use_preconfigured_tls(pin.tls())
@@ -60,8 +58,8 @@ impl Connection {
     }
 
     /// The pinned certificate, known once the first connection was made.
-    pub fn fingerprint(&self) -> Option<Fingerprint> {
-        self.pin.pinned.get().copied()
+    pub fn fingerprint(&self) -> Option<String> {
+        self.pin.pinned.get().cloned()
     }
 
     /// We keep answering the last Digest challenge, so only a fresh (or stale) nonce costs an extra round trip.
@@ -113,62 +111,21 @@ fn protocol(error: digest_auth::Error) -> Error {
     Error::Protocol(error.to_string())
 }
 
-/// AMT certificates are self-signed, so instead of a CA we trust the SHA-256 of the leaf certificate. It travels as
-/// `AB:CD:…`, see its `Display`.
-#[derive(Clone, Copy, PartialEq, Eq, ts_rs::TS)]
-#[ts(export, export_to = "core.ts", type = "string")]
-pub struct Fingerprint([u8; 32]);
-
-impl Fingerprint {
-    pub fn of(der: &[u8]) -> Self {
-        Self(Sha256::digest(der).into())
-    }
-}
-
-impl fmt::Display for Fingerprint {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let hex: Vec<String> = self.0.iter().map(|byte| format!("{byte:02X}")).collect();
-        f.write_str(&hex.join(":"))
-    }
-}
-
-impl fmt::Debug for Fingerprint {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        fmt::Display::fmt(self, f)
-    }
-}
-
-impl FromStr for Fingerprint {
-    type Err = String;
-
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        let bytes: Option<Vec<u8>> = s.split(':').map(|byte| u8::from_str_radix(byte, 16).ok()).collect();
-        bytes.and_then(|bytes| bytes.try_into().ok()).map(Self).ok_or_else(|| format!("not a SHA-256 fingerprint: {s}"))
-    }
-}
-
-impl serde::Serialize for Fingerprint {
-    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        serializer.collect_str(self)
-    }
-}
-
-impl<'de> serde::Deserialize<'de> for Fingerprint {
-    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        String::deserialize(deserializer)?.parse().map_err(serde::de::Error::custom)
-    }
+/// AMT certificates are self-signed, so instead of a CA we trust the SHA-256 of the leaf certificate, as `AB:CD:…`.
+pub fn fingerprint(der: &[u8]) -> String {
+    Sha256::digest(der).iter().map(|byte| format!("{byte:02X}")).collect::<Vec<_>>().join(":")
 }
 
 /// Handshake signatures are still verified, so the peer must actually hold the pinned certificate's key.
 #[derive(Debug)]
 struct Pin {
-    pinned: OnceLock<Fingerprint>,
-    rejected: OnceLock<Fingerprint>,
+    pinned: OnceLock<String>,
+    rejected: OnceLock<String>,
     algorithms: WebPkiSupportedAlgorithms,
 }
 
 impl Pin {
-    fn new(pin: Option<Fingerprint>) -> Arc<Self> {
+    fn new(pin: Option<String>) -> Arc<Self> {
         Arc::new(Self {
             pinned: pin.map(OnceLock::from).unwrap_or_default(),
             rejected: OnceLock::new(),
@@ -182,7 +139,7 @@ impl Pin {
 
     /// Why a connection failed, if it was because the device presented another certificate.
     fn mismatch(&self) -> Option<Error> {
-        let (&expected, &actual) = (self.pinned.get()?, self.rejected.get()?);
+        let (expected, actual) = (self.pinned.get()?.clone(), self.rejected.get()?.clone());
         Some(Error::PinMismatch { expected, actual })
     }
 }
@@ -196,8 +153,8 @@ impl ServerCertVerifier for Pin {
         _ocsp_response: &[u8],
         _now: UnixTime,
     ) -> Result<ServerCertVerified, rustls::Error> {
-        let presented = Fingerprint::of(end_entity);
-        if *self.pinned.get_or_init(|| presented) == presented {
+        let presented = fingerprint(end_entity);
+        if *self.pinned.get_or_init(|| presented.clone()) == presented {
             return Ok(ServerCertVerified::assertion());
         }
         let _ = self.rejected.set(presented);

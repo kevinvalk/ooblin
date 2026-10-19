@@ -6,7 +6,7 @@ use std::collections::BTreeMap;
 use std::io;
 use std::path::PathBuf;
 
-use amt_core::{Fingerprint, Target};
+use amt_core::Target;
 use keyring::Entry;
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Manager};
@@ -22,7 +22,7 @@ pub struct Hosts {
 
 #[derive(Serialize, Deserialize)]
 struct Saved {
-    pin: Fingerprint,
+    pin: String,
     user: String,
     remembered: bool,
 }
@@ -47,8 +47,8 @@ impl Hosts {
         Ok(Self { path, service: app.config().identifier.clone(), hosts })
     }
 
-    pub fn pin(&self, host: &str) -> Option<Fingerprint> {
-        Some(self.hosts.get(host)?.pin)
+    pub fn pin(&self, host: &str) -> Option<String> {
+        Some(self.hosts.get(host)?.pin.clone())
     }
 
     pub fn devices(&self) -> Vec<Device> {
@@ -61,14 +61,14 @@ impl Hosts {
     }
 
     /// After a successful login: we trust the certificate it used and remember the user that worked.
-    pub fn connected(&mut self, target: &Target, pin: Fingerprint) -> io::Result<()> {
+    pub fn connected(&mut self, target: &Target, pin: String) -> io::Result<()> {
         let remembered = self.hosts.get(&target.host).is_some_and(|saved| saved.remembered);
         self.hosts.insert(target.host.clone(), Saved { pin, user: target.user.clone(), remembered });
         self.save()
     }
 
     /// Only called after the user compared fingerprints and chose to trust the new one.
-    pub fn trust(&mut self, host: &str, pin: Fingerprint) -> io::Result<()> {
+    pub fn trust(&mut self, host: &str, pin: String) -> io::Result<()> {
         if let Some(saved) = self.hosts.get_mut(host) {
             saved.pin = pin;
         }

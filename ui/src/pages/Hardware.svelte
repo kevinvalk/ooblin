@@ -14,7 +14,10 @@
     <div><dt>Serial number</dt><dd>{data?.system.serialNumber}</dd></div>
     <div><dt>System ID</dt><dd>{data?.system.id}</dd></div>
     {#each data?.processors ?? [undefined] as processor, i}
-      <div><dt>CPU {i + 1}</dt><dd>{processor?.summary}</dd></div>
+      <div>
+        <dt>CPU {i + 1}</dt>
+        <dd>{processor && `${processor.model} @ ${[processor.mhz, processor.maxMhz].filter(Boolean).join(" / ")} MHz`}</dd>
+      </div>
     {/each}
   </dl>
 </section>
@@ -27,7 +30,7 @@
     <div><dt>Version</dt><dd>{data?.motherboard.version}</dd></div>
     <div><dt>Serial number</dt><dd>{data?.motherboard.serialNumber}</dd></div>
     <div><dt>Asset tag</dt><dd>{data?.motherboard.assetTag}</dd></div>
-    <div><dt>Replaceable</dt><dd>{data?.motherboard.replaceable}</dd></div>
+    <div><dt>Replaceable</dt><dd>{data && (data.motherboard.replaceable ? "Yes" : "No")}</dd></div>
   </dl>
 </section>
 
@@ -37,7 +40,7 @@
     <div><dt>Vendor</dt><dd>{data?.bios.vendor}</dd></div>
     <div><dt>Version</dt><dd>{data?.bios.version}</dd></div>
     <div><dt>Release date</dt><dd>{data?.bios.released}</dd></div>
-    <div><dt>Supports</dt><dd>{data?.bios.features}</dd></div>
+    <div><dt>Supports</dt><dd>{data?.bios.features.join(", ")}</dd></div>
   </dl>
 </section>
 
@@ -52,8 +55,8 @@
           <div><dt>Manufacturer</dt><dd>{processor?.manufacturer}</dd></div>
           <div><dt>Family</dt><dd>{processor?.family}</dd></div>
           <div><dt>Socket</dt><dd>{processor?.socket}</dd></div>
-          <div><dt>Speed</dt><dd>{processor?.speed}</dd></div>
-          <div><dt>Maximum speed</dt><dd>{processor?.maxSpeed}</dd></div>
+          <div><dt>Speed</dt><dd>{processor?.mhz && `${processor.mhz} MHz`}</dd></div>
+          <div><dt>Maximum speed</dt><dd>{processor?.maxMhz && `${processor.maxMhz} MHz`}</dd></div>
           <div><dt>Status</dt><dd>{processor?.status}</dd></div>
           <div><dt>Upgrade method</dt><dd>{processor?.upgradeMethod}</dd></div>
         </dl>
@@ -69,8 +72,8 @@
       <div>
         <h3>{module?.slot}</h3>
         <dl class="card">
-          <div><dt>Size</dt><dd>{module?.size}</dd></div>
-          <div><dt>Speed</dt><dd>{module?.speed}</dd></div>
+          <div><dt>Size</dt><dd>{module?.bytes && `${module.bytes / 2 ** 30} GB`}</dd></div>
+          <div><dt>Speed</dt><dd>{module?.mhz && `${module.mhz} MHz`}</dd></div>
           <div><dt>Type</dt><dd>{module?.kind}</dd></div>
           <div><dt>Form factor</dt><dd>{module?.formFactor}</dd></div>
           <div><dt>Manufacturer</dt><dd>{module?.manufacturer}</dd></div>
@@ -92,7 +95,7 @@
         <dl class="card">
           <div><dt>Model</dt><dd>{disk?.model}</dd></div>
           <div><dt>Serial number</dt><dd>{disk?.serialNumber}</dd></div>
-          <div><dt>Size</dt><dd>{disk?.size}</dd></div>
+          <div><dt>Size</dt><dd>{disk?.bytes && `${Math.round(disk.bytes / 1e9)} GB`}</dd></div>
         </dl>
       </div>
     {/each}
@@ -108,8 +111,8 @@
         <h3>Battery {i + 1}</h3>
         <dl class="card">
           <div><dt>Name</dt><dd>{battery.name}</dd></div>
-          <div><dt>Charge</dt><dd>{battery.charge}</dd></div>
-          <div><dt>Design capacity</dt><dd>{battery.designCapacity}</dd></div>
+          <div><dt>Charge</dt><dd>{battery.chargePercent && `${battery.chargePercent} %`}</dd></div>
+          <div><dt>Design capacity</dt><dd>{battery.designCapacityMwh && `${battery.designCapacityMwh / 1000} Wh`}</dd></div>
         </dl>
       </div>
     {:else}

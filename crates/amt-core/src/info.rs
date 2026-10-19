@@ -1,7 +1,7 @@
 use serde::Serialize;
 use ts_rs::TS;
 
-use crate::{Client, Fingerprint, Result, Trust};
+use crate::{Client, Result};
 
 #[derive(Debug, Clone, Serialize, TS)]
 #[ts(export, export_to = "core.ts")]
@@ -9,20 +9,12 @@ use crate::{Client, Fingerprint, Result, Trust};
 pub struct Info {
     /// The host name, with its domain if it has one.
     pub name: String,
-    /// "19.0.5 (build 1992)"
     pub version: String,
-    pub control_mode: ControlMode,
-    pub fingerprint: Fingerprint,
-    pub trust: Trust,
-}
-
-/// Only admin control mode lets us redirect without asking the user at the device for consent.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, TS)]
-#[ts(export, export_to = "core.ts")]
-pub enum ControlMode {
-    Admin,
-    Client,
-    Unknown,
+    pub build: Option<String>,
+    /// "Admin" or "Client", only admin control mode redirects without asking someone at the device for consent.
+    pub control_mode: String,
+    /// The pinned certificate's, see `fingerprint`.
+    pub fingerprint: String,
 }
 
 impl Client {
@@ -35,21 +27,18 @@ impl Client {
             let component = software.iter().find(|component| component.get("InstanceID") == Some(id))?;
             component.get("VersionString").map(str::to_owned)
         };
-
-        let (host, domain, version) = (settings.text("HostName"), settings.text("DomainName"), firmware("AMT"));
+        let (host, domain) = (settings.text("HostName"), settings.text("DomainName"));
         Ok(Info {
             name: if domain.is_empty() { host } else { format!("{host}.{domain}") },
-            version: match firmware("Build Number") {
-                Some(build) => format!("{} (build {build})", version.unwrap_or_default()),
-                None => version.unwrap_or_default(),
-            },
+            version: firmware("AMT").unwrap_or_default(),
+            build: firmware("Build Number"),
             control_mode: match setup.get("ProvisioningMode") {
-                Some("1") => ControlMode::Admin,
-                Some("4") => ControlMode::Client,
-                _ => ControlMode::Unknown,
-            },
+                Some("1") => "Admin",
+                Some("4") => "Client",
+                _ => "",
+            }
+            .to_owned(),
             fingerprint: self.fingerprint().expect("a successful call has pinned a certificate"),
-            trust: self.trust(),
         })
     }
 }

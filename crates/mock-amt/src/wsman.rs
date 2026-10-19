@@ -115,9 +115,7 @@ async fn forward(amt: &Amt, device: &Mutex<Connection>, class: &str, action: &st
             }
             (StatusCode::OK, xml)
         }
-        Err(error) => {
-            (StatusCode::BAD_REQUEST, envelope(Fault::new("Receiver", "ActionNotSupported", &error.to_string())))
-        }
+        Err(error) => (StatusCode::BAD_REQUEST, envelope(Fault::new(&error.to_string()))),
     }
 }
 
@@ -135,7 +133,6 @@ fn authorized(amt: &Amt, header: &str) -> bool {
 }
 
 const SOAP: &str = "http://www.w3.org/2003/05/soap-envelope";
-const ADDRESSING: &str = "http://schemas.xmlsoap.org/ws/2004/08/addressing";
 const ENUMERATION: &str = "http://schemas.xmlsoap.org/ws/2004/09/enumeration";
 
 /// Our answers always serialize: their every part is a type of ours.
@@ -144,10 +141,9 @@ fn envelope(body: impl ToXml) -> String {
     String::from(r#"<?xml version="1.0" encoding="UTF-8"?>"#) + &xml.expect("our answers serialize")
 }
 
-/// `s` and `w` are for the fault codes, which name SOAP's and WS-Addressing's.
 #[allow(non_snake_case)]
 #[derive(ToXml)]
-#[xml(ns(SOAP, s = SOAP, w = ADDRESSING))]
+#[xml(ns(SOAP))]
 struct Envelope<T> {
     Header: Header,
     Body: Body<T>,
@@ -202,65 +198,30 @@ impl ToXml for Output<'_> {
     }
 }
 
-/// A SOAP fault, `code` and `subcode` naming SOAP's and WS-Addressing's.
+/// A SOAP fault, of which our client reads the reason.
 #[allow(non_snake_case)]
 #[derive(ToXml)]
 #[xml(ns(SOAP))]
 struct Fault<'a> {
-    Code: Code,
     Reason: Reason<'a>,
 }
 
 impl<'a> Fault<'a> {
-    fn new(code: &str, subcode: &str, reason: &'a str) -> Self {
-        let (code, subcode) = (Value { value: format!("s:{code}") }, Value { value: format!("w:{subcode}") });
-        let code = Code { Value: code, Subcode: Subcode { Value: subcode } };
-        Self { Code: code, Reason: Reason { Text: Text { lang: "en-US", value: reason } } }
+    fn new(reason: &'a str) -> Self {
+        Self { Reason: Reason { Text: reason } }
     }
 
-    /// What AMT answers for a class it doesn't have.
+    /// What AMT says for a class it doesn't have.
     fn unreachable() -> Self {
-        let reason = "No route can be determined to reach the destination role defined by the WSAddressing To.";
-        Self::new("Sender", "DestinationUnreachable", reason)
+        Self::new("No route can be determined to reach the destination role defined by the WSAddressing To.")
     }
-}
-
-#[allow(non_snake_case)]
-#[derive(ToXml)]
-#[xml(ns(SOAP))]
-struct Code {
-    Value: Value,
-    Subcode: Subcode,
-}
-
-#[allow(non_snake_case)]
-#[derive(ToXml)]
-#[xml(ns(SOAP))]
-struct Subcode {
-    Value: Value,
-}
-
-#[derive(ToXml)]
-#[xml(ns(SOAP))]
-struct Value {
-    #[xml(direct)]
-    value: String,
 }
 
 #[allow(non_snake_case)]
 #[derive(ToXml)]
 #[xml(ns(SOAP))]
 struct Reason<'a> {
-    Text: Text<'a>,
-}
-
-#[derive(ToXml)]
-#[xml(ns(SOAP))]
-struct Text<'a> {
-    #[xml(attribute, rename = "xml:lang")]
-    lang: &'a str,
-    #[xml(direct)]
-    value: &'a str,
+    Text: &'a str,
 }
 
 /// Where a request's reply lives in a fixture: `<Class>.<Action>.xml`, plus the input for methods that take one, like

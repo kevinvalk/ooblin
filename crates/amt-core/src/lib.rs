@@ -1,7 +1,6 @@
 //! Intel AMT over TLS, without a webview. Every socket lives in `net`.
 
 mod client;
-mod decode;
 mod hardware;
 mod info;
 mod logs;
@@ -11,14 +10,14 @@ mod settings;
 mod status;
 pub mod wsman;
 
-pub use client::{Client, Trust};
+pub use client::Client;
 pub use hardware::{Battery, Bios, Disk, Hardware, Module, Motherboard, Processor, System};
-pub use info::{ControlMode, Info};
+pub use info::Info;
 pub use logs::{AuditRecord, Event, Severity};
-pub use net::{Connection, Fingerprint, Redirection, Session};
+pub use net::{Connection, Redirection, Session, fingerprint};
 pub use power::{Power, PowerAction, PowerState};
 pub use settings::{Account, Settings};
-pub use status::{Ipv4, Ipv6, Port, RemoteAccess, Status};
+pub use status::{Ipv4, Ipv6, Port, Status};
 
 /// A device and how to log in to it. The ports only change for tests and tunnels.
 #[derive(Clone)]
@@ -47,7 +46,7 @@ pub type Result<T, E = Error> = std::result::Result<T, E>;
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
     #[error("the device presented certificate {actual}, but {expected} is pinned")]
-    PinMismatch { expected: Fingerprint, actual: Fingerprint },
+    PinMismatch { expected: String, actual: String },
     #[error("authentication failed, check the user name and password")]
     Unauthorized,
     #[error("{0}")]

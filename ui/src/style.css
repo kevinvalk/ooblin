@@ -1,6 +1,6 @@
 @import "tailwindcss";
 
-/* macOS-like colours, the dark ones follow the system. */
+/* macOS-like colors, the dark ones follow the system. */
 @theme {
   --font-sans: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
   --font-mono: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
@@ -76,7 +76,7 @@
     }
   }
 
-  /* What the device left out reads as a dash, what's still loading (in an `aria-busy` page) as a grey bar. */
+  /* What the device left out reads as a dash, what's still loading (in an `aria-busy` page) as a gray bar. */
   :is(dt, dd, td, h3):empty::after {
     @apply text-muted content-['—'];
   }
