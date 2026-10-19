@@ -15,6 +15,9 @@ enum Command {
         host: String,
         #[arg(long, default_value = "admin")]
         user: String,
+        /// Only record the serial console, until you press Enter: make the device write to it meanwhile.
+        #[arg(long)]
+        sol: bool,
     },
 }
 
@@ -27,11 +30,14 @@ async fn main() -> anyhow::Result<()> {
             println!("Serving {} on 127.0.0.1 as {USER} with password {PASSWORD}", dir.display());
             std::future::pending().await
         }
-        Command::Record { fixture, host, user } => {
+        Command::Record { fixture, host, user, sol } => {
             let password = rpassword::prompt_password(format!("Password for {user}@{host}: "))?;
-            let dir = mock_amt::fixture(&fixture);
+            let (dir, target) = (mock_amt::fixture(&fixture), Target::new(&host, user, password));
             eprintln!("Recording {host} into {}", dir.display());
-            mock_amt::record(&Target::new(&host, user, password), &dir).await
+            match sol {
+                true => mock_amt::record_sol(&target, &dir).await,
+                false => mock_amt::record(&target, &dir).await,
+            }
         }
     }
 }

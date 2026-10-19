@@ -16,8 +16,9 @@
     /** The disk image in its drive: its name, how much of it the device read and how fast (bytes a second), and
      * whether it did in the last minute. */
     image?: { name: string; read: number; rate: number; recent: boolean };
-    /** Whether its screen was opened: it stays open across tabs. */
+    /** Whether its screen and serial console were opened: they stay open across tabs. */
     kvm?: boolean;
+    sol?: boolean;
   }
 </script>
 
@@ -30,6 +31,7 @@
   import Hardware from "./pages/Hardware.svelte";
   import Kvm from "./pages/Kvm.svelte";
   import Settings from "./pages/Settings.svelte";
+  import Sol from "./pages/Sol.svelte";
   import Status from "./pages/Status.svelte";
 
   let { session, say }: { session: Session; say: (text: string) => void } = $props();
@@ -43,13 +45,13 @@
     audit_log: { label: "Audit log", page: AuditLog, live: true },
     settings: { label: "Settings", page: Settings, live: false },
   };
-  let tab = $state<keyof typeof TABS | "kvm">("status");
-  let page = $derived(tab === "kvm" ? undefined : session.pages[tab]);
-  let live = $derived(tab !== "kvm" && TABS[tab].live);
+  let tab = $state<keyof typeof TABS | "kvm" | "sol">("status");
+  let page = $derived(tab === "kvm" || tab === "sol" ? undefined : session.pages[tab]);
+  let live = $derived(tab !== "kvm" && tab !== "sol" && TABS[tab].live);
 
-  // Whatever is on screen gets read, unless we have it. A screen, once opened, stays open.
+  // Whatever is on screen gets read, unless we have it. A screen or serial console, once opened, stays open.
   $effect(() => {
-    if (tab === "kvm") session.kvm = true;
+    if (tab === "kvm" || tab === "sol") session[tab] = true;
     else if (!session.pages[tab]) read();
   });
 
@@ -223,6 +225,7 @@
       {@render tabButton(name as keyof typeof TABS, label)}
     {/each}
     {@render tabButton("kvm", "KVM", !session.info.has_kvm)}
+    {@render tabButton("sol", "Serial")}
     {#if live}
       <span class="ml-auto text-muted">{page?.read ? `Read at ${page.read.toLocaleTimeString()}` : ""}</span>
       <button
@@ -240,7 +243,10 @@
   {#if session.kvm}
     <Kvm host={session.host} hidden={tab !== "kvm"} />
   {/if}
-  {#if tab !== "kvm"}
+  {#if session.sol}
+    <Sol host={session.host} hidden={tab !== "sol"} />
+  {/if}
+  {#if tab !== "kvm" && tab !== "sol"}
     {@const Page = TABS[tab].page}
     <main class="overflow-y-auto px-8 pb-8 @container [scrollbar-gutter:stable]">
       <div class="mx-auto grid max-w-5xl gap-12 pt-6" aria-busy={!page?.data && !page?.error}>

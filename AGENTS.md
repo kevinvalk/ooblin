@@ -33,8 +33,8 @@ We check our own work in the running app against the mock AMT, every command wit
 3. `npx -y -p @hypothesi/tauri-mcp-cli@0.13 tauri-mcp driver-session start --port 9223`, at most 20 tries a second
    apart, then read the tasks' output instead.
 4. Drive it (`webview-execute-js`, `-interact`, `-screenshot`, `-wait-for`, `read-logs --source console`, or the `tauri`
-   MCP server): wait for selectors, never sleep or wait for text (the hidden window never paints). Look at every screen
-   you touched and check the console.
+   MCP server): wait for selectors, never sleep or wait for text (the hidden window never paints, nor runs
+   `requestAnimationFrame`, so a terminal's text stays unseen). Look at every screen you touched and check the console.
 5. Clean up: stop both tasks, `tauri-mcp daemon stop`, and nothing may listen on 9223, 16993 or 16995.
 
 The verify build runs without CSP, so CSP mistakes only show up in `cargo tauri dev`.

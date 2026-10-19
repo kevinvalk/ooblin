@@ -1,7 +1,8 @@
 //! The SOL, KVM and IDER sessions on 16995. The session start and Digest over the socket we do by the spec, from
 //! MeshCommander's `amt-redir-ws-0.1.0.js` (Apache-2.0). After that we replay the fixture's transcript for the session in
 //! step with the client, hanging up on one that says something else than was recorded, then idle until it hangs up. A
-//! KVM client asks for updates when it likes and sends its input in between, so there we step by RFB message.
+//! KVM client asks for updates when it likes and sends its input in between, so there we step by RFB message, and an
+//! SOL client types when it likes and keeps the session alive in between, so there we step by what it types.
 
 use std::path::{Path, PathBuf};
 
@@ -66,6 +67,8 @@ async fn session<S: AsyncRead + AsyncWrite + Unpin>(mut stream: S, fixture: &Pat
             Direction::Sent if name == "kvm" && matches!(data[0], 2 | 3) => {
                 while rfb_message(&mut stream).await? != data[0] {}
             }
+            // What was typed waits for the client to type something, its keep-alives go nowhere.
+            Direction::Sent if name == "sol" && data[0] == 0x28 => while sol_message(&mut stream).await? != 0x28 {},
             Direction::Sent => {
                 let mut sent = vec![0; data.len()];
                 stream.read_exact(&mut sent).await?;
@@ -82,6 +85,21 @@ async fn session<S: AsyncRead + AsyncWrite + Unpin>(mut stream: S, fixture: &Pat
 async fn reply<S: AsyncWrite + Unpin>(stream: &mut S, status: u8, data: &[u8]) -> std::io::Result<()> {
     let header = [&[0x14, status, 0, 0, 4][..], &u32::try_from(data.len()).unwrap().to_le_bytes()].concat();
     send(stream, &[header.as_slice(), data].concat()).await
+}
+
+/// Reads an SOL message from the client and says which it was: typing (0x28) or a keep-alive (0x2B).
+async fn sol_message<S: AsyncRead + Unpin>(stream: &mut S) -> std::io::Result<u8> {
+    let mut header = [0; 8]; // its kind, padding and its sequence
+    stream.read_exact(&mut header).await?;
+    match header[0] {
+        0x28 => {
+            let len = stream.read_u16_le().await?;
+            stream.read_exact(&mut vec![0; len.into()]).await?;
+        }
+        0x2B => {}
+        kind => return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, format!("SOL message {kind}"))),
+    }
+    Ok(header[0])
 }
 
 /// TLS may hold on to what we write until we flush.

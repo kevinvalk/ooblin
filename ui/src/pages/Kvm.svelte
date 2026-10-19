@@ -5,8 +5,8 @@
 <script lang="ts">
   import { ChevronDown, LoaderCircle, Maximize, Minimize } from "@lucide/svelte";
   import { invoke } from "@tauri-apps/api/core";
-  import type { CommandError } from "../bindings/console";
   import type { Input } from "../bindings/core";
+  import { stayOpen } from "../redirection";
 
   let { host, hidden }: { host: string; hidden: boolean } = $props();
 
@@ -14,46 +14,29 @@
   let painted = $state(false);
   /** Why the screen went away, until it's back. */
   let error = $state("");
-  let attempt = $state(0);
-  /** Failures in a row: we wait longer after each, up to half a minute, so a device that's busy isn't kept busier. */
-  let failures = 0;
-  /** The last session closing: the next opens once it's gone, AMT takes one at a time. */
-  let closing: Promise<unknown> = Promise.resolve();
   let fullscreen = $state(false);
 
-  // The screen is painted until we leave, each change asked for once the one before is painted. When it fails we try
-  // again a little later.
+  // The screen is painted until we leave, each change asked for once the one before is painted.
   $effect(() => {
-    attempt;
     const target = host;
     const context = canvas.getContext("2d")!;
-    let open = true;
-    let retry = 0;
     painted = false;
-    (async () => {
-      try {
-        await closing;
-        if (!open) return;
-        await invoke("kvm_open", { host: target });
+    return stayOpen(
+      "kvm",
+      target,
+      async (open) => {
         canvas.focus();
-        while (open) {
+        while (open()) {
           paint(context, await invoke<ArrayBuffer>("kvm_frame", { host: target }));
           painted = true;
           error = "";
-          failures = 0;
         }
-      } catch (failure) {
-        if (!open) return;
+      },
+      (reason) => {
         painted = false;
-        error = (failure as CommandError).message ?? String(failure);
-        retry = setTimeout(() => attempt++, Math.min(3000 * 2 ** failures++, 30_000));
-      }
-    })();
-    return () => {
-      open = false;
-      clearTimeout(retry);
-      closing = invoke("kvm_close", { host: target });
-    };
+        error = reason;
+      },
+    );
   });
 
   /** A frame is the screen's width and height, then per change its x, y, width, height and RGBA pixels. */

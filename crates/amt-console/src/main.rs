@@ -10,7 +10,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use amt_core::{
-    AuditRecord, Client, Error, Event, Hardware, Info, Input, Kvm, Power, PowerAction, Settings, Status, Target,
+    AuditRecord, Client, Error, Event, Hardware, Info, Input, Kvm, Power, PowerAction, Settings, Sol, Status, Target,
 };
 use clap::Parser;
 use hosts::{Device, Hosts};
@@ -21,7 +21,7 @@ use tauri::{AppHandle, State, WebviewWindow};
 use ts_rs::TS;
 
 /// One session per connected device: its client, on its own lock as AMT wants its calls one at a time (other devices
-/// don't care), its screen while one is open and the disk image in its drive.
+/// don't care), its screen and serial console while they're open and the disk image in its drive.
 #[derive(Default)]
 struct Sessions(std::sync::Mutex<HashMap<String, Session>>);
 
@@ -29,6 +29,7 @@ struct Sessions(std::sync::Mutex<HashMap<String, Session>>);
 struct Session {
     client: Arc<Mutex<Client>>,
     kvm: Option<Arc<Kvm>>,
+    sol: Option<Arc<Sol>>,
     image: Option<Arc<Image>>,
 }
 
@@ -51,6 +52,10 @@ impl Sessions {
         self.get(host)?.kvm.ok_or_else(|| CommandError::failed("The screen isn't open."))
     }
 
+    fn sol(&self, host: &str) -> Result<Arc<Sol>, CommandError> {
+        self.get(host)?.sol.ok_or_else(|| CommandError::failed("The serial console isn't open."))
+    }
+
     fn update<T>(&self, host: &str, change: impl FnOnce(&mut Session) -> T) -> Option<T> {
         self.0.lock().unwrap().get_mut(host).map(change)
     }
@@ -58,6 +63,12 @@ impl Sessions {
     async fn close_kvm(&self, host: &str) {
         if let Some(kvm) = self.update(host, |session| session.kvm.take()).flatten() {
             kvm.close().await;
+        }
+    }
+
+    async fn close_sol(&self, host: &str) {
+        if let Some(sol) = self.update(host, |session| session.sol.take()).flatten() {
+            sol.close().await;
         }
     }
 }
@@ -116,7 +127,7 @@ async fn connect(
         .0
         .lock()
         .unwrap()
-        .insert(target.host, Session { client: Arc::new(Mutex::new(client)), kvm: None, image: None });
+        .insert(target.host, Session { client: Arc::new(Mutex::new(client)), kvm: None, sol: None, image: None });
     Ok(info)
 }
 
@@ -181,6 +192,32 @@ async fn kvm_input(sessions: State<'_, Sessions>, host: &str, inputs: Vec<Input>
 #[tauri::command]
 async fn kvm_close(sessions: State<'_, Sessions>, host: &str) -> Result<(), CommandError> {
     sessions.close_kvm(host).await;
+    Ok(())
+}
+
+/// Opens the device's serial console, see `Client::sol`, closing the one that may be open.
+#[tauri::command]
+async fn sol_open(sessions: State<'_, Sessions>, host: &str) -> Result<(), CommandError> {
+    sessions.close_sol(host).await;
+    let sol = Arc::new(sessions.get(host)?.client.lock().await.sol().await?);
+    sessions.update(host, |session| session.sol = Some(sol));
+    Ok(())
+}
+
+/// What the device wrote to its serial port since, see `Sol::read`, as bytes rather than JSON.
+#[tauri::command]
+async fn sol_read(sessions: State<'_, Sessions>, host: &str) -> Result<Response, CommandError> {
+    Ok(Response::new(sessions.sol(host)?.read().await?))
+}
+
+#[tauri::command]
+async fn sol_write(sessions: State<'_, Sessions>, host: &str, data: String) -> Result<(), CommandError> {
+    Ok(sessions.sol(host)?.write(data.as_bytes()).await?)
+}
+
+#[tauri::command]
+async fn sol_close(sessions: State<'_, Sessions>, host: &str) -> Result<(), CommandError> {
+    sessions.close_sol(host).await;
     Ok(())
 }
 
@@ -282,8 +319,8 @@ fn main() {
         .manage(Sessions::default())
         .invoke_handler(tauri::generate_handler![
             launch, devices, connect, disconnect, forget, trust, power, set_power, status, hardware, settings,
-            event_log, audit_log, kvm_open, kvm_frame, kvm_input, kvm_close, ider_pick, ider_mount, ider_eject, title,
-            fullscreen
+            event_log, audit_log, kvm_open, kvm_frame, kvm_input, kvm_close, sol_open, sol_read, sol_write, sol_close,
+            ider_pick, ider_mount, ider_eject, title, fullscreen
         ])
         .run(tauri::generate_context!())
         .expect("the Tauri runtime starts");

@@ -17,7 +17,7 @@ md-5 = "0.10"
 rcgen = "0.14"
 roxmltree = "0.21"
 rpassword = "7"
-tokio = { version = "1", features = ["macros", "rt-multi-thread", "net", "sync"] }
+tokio = { version = "1", features = ["io-std", "macros", "rt-multi-thread", "net", "sync"] }
 tokio-rustls = "0.26"
 
 [dev-dependencies]

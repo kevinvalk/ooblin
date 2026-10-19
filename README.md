@@ -33,10 +33,12 @@ devices once and replay them from then on: `mock-amt record <fixture> <host>` as
 the device offers, without changing anything: every WS-Man class it knows, the read-only methods the app uses (clock,
 accounts, event and audit log) and a short serial console, KVM and IDER session, all into `fixtures/<fixture>`.
 `mock-amt run <fixture>` then serves it on 127.0.0.1 as `admin` / `P@ssw0rd`, filling in by the spec what a recording
-can't hold: handshakes, authentication, method results, enumeration pages (AMT keeps one context for all of them), and
-a KVM screen that waits for the viewer to ask for each update. It hangs up on a client that says anything else than was
-recorded, so every transcript checks our bytes. `cargo test` replays every fixture, so whatever a device once
-told us keeps parsing.
+can't hold: handshakes, authentication, method results, enumeration pages (AMT keeps one context for all of them), a
+KVM screen that waits for the viewer to ask for each update and a serial console that waits for you to type. It hangs
+up on a client that says anything else than was recorded, so every transcript checks our bytes. `cargo test` replays
+every fixture, so whatever a device once told us keeps parsing. `mock-amt run` also takes a path, for a fixture of
+your own, and `mock-amt record <fixture> <host> --sol` records only the serial console, for as long as you like: make
+the device write to it (mount a disk image, say), then press Enter.
 
 Fixtures are committed, so record a device that has nothing to hide. Serials, addresses and names are scrubbed, but the
 audit log keeps its user names and client addresses, and the KVM session keeps a screenshot of whatever is on screen.

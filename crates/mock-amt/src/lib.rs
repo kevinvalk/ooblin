@@ -10,7 +10,7 @@ mod scrub;
 mod transcript;
 mod wsman;
 
-pub use record::{crawl, record};
+pub use record::{crawl, record, record_sol};
 pub use transcript::{Direction, Transcript};
 
 use std::collections::HashMap;

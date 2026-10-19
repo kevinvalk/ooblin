@@ -347,3 +347,48 @@ async fn serves_a_disk_image_over_ider() -> Result<()> {
     assert_eq!(reads, [5 * 2048]);
     Ok(())
 }
+
+/// A serial console: what the device writes comes in as it writes it, what we type goes out, and keeping the session
+/// alive in between goes unnoticed. The mock hangs up on any byte of the start we get wrong.
+#[tokio::test]
+async fn reads_and_types_on_the_serial_console() -> Result<()> {
+    let opened = Transcript::load(&mock_amt::fixture("ms-02").join("sol.transcript"))?;
+    let output = |sequence: u8, text: &[u8]| {
+        let len = (text.len() as u16).to_le_bytes();
+        (Direction::Received, [&[0x2A, 0, 0, 0, sequence, 0, 0, 0, len[0], len[1]][..], text].concat())
+    };
+    let mut transcript = opened.0[..3].to_vec(); // our start, the MS-02's answer, our control lines
+    transcript.extend([
+        output(1, b"hello"),
+        (Direction::Sent, vec![0x28, 0, 0, 0, 3, 0, 0, 0, 1, 0, b'\r']),
+        output(2, b"login: "),
+    ]);
+    let fixture = tempfile::tempdir()?;
+    Transcript(transcript).save(&fixture.path().join("sol.transcript"))?;
+    std::fs::create_dir(fixture.path().join("wsman"))?;
+    for file in ["AMT_RedirectionService.Get.xml", "IPS_OptInService.Get.xml"] {
+        std::fs::copy(mock_amt::fixture("ms-02").join("wsman").join(file), fixture.path().join("wsman").join(file))?;
+    }
+
+    let amt = start(fixture.path()).await;
+    let sol = client(&amt, PASSWORD, None)?.sol().await?;
+    assert_eq!(sol.read().await?, b"hello");
+    assert_eq!(sol.read().await?, b"", "nothing for a second");
+    sol.write(b"\r").await?;
+    assert_eq!(sol.read().await?, b"login: ");
+    Ok(())
+}
+
+/// As the MS-02 recorded it: the kernel saying so as a disk image is mounted.
+#[tokio::test]
+async fn shows_the_ms_02_serial_console() -> Result<()> {
+    let amt = start(&mock_amt::fixture("ms-02")).await;
+    let sol = client(&amt, PASSWORD, None)?.sol().await?;
+    let mut text = Vec::new();
+    while let read @ [_, ..] = &sol.read().await?[..] {
+        text.extend_from_slice(read);
+    }
+    let text = String::from_utf8(text)?;
+    assert!(text.contains("Intel    Virtual CD") && text.contains("USB disconnect"), "{text}");
+    Ok(())
+}

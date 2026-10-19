@@ -12,6 +12,7 @@ mod net;
 mod power;
 mod redirection;
 mod settings;
+mod sol;
 mod status;
 pub mod wsman;
 
@@ -24,6 +25,7 @@ pub use logs::{AuditRecord, Event, Severity};
 pub use net::{Connection, Redirection, Session, decode_fields, encode_fields, fingerprint};
 pub use power::{Power, PowerAction, PowerState};
 pub use settings::{Account, Settings};
+pub use sol::Sol;
 pub use status::{Ipv4, Ipv6, Port, Status};
 
 /// A device and how to log in to it. The ports only change for tests and tunnels.

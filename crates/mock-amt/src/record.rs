@@ -320,6 +320,22 @@ pub async fn record(target: &Target, fixture: &Path) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Records only a serial console session into `fixture`, for as long as it takes to make the device write something
+/// (mount a disk image, say), until Enter is pressed here.
+pub async fn record_sol(target: &Target, fixture: &Path) -> anyhow::Result<()> {
+    let redirection = Redirection::open(target, None, Session::Sol).await?;
+    let mut recording = Recording { redirection, transcript: Transcript::default() };
+    recording.start_sol().await?;
+    eprintln!("   SOL  recording, press Enter to stop");
+    // The terminal hands us the line once Enter is pressed.
+    recording.listen(tokio::io::AsyncReadExt::read_u8(&mut tokio::io::stdin())).await?;
+    std::fs::create_dir_all(fixture)?;
+    recording.transcript.save(&fixture.join("sol.transcript"))?;
+    let bytes: usize = recording.transcript.0.iter().map(|(_, data)| data.len()).sum();
+    eprintln!("   SOL  {bytes} bytes");
+    Ok(())
+}
+
 /// Crawls `device` into `dir`, scrubbed, and returns how many classes answered.
 pub async fn crawl(device: &mut Connection, dir: &Path) -> anyhow::Result<usize> {
     std::fs::create_dir_all(dir)?;
@@ -390,14 +406,25 @@ impl Recording {
         Ok(bytes)
     }
 
-    /// Everything the device sends within `window`, as it arrives.
-    async fn listen(&mut self, window: Duration) -> Result<(), Error> {
-        let deadline = tokio::time::Instant::now() + window;
+    /// Everything the device writes to its serial console until `done`, as it arrives. We keep the session alive
+    /// meanwhile, AMT drops one it doesn't hear from in 10 seconds, and leave that out: the replay needn't wait on it.
+    async fn listen(&mut self, done: impl Future) -> Result<(), Error> {
+        tokio::pin!(done);
         let mut buf = vec![0; 64 * 1024];
-        while let Ok(read) = tokio::time::timeout_at(deadline, self.redirection.read(&mut buf)).await {
-            match read? {
-                0 => break,
-                len => self.transcript.0.push((Direction::Received, buf[..len].to_vec())),
+        let mut alive = tokio::time::interval(Duration::from_secs(2));
+        // Our first messages were the start, its settings and a key, these come after.
+        let mut sequence = 4u32;
+        loop {
+            tokio::select! {
+                read = self.redirection.read(&mut buf) => match read? {
+                    0 => break,
+                    len => self.transcript.0.push((Direction::Received, buf[..len].to_vec())),
+                },
+                _ = alive.tick() => {
+                    self.redirection.write_all(&[&[0x2B, 0, 0, 0][..], &sequence.to_le_bytes()].concat()).await?;
+                    sequence += 1;
+                }
+                _ = &mut done => break,
             }
         }
         Ok(())
@@ -405,6 +432,12 @@ impl Recording {
 
     /// Start SOL with MeshCommander's settings, press Enter and listen.
     async fn sol(&mut self) -> Result<(), Error> {
+        self.start_sol().await?;
+        self.send(&[0x28, 0, 0, 0, 3, 0, 0, 0, 1, 0, b'\r']).await?;
+        self.listen(tokio::time::sleep(Duration::from_secs(3))).await
+    }
+
+    async fn start_sol(&mut self) -> Result<(), Error> {
         let mut start = vec![0x20, 0, 0, 0, 1, 0, 0, 0];
         // Max tx buffer, then the tx, tx overflow, rx and rx flush timeouts, then the heartbeat.
         for setting in [10000u16, 100, 0, 10000, 100, 0] {
@@ -413,9 +446,7 @@ impl Recording {
         start.extend_from_slice(&[0, 0, 0, 0]);
         self.send(&start).await?;
         self.receive(23).await?;
-        self.send(&[0x27, 0, 0, 0, 2, 0, 0, 0, 0, 0, 0x1B, 0, 0, 0]).await?;
-        self.send(&[0x28, 0, 0, 0, 3, 0, 0, 0, 1, 0, b'\r']).await?;
-        self.listen(Duration::from_secs(3)).await
+        self.send(&[0x27, 0, 0, 0, 2, 0, 0, 0, 0, 0, 0x1B, 0, 0, 0]).await
     }
 
     /// Start KVM, do the RFB handshake the way our client does and fetch one full frame.
