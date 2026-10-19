@@ -2,6 +2,8 @@
 
 #![allow(non_snake_case, reason = "our XML types name their fields the way CIM does, `PowerState` say")]
 
+mod alarms;
+mod certificates;
 mod client;
 mod hardware;
 mod ider;
@@ -16,17 +18,24 @@ mod sol;
 mod status;
 pub mod wsman;
 
+pub use alarms::Alarm;
+pub use certificates::{Certificate, Tls};
 pub use client::Client;
 pub use hardware::{Battery, Bios, Disk, Hardware, Module, Motherboard, Processor, System};
 pub use ider::Ider;
 pub use info::Info;
-pub use kvm::{Input, Kvm};
+pub use kvm::{Input, Kvm, Screens};
 pub use logs::{AuditRecord, Event, Severity};
-pub use net::{Connection, Redirection, Session, decode_fields, encode_fields, fingerprint};
-pub use power::{Power, PowerAction, PowerState};
-pub use settings::{Account, Settings};
+pub use net::{
+    Connection, Found, RMCP_PORT, Redirection, Session, decode_fields, discover, encode_fields, fingerprint, nearby,
+};
+pub use power::{Power, PowerAction, PowerState, Recovery};
+pub use redirection::{Consent, RemoteAccess};
+pub use settings::{
+    Availability, Change, DnsUpdate, General, Ipv6Configuration, Ipv6Settings, Network, PowerPolicy, Settings,
+};
 pub use sol::Sol;
-pub use status::{Ipv4, Ipv6, Port, Status};
+pub use status::{Configuration, Ipv4, Ipv6, Port, Status};
 
 /// A device and how to log in to it. The ports only change for tests and tunnels.
 #[derive(Clone)]
@@ -68,8 +77,20 @@ pub enum Error {
     Method { method: String, code: String },
     #[error("WS-Man fault: {0}")]
     Fault(String),
+    /// AMT's `UnsupportedFeature` fault: this device doesn't do that, a class or a setting.
+    #[error("this device doesn't support that")]
+    Unsupported,
     #[error("unexpected response: {0}")]
     Protocol(String),
+    #[error("that's turned off in the device's remote access settings")]
+    Off,
+    /// See `Client::start_consent`.
+    #[error("someone at the device has to give consent first")]
+    Consent,
+    #[error("that's not the code the device shows")]
+    WrongCode,
+    #[error("{0}")]
+    Invalid(String),
 }
 
 impl From<std::io::Error> for Error {

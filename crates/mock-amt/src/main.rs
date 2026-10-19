@@ -7,7 +7,7 @@ use mock_amt::{Amt, PASSWORD, USER};
 #[derive(Parser)]
 #[command(about = "A stand-in Intel AMT, replaying fixtures recorded from real ones")]
 enum Command {
-    /// Serve a fixture on 127.0.0.1: WS-Man on 16993, SOL, KVM and IDER on 16995.
+    /// Serve a fixture on 127.0.0.1: WS-Man on 16993, SOL, KVM and IDER on 16995, presence pings on UDP 623.
     Run { fixture: String },
     /// Record a device into a fixture, read-only: all its WS-Man data (scrubbed) and a short SOL, KVM and IDER session.
     Record {
@@ -27,6 +27,10 @@ async fn main() -> anyhow::Result<()> {
         Command::Run { fixture } => {
             let dir = mock_amt::fixture(&fixture);
             Amt::start("127.0.0.1:16993", "127.0.0.1:16995", &dir).await;
+            // Below 1024, which Linux keeps for root and macOS too unless it's on every address.
+            if let Err(error) = mock_amt::answer_pings("0.0.0.0:623").await {
+                eprintln!("Not answering presence pings on UDP 623: {error}");
+            }
             println!("Serving {} on 127.0.0.1 as {USER} with password {PASSWORD}", dir.display());
             std::future::pending().await
         }

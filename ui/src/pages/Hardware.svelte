@@ -1,7 +1,7 @@
 <script lang="ts">
   import type { Hardware } from "../bindings/core";
 
-  /** While loading, every list shows one of its thing. */
+  /** While loading, every list shows one of its thing. Several are told apart by number, from 0 like the OS does. */
   let { data }: { data?: Hardware } = $props();
 </script>
 
@@ -12,10 +12,10 @@
     <div><dt>Manufacturer</dt><dd>{data?.system.manufacturer}</dd></div>
     <div><dt>Version</dt><dd>{data?.system.version}</dd></div>
     <div><dt>Serial number</dt><dd>{data?.system.serial_number}</dd></div>
-    <div><dt>System ID</dt><dd>{data?.system.id}</dd></div>
+    <div><dt>System ID</dt><dd class="font-mono">{data?.system.id}</dd></div>
     {#each data?.processors ?? [undefined] as processor, i}
       <div>
-        <dt>CPU {i + 1}</dt>
+        <dt>{data && data.processors.length > 1 ? `CPU ${i}` : "CPU"}</dt>
         <dd>{processor && `${processor.model} @ ${[processor.mhz, processor.max_mhz].filter(Boolean).join(" / ")} MHz`}</dd>
       </div>
     {/each}
@@ -49,7 +49,7 @@
   <div class="grid gap-x-4 gap-y-6 @3xl:grid-cols-2">
     {#each data?.processors ?? [undefined] as processor, i}
       <div>
-        <h3>Processor {i + 1}</h3>
+        {#if data && data.processors.length > 1}<h3>Processor {i}</h3>{/if}
         <dl class="card">
           <div><dt>Model</dt><dd>{processor?.model}</dd></div>
           <div><dt>Manufacturer</dt><dd>{processor?.manufacturer}</dd></div>
@@ -91,7 +91,7 @@
   <div class="grid gap-x-4 gap-y-6 @3xl:grid-cols-2">
     {#each data?.disks ?? [undefined] as disk, i}
       <div>
-        <h3>Disk {i + 1}</h3>
+        {#if data && data.disks.length > 1}<h3>Disk {i}</h3>{/if}
         <dl class="card">
           <div><dt>Model</dt><dd>{disk?.model}</dd></div>
           <div><dt>Serial number</dt><dd>{disk?.serial_number}</dd></div>
@@ -108,7 +108,7 @@
   <div class="grid gap-x-4 gap-y-6 @3xl:grid-cols-2">
     {#each data?.batteries ?? [] as battery, i}
       <div>
-        <h3>Battery {i + 1}</h3>
+        {#if data && data.batteries.length > 1}<h3>Battery {i}</h3>{/if}
         <dl class="card">
           <div><dt>Name</dt><dd>{battery.name}</dd></div>
           <div><dt>Charge</dt><dd>{battery.charge_percent && `${battery.charge_percent} %`}</dd></div>

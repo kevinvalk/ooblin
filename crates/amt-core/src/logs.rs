@@ -451,7 +451,7 @@ const OCR_ERRORS: &[&str] = &[
 ];
 
 /// MeshCommander's names for AMT's realms, by number. Unnamed ones are reserved.
-pub(crate) const REALMS: &[&str] = &[
+const REALMS: &[&str] = &[
     "",
     "",
     "Redirection",

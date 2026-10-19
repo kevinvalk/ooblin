@@ -30,6 +30,15 @@
   }
 }
 
+/* Only what can be used reacts to the pointer, for every `hover:`. */
+@custom-variant hover {
+  @media (hover: hover) {
+    &:hover:not(:disabled, [aria-disabled="true"]) {
+      @slot;
+    }
+  }
+}
+
 @layer base {
   :root {
     color-scheme: light dark;
@@ -59,16 +68,25 @@
 }
 
 @layer components {
-  /* Rows of label and value. */
+  /* Rows of label and value, or of label and field in a form. */
   .card {
     @apply divide-y divide-line rounded-xl border border-line bg-pane/50;
 
     & > div {
-      @apply grid grid-cols-[11rem_1fr] gap-4 px-4 py-2.5;
+      @apply grid grid-cols-[11rem_1fr] items-baseline gap-4 px-4 py-2.5;
     }
 
-    & dt {
+    /* A row's label, not the labels of the choices in it. */
+    & > div > :is(dt, label) {
       @apply text-muted;
+    }
+
+    & .field {
+      @apply -my-1 h-7 max-w-96 px-2;
+    }
+
+    & [type="checkbox"] {
+      @apply size-4 accent-accent disabled:opacity-40;
     }
 
     & dd {
@@ -94,6 +112,11 @@
     @apply inline-flex h-8 items-center justify-center gap-2 rounded-lg px-3.5 font-medium whitespace-nowrap;
   }
 
+  /* What can't be used now looks it, a button or a tab that says why when clicked (`aria-disabled`) alike. */
+  :is(.btn, .btn-icon, [role="tab"]):is(:disabled, [aria-disabled="true"]) {
+    @apply opacity-50;
+  }
+
   .btn-primary {
     @apply bg-accent text-white hover:bg-accent/90;
   }
@@ -114,7 +137,12 @@
     @apply m-auto rounded-xl border border-line bg-canvas p-5 text-ink shadow-2xl backdrop:bg-black/30;
   }
 
+  /* An input, or a group of one with its button (the focus taking them both in), which then has no look of its own. */
   .field {
-    @apply h-9 rounded-lg border border-line bg-field px-3 select-text focus:border-accent focus:outline-3 focus:outline-accent/30;
+    @apply h-9 rounded-lg border border-line bg-field px-3 select-text outline-none focus-within:border-accent/60 disabled:bg-transparent disabled:text-muted;
+
+    & > input {
+      @apply min-w-0 flex-1 bg-transparent outline-none;
+    }
   }
 }

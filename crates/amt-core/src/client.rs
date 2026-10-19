@@ -1,7 +1,7 @@
 use instant_xml::ToXml;
 
 use crate::net::Connection;
-use crate::wsman::{self, Instance, Method};
+use crate::wsman::{self, Instance, Key, Method};
 use crate::{Error, Result, Target};
 
 pub struct Client {
@@ -27,21 +27,45 @@ impl Client {
         wsman::parse_instance(&self.read(envelope).await?)
     }
 
-    pub async fn put(&mut self, uri: &str, instance: &impl ToXml) -> Result<()> {
-        let envelope = wsman::put(uri, instance, self.next_message_id());
+    pub async fn put(&mut self, class: &str, instance: &impl ToXml) -> Result<()> {
+        let envelope = wsman::put(class, &[], instance, self.next_message_id());
         self.connection.post(envelope).await?;
         Ok(())
     }
 
+    /// Like `put`, for the instance of several that its `keys` pick.
+    pub async fn put_on(&mut self, class: &str, keys: &[(&str, Key<'_>)], instance: &impl ToXml) -> Result<()> {
+        let envelope = wsman::put(class, keys, instance, self.next_message_id());
+        self.connection.post(envelope).await?;
+        Ok(())
+    }
+
+    pub async fn delete(&mut self, class: &str, id: &str) -> Result<()> {
+        let envelope = wsman::delete(class, id, self.next_message_id());
+        self.connection.post(envelope).await?;
+        Ok(())
+    }
+
+    /// AMT's own web pages, where what we don't do (users, say) can be done.
+    pub fn web_pages(&self) -> String {
+        format!("https://{}:{}/", self.target.host, self.target.wsman_port)
+    }
+
     /// Calls a method that changes something, once. A non-zero `ReturnValue` is an error.
     pub async fn invoke<T: Method>(&mut self, input: &T) -> Result<Instance> {
-        let envelope = wsman::invoke(input, self.next_message_id());
+        let envelope = wsman::invoke(input, None, self.next_message_id());
+        output(T::NAME, &self.connection.post(envelope).await?)
+    }
+
+    /// Like `invoke`, for a method of the instance with the `InstanceID` `id`.
+    pub async fn invoke_on<T: Method>(&mut self, id: &str, input: &T) -> Result<Instance> {
+        let envelope = wsman::invoke(input, Some(id), self.next_message_id());
         output(T::NAME, &self.connection.post(envelope).await?)
     }
 
     /// Calls a method that only reads, like `invoke` but tried twice if need be (see `read`).
     pub async fn query<T: Method>(&mut self, input: &T) -> Result<Instance> {
-        let envelope = wsman::invoke(input, self.next_message_id());
+        let envelope = wsman::invoke(input, None, self.next_message_id());
         output(T::NAME, &self.read(envelope).await?)
     }
 
@@ -49,7 +73,7 @@ impl Client {
         let envelope = wsman::enumerate(class, self.next_message_id());
         // A class this device doesn't have (older firmware, say) simply has no instances.
         let mut context = match self.read(envelope).await {
-            Err(Error::Fault(_)) => return Ok(Vec::new()),
+            Err(Error::Fault(_) | Error::Unsupported) => return Ok(Vec::new()),
             reply => Some(wsman::parse_enumerate(&reply?)?),
         };
         let mut instances = Vec::new();

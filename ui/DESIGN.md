@@ -13,6 +13,11 @@ Everything is `text-sm` (14px) unless it's a title. Sentence case, never upperca
 | Card title, one of several | `h3`: `font-medium text-muted`       |
 | Label, table header        | `text-muted` (headers `font-medium`) |
 | Value                      | default, selectable, `wrap-anywhere` |
+| Address, identifier        | `font-mono`, values and fields       |
+
+Addresses and identifiers are monospace wherever they're a value or typed in: IP and MAC addresses, masks, GUIDs and
+fingerprints (those `text-xs`, they're long), so they're easy to read and compare. Names and sentences aren't, the
+sidebar's device names and the footer included. MAC addresses are written `12:07:14:5F:37:F1`.
 
 ## Layout
 
@@ -30,14 +35,21 @@ Everything is `text-sm` (14px) unless it's a title. Sentence case, never upperca
 - Loading: the page itself, `aria-busy`, with gray bars where values go. Left out by the device: a dash. Both are CSS on
   empty `dt`, `dd`, `td` and `h3`, so markup just writes `{value}`. Not there at all (no battery): say so in words.
 - Waiting on the device after a click: a spinning `LoaderCircle` where the click was (button, sidebar entry).
-- The footer says what actions did for as long as it takes to read, what's true now (a device not answering) for
-  as long as it is, and on its right how fast the disk image in the drive is read, while it is and a minute after.
-- Errors: in the page or form with a way to try again, in the footer for actions. A device that stops answering for two
-  minutes is let go of, and the form says so, until then it's retried.
+- The footer says what actions did for as long as it takes to read, and while the pointer is on it so it can be
+  selected, what's true now (a device not answering) for as long as it is, and on its right how fast the disk image in
+  the drive is read, while it is and a minute after.
+- Errors: in the page with a way to try again, in the footer (in red) for actions and saving. A device that stops
+  answering for two minutes is let go of, and the form says so, until then it's retried.
 
 ## Controls
 
 - Buttons are `btn` with `btn-primary` (the one main action), `btn-secondary` or `btn-danger`, 32px high.
 - Icons are 16px Lucide icons, icon-only buttons are `btn-icon` and have a `title`.
 - Explanations go in a native `title` tooltip, not in the layout.
-- Anything that can lose work asks first, in a `<dialog class="dialog">`, as do small forms (typing text on KVM).
+- Settings that can change are a `<form class="card">` of `label` and field rows (checkboxes, `.field` inputs and
+  selects), the settings being the fields' defaults. A switch or choice of its own saves as it changes. Fields that go
+  together (a name, an address) save together, from a ✓ and ✕ at the right of their card title, there all along so
+  it's clear what saves this way and enabled once something changed. Enter saves and Escape cancels. Either way the
+  footer says how it went, and the form then shows what the device took.
+- Text fields for names and addresses don't capitalize or spell check (`autocapitalize="off" spellcheck="false"`).
+- Anything that can lose work asks first, in a `<dialog class="dialog">`, as do small forms (scheduling a wake-up).

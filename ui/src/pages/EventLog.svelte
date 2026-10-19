@@ -11,15 +11,15 @@
     <thead><tr><th>Time</th><th>Source</th><th>Description</th></tr></thead>
     <tbody>
       {#each data ?? Array(12) as event}
-        <tr>
+        <!-- Warnings and critical events stand out by color, the whole row. -->
+        <tr
+          class="data-[severity=Critical]:text-danger data-[severity=Warning]:text-asleep"
+          data-severity={event?.severity}
+          title={event?.severity}
+        >
           <td>{event && new Date(event.time * 1000).toLocaleString()}</td>
           <td>{event?.source}</td>
-          <!-- Warnings and critical events stand out by color. -->
-          <td
-            class="data-[severity=Critical]:text-danger data-[severity=Warning]:text-asleep"
-            data-severity={event?.severity}
-            title={event?.severity}>{event?.description}</td
-          >
+          <td>{event?.description}</td>
         </tr>
       {/each}
     </tbody>

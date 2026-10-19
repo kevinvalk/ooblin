@@ -6,7 +6,7 @@ use std::collections::HashMap;
 use std::time::Duration;
 
 use flate2::{Decompress, FlushDecompress};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncReadExt, AsyncWriteExt, ReadHalf, WriteHalf};
 use tokio::sync::Mutex;
 use ts_rs::TS;
@@ -53,10 +53,34 @@ struct Keyboard {
 /// 16-bit RGB565, little-endian: AMT's own pixel format, which MeshCommander and Intel's console keep.
 const RGB565: [u8; 13] = [16, 16, 0, 1, 0, 31, 0, 63, 0, 31, 11, 5, 0];
 
+/// The device's screens KVM can show, by number from 0, and the one it shows. Like MeshCommander, there's a choice once
+/// more than one is active.
+#[derive(Debug, Serialize, TS)]
+#[ts(export, export_to = "core.ts")]
+pub struct Screens {
+    pub active: Vec<u8>,
+    pub shown: u8,
+}
+
 impl Client {
-    /// Opens the device's screen, turning KVM on first if need be.
+    /// Opens the device's screen, where KVM is on.
     pub async fn kvm(&mut self) -> Result<Kvm> {
         Kvm::open(self.redirect(Session::Kvm).await?).await
+    }
+
+    pub async fn screens(&mut self) -> Result<Screens> {
+        let settings = self.get("IPS_KVMRedirectionSettingData").await?;
+        let screens = self.enumerate("IPS_ScreenSettingData").await?;
+        let active = screens.first().into_iter().flat_map(|screens| screens.all("IsActive"));
+        let active = active.zip(0..).filter(|(active, _)| *active == "true").map(|(_, screen)| screen).collect();
+        Ok(Screens { active, shown: settings.parse("DefaultScreen").unwrap_or_default() })
+    }
+
+    /// Shows `screen` in KVM, in a session that's open too.
+    pub async fn show_screen(&mut self, screen: u8) -> Result<()> {
+        let mut settings = self.get("IPS_KVMRedirectionSettingData").await?;
+        settings.set("DefaultScreen", screen);
+        self.put("IPS_KVMRedirectionSettingData", &settings).await
     }
 }
 

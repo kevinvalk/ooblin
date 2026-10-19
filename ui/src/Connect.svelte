@@ -38,10 +38,10 @@
   <h1 class="mb-2 text-2xl font-semibold">Connect to a device</h1>
   <!-- svelte-ignore a11y_autofocus -->
   <label class="grid gap-1.5 font-medium">
-    Host <input bind:value={login.host} class="field font-normal" placeholder="192.168.1.50" required autofocus={!device} />
+    Host <input bind:value={login.host} class="field font-mono font-normal" autocapitalize="off" spellcheck="false" placeholder="192.168.1.50" required autofocus={!device} />
   </label>
   <label class="grid gap-1.5 font-medium">
-    User <input bind:value={login.user} class="field font-normal" required />
+    User <input bind:value={login.user} class="field font-normal" autocapitalize="off" spellcheck="false" required />
   </label>
   <!-- svelte-ignore a11y_autofocus -->
   <label class="grid gap-1.5 font-medium">

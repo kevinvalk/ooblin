@@ -10,7 +10,8 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use amt_core::{
-    AuditRecord, Client, Error, Event, Hardware, Info, Input, Kvm, Power, PowerAction, Settings, Sol, Status, Target,
+    AuditRecord, Change, Client, Error, Event, Found, Hardware, Info, Input, Kvm, Power, PowerAction, RMCP_PORT,
+    Screens, Settings, Sol, Status, Target,
 };
 use clap::Parser;
 use hosts::{Device, Hosts};
@@ -18,6 +19,7 @@ use serde::Serialize;
 use tauri::async_runtime::{JoinHandle, Mutex};
 use tauri::ipc::{Channel, Response};
 use tauri::{AppHandle, State, WebviewWindow};
+use tauri_plugin_opener::OpenerExt;
 use ts_rs::TS;
 
 /// One session per connected device: its client, on its own lock as AMT wants its calls one at a time (other devices
@@ -30,13 +32,13 @@ struct Session {
     client: Arc<Mutex<Client>>,
     kvm: Option<Arc<Kvm>>,
     sol: Option<Arc<Sol>>,
-    image: Option<Arc<Image>>,
+    image: Option<Arc<Task>>,
 }
 
-/// The task serving a disk image, which stops with the last copy of it.
-struct Image(JoinHandle<()>);
+/// A task that stops with the last copy of it: one serving a disk image, or looking for devices.
+struct Task(JoinHandle<()>);
 
-impl Drop for Image {
+impl Drop for Task {
     fn drop(&mut self) {
         self.0.abort();
     }
@@ -90,7 +92,8 @@ struct Args {
 fn launch(app: AppHandle, args: State<'_, Args>) -> Result<Option<Device>, CommandError> {
     let Some(host) = args.host.clone() else { return Ok(None) };
     let saved = Hosts::open(&app)?.device(&host).filter(|_| args.password.is_none());
-    Ok(Some(saved.unwrap_or(Device { host, user: args.user.clone(), remembered: args.password.is_some() })))
+    let (user, remembered) = (args.user.clone(), args.password.is_some());
+    Ok(Some(saved.unwrap_or(Device { host, name: String::new(), version: String::new(), user, remembered })))
 }
 
 #[tauri::command]
@@ -119,7 +122,7 @@ async fn connect(
     };
     let mut client = Client::new(&target, hosts.pin(&target.host))?;
     let info = client.info().await?;
-    hosts.connected(&target, info.fingerprint.clone())?;
+    hosts.connected(&target, &info)?;
     if remember {
         hosts.remember(&target)?;
     }
@@ -147,6 +150,40 @@ fn trust(app: AppHandle, host: &str, fingerprint: String) -> Result<(), CommandE
     Ok(Hosts::open(&app)?.trust(host, fingerprint)?)
 }
 
+/// The network to look for devices on unless told otherwise, see `amt_core::nearby`. The verify build (AGENTS.md) looks
+/// on this machine only, where the mock is, never at the user's devices.
+#[tauri::command]
+fn networks(app: AppHandle) -> String {
+    if app.config().identifier.ends_with(".verify") { "127.0.0.1/32".into() } else { amt_core::nearby() }
+}
+
+/// The search for devices underway, see `discover`.
+#[derive(Default)]
+struct Discovery(std::sync::Mutex<Option<Task>>);
+
+/// Looks for devices on `networks` and says each on `found` as it answers, see `amt_core::discover`. It ends the
+/// search before, as does `stop_discovery`.
+#[tauri::command]
+async fn discover(
+    discovery: State<'_, Discovery>,
+    networks: String,
+    found: Channel<Found>,
+) -> Result<(), CommandError> {
+    let (done, mut ended) = tauri::async_runtime::channel(1);
+    let search = async move {
+        let result = amt_core::discover(&networks, RMCP_PORT, |device| found.send(device).unwrap_or_default()).await;
+        done.send(result).await.unwrap_or_default();
+    };
+    *discovery.0.lock().unwrap() = Some(Task(tauri::async_runtime::spawn(search)));
+    // A stopped search never says how it went.
+    Ok(ended.recv().await.unwrap_or(Ok(()))?)
+}
+
+#[tauri::command]
+fn stop_discovery(discovery: State<'_, Discovery>) {
+    discovery.0.lock().unwrap().take();
+}
+
 #[tauri::command]
 async fn set_power(sessions: State<'_, Sessions>, host: &str, action: PowerAction) -> Result<(), CommandError> {
     let session = sessions.get(host)?;
@@ -169,6 +206,56 @@ macro_rules! reads {
 
 reads!(power: Power, status: Status, hardware: Hardware, settings: Settings, event_log: Vec<Event>, audit_log: Vec<AuditRecord>);
 
+/// Changes a setting and says them all after, see `Client::change`. A disk image goes when they're turned off, the
+/// webview closes the screen and serial console.
+#[tauri::command]
+async fn change(sessions: State<'_, Sessions>, host: &str, change: Change) -> Result<Settings, CommandError> {
+    let client = sessions.get(host)?.client;
+    let mut client = client.lock().await;
+    client.change(&change).await?;
+    if let Change::RemoteAccess(access) = change
+        && !access.ider
+    {
+        sessions.update(host, |session| session.image = None);
+    }
+    Ok(client.settings().await?)
+}
+
+/// Writes the certificate as PEM to `path`.
+#[tauri::command]
+async fn save_certificate(
+    sessions: State<'_, Sessions>,
+    host: &str,
+    id: &str,
+    path: PathBuf,
+) -> Result<(), CommandError> {
+    let pem = sessions.get(host)?.client.lock().await.certificate(id).await?;
+    Ok(std::fs::write(path, pem)?)
+}
+
+/// Opens AMT's own web pages in the browser.
+#[tauri::command]
+async fn web_pages(app: AppHandle, sessions: State<'_, Sessions>, host: &str) -> Result<(), CommandError> {
+    let url = sessions.get(host)?.client.lock().await.web_pages();
+    app.opener().open_url(url, None::<&str>).map_err(CommandError::failed)
+}
+
+/// Has the device show a code for someone at it to read out, see `Client::start_consent`.
+#[tauri::command]
+async fn consent_start(sessions: State<'_, Sessions>, host: &str) -> Result<(), CommandError> {
+    Ok(sessions.get(host)?.client.lock().await.start_consent().await?)
+}
+
+#[tauri::command]
+async fn consent_send(sessions: State<'_, Sessions>, host: &str, code: u32) -> Result<(), CommandError> {
+    Ok(sessions.get(host)?.client.lock().await.send_consent(code).await?)
+}
+
+#[tauri::command]
+async fn consent_cancel(sessions: State<'_, Sessions>, host: &str) -> Result<(), CommandError> {
+    Ok(sessions.get(host)?.client.lock().await.cancel_consent().await?)
+}
+
 /// Opens the device's screen, see `Client::kvm`, closing the one that may be open: AMT takes one at a time.
 #[tauri::command]
 async fn kvm_open(sessions: State<'_, Sessions>, host: &str) -> Result<(), CommandError> {
@@ -176,6 +263,17 @@ async fn kvm_open(sessions: State<'_, Sessions>, host: &str) -> Result<(), Comma
     let kvm = Arc::new(sessions.get(host)?.client.lock().await.kvm().await?);
     sessions.update(host, |session| session.kvm = Some(kvm));
     Ok(())
+}
+
+/// See `Client::screens`.
+#[tauri::command]
+async fn screens(sessions: State<'_, Sessions>, host: &str) -> Result<Screens, CommandError> {
+    Ok(sessions.get(host)?.client.lock().await.screens().await?)
+}
+
+#[tauri::command]
+async fn show_screen(sessions: State<'_, Sessions>, host: &str, screen: u8) -> Result<(), CommandError> {
+    Ok(sessions.get(host)?.client.lock().await.show_screen(screen).await?)
 }
 
 /// The next change on screen, as bytes rather than JSON (see `Kvm::frame`).
@@ -221,27 +319,39 @@ async fn sol_close(sessions: State<'_, Sessions>, host: &str) -> Result<(), Comm
     Ok(())
 }
 
-/// Asks for a disk image. Native dialogs want the main thread, where a command that isn't async runs.
+/// Asks for a file to open, of a `kind` ("Disk image") and its `extensions`. Native dialogs want the main thread, where
+/// a command that isn't async runs.
 #[tauri::command]
-fn ider_pick(window: WebviewWindow) -> Option<PathBuf> {
-    rfd::FileDialog::new().set_parent(&window).add_filter("Disk image", &["iso"]).pick_file()
+fn pick(window: WebviewWindow, kind: &str, extensions: Vec<String>) -> Option<PathBuf> {
+    rfd::FileDialog::new().set_parent(&window).add_filter(kind, &extensions).pick_file()
+}
+
+/// Asks where to save a file, suggesting `name`.
+#[tauri::command]
+fn pick_save(window: WebviewWindow, name: &str) -> Option<PathBuf> {
+    rfd::FileDialog::new().set_parent(&window).set_file_name(name).save_file()
 }
 
 /// Puts the image at `path` in the device's drive (see `Client::ider`) and says its name, then how much of it the
-/// device read on `reads` as it goes. AMT has one drive, so the image in it comes out first.
+/// device read on `reads` as it goes, and nothing once the device closed the drive. AMT has one drive, so the image in
+/// it comes out first. Ejecting it says nothing, the webview knows.
 #[tauri::command]
 async fn ider_mount(
     sessions: State<'_, Sessions>,
     host: &str,
     path: PathBuf,
-    reads: Channel<u64>,
+    reads: Channel<Option<u64>>,
 ) -> Result<String, CommandError> {
     let file = std::fs::File::open(&path)?;
     sessions.update(host, |session| session.image = None);
     let ider = sessions.get(host)?.client.lock().await.ider(file).await?;
-    // How serving ended doesn't matter, booting from the image says it's gone.
-    let serve = ider.serve(move |served| reads.send(served).unwrap_or_default());
-    let image = Arc::new(Image(tauri::async_runtime::spawn(async move { serve.await.unwrap_or_default() })));
+    let ended = reads.clone();
+    let serve = ider.serve(move |served| reads.send(Some(served)).unwrap_or_default());
+    let image = Arc::new(Task(tauri::async_runtime::spawn(async move {
+        // How it ended doesn't matter, that it did does.
+        serve.await.unwrap_or_default();
+        ended.send(None).unwrap_or_default();
+    })));
     sessions.update(host, |session| session.image = Some(image));
     Ok(path.file_name().unwrap_or_default().to_string_lossy().into_owned())
 }
@@ -264,13 +374,15 @@ fn fullscreen(window: WebviewWindow, on: bool) -> Result<(), CommandError> {
 }
 
 /// What the webview gets when a command fails: always a message, and both fingerprints when the certificate changed.
-/// `Unreachable` means the device stopped answering, even to a second try.
+/// `Unreachable` means the device stopped answering, even to a second try, `Consent` that someone at it has to read out
+/// a code first (see `consent_start`).
 #[derive(Serialize, TS)]
 #[ts(export, export_to = "console.ts")]
 #[serde(tag = "kind")]
 enum CommandError {
     PinMismatch { message: String, expected: String, actual: String },
     Unreachable { message: String },
+    Consent { message: String },
     Failed { message: String },
 }
 
@@ -286,6 +398,7 @@ impl From<Error> for CommandError {
         match error {
             Error::PinMismatch { expected, actual } => Self::PinMismatch { message, expected, actual },
             Error::Transport(_) | Error::Timeout => Self::Unreachable { message },
+            Error::Consent => Self::Consent { message },
             _ => Self::Failed { message },
         }
     }
@@ -315,12 +428,49 @@ fn main() {
         });
 
     builder
+        .plugin(tauri_plugin_opener::init())
         .manage(Args::parse())
         .manage(Sessions::default())
+        .manage(Discovery::default())
         .invoke_handler(tauri::generate_handler![
-            launch, devices, connect, disconnect, forget, trust, power, set_power, status, hardware, settings,
-            event_log, audit_log, kvm_open, kvm_frame, kvm_input, kvm_close, sol_open, sol_read, sol_write, sol_close,
-            ider_pick, ider_mount, ider_eject, title, fullscreen
+            launch,
+            devices,
+            connect,
+            disconnect,
+            forget,
+            trust,
+            networks,
+            discover,
+            stop_discovery,
+            power,
+            set_power,
+            status,
+            hardware,
+            settings,
+            change,
+            consent_start,
+            consent_send,
+            consent_cancel,
+            save_certificate,
+            web_pages,
+            event_log,
+            audit_log,
+            kvm_open,
+            screens,
+            show_screen,
+            kvm_frame,
+            kvm_input,
+            kvm_close,
+            sol_open,
+            sol_read,
+            sol_write,
+            sol_close,
+            pick,
+            pick_save,
+            ider_mount,
+            ider_eject,
+            title,
+            fullscreen
         ])
         .run(tauri::generate_context!())
         .expect("the Tauri runtime starts");

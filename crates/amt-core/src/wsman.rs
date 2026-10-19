@@ -34,29 +34,59 @@ pub trait Method: ToXml {
 }
 
 pub fn get(class: &str, message_id: u32) -> String {
-    envelope(&format!("{TRANSFER}/Get"), &resource_uri(class), message_id, None::<Enumerate>)
+    envelope(&format!("{TRANSFER}/Get"), &resource_uri(class), &[], message_id, None::<Enumerate>)
 }
 
 pub fn enumerate(class: &str, message_id: u32) -> String {
-    envelope(&format!("{ENUMERATION}/Enumerate"), &resource_uri(class), message_id, Some(Enumerate))
+    envelope(&format!("{ENUMERATION}/Enumerate"), &resource_uri(class), &[], message_id, Some(Enumerate))
 }
 
 pub fn pull(class: &str, context: &str, message_id: u32) -> String {
     let pull = Pull { EnumerationContext: context, MaxElements: 999, MaxCharacters: 99_999 };
-    envelope(&format!("{ENUMERATION}/Pull"), &resource_uri(class), message_id, Some(pull))
+    envelope(&format!("{ENUMERATION}/Pull"), &resource_uri(class), &[], message_id, Some(pull))
 }
 
-/// Writes back an instance of the class at `uri`, whole.
-pub fn put(uri: &str, instance: &impl ToXml, message_id: u32) -> String {
-    envelope(&format!("{TRANSFER}/Put"), uri, message_id, Some(instance))
+/// Writes back an instance of `class` whole, where there are several the one its `keys` pick.
+pub fn put(class: &str, keys: &[(&str, Key)], instance: &impl ToXml, message_id: u32) -> String {
+    envelope(&format!("{TRANSFER}/Put"), &resource_uri(class), keys, message_id, Some(instance))
 }
 
-pub fn invoke<T: Method>(input: &T, message_id: u32) -> String {
-    envelope(&format!("{}/{}", T::URI, T::NAME), T::URI, message_id, Some(input))
+/// Deletes the instance of `class` with the `InstanceID` `id`.
+pub fn delete(class: &str, id: &str, message_id: u32) -> String {
+    let keys = [("InstanceID", Key::Value(id))];
+    envelope(&format!("{TRANSFER}/Delete"), &resource_uri(class), &keys, message_id, None::<Enumerate>)
 }
 
-/// Our requests always serialize: their every part is a type of ours.
-fn envelope(action: &str, uri: &str, message_id: u32, body: Option<impl ToXml>) -> String {
+/// Calls a method of the class, or of its instance with the `InstanceID` `id`.
+pub fn invoke<T: Method>(input: &T, id: Option<&str>, message_id: u32) -> String {
+    let keys: Vec<_> = id.map(|id| ("InstanceID", Key::Value(id))).into_iter().collect();
+    envelope(&format!("{}/{}", T::URI, T::NAME), T::URI, &keys, message_id, Some(input))
+}
+
+/// What picks one instance of several: a value, or a reference to another instance.
+pub enum Key<'a> {
+    Value(&'a str),
+    Reference(Reference<'a>),
+}
+
+impl ToXml for Key<'_> {
+    fn serialize<W: fmt::Write + ?Sized>(
+        &self,
+        _field: Option<Id<'_>>,
+        serializer: &mut Serializer<'_, W>,
+    ) -> Result<(), instant_xml::Error> {
+        match self {
+            Key::Value(value) => value.serialize(None, serializer),
+            Key::Reference(reference) => {
+                reference.serialize(Some(Id { ns: ADDRESSING, name: "EndpointReference" }), serializer)
+            }
+        }
+    }
+}
+
+/// Our requests always serialize: their every part is a type of ours. The `keys` pick one instance of several.
+fn envelope(action: &str, uri: &str, keys: &[(&str, Key)], message_id: u32, body: Option<impl ToXml>) -> String {
+    let selectors: Vec<_> = keys.iter().map(|(name, value)| Selector { Name: name, value }).collect();
     let header = Header {
         Action: action,
         To: "/wsman",
@@ -64,6 +94,7 @@ fn envelope(action: &str, uri: &str, message_id: u32, body: Option<impl ToXml>) 
         MessageID: message_id,
         ReplyTo: ReplyTo { Address: "http://schemas.xmlsoap.org/ws/2004/08/addressing/role/anonymous" },
         OperationTimeout: "PT60S",
+        SelectorSet: (!selectors.is_empty()).then_some(SelectorSet { Selector: &selectors }),
     };
     let mut xml = String::from(r#"<?xml version="1.0" encoding="utf-8"?>"#);
     instant_xml::to_writer(&Envelope { Header: header, Body: Body { content: body } }, &mut xml)
@@ -92,6 +123,7 @@ struct Header<'a> {
     ReplyTo: ReplyTo<'a>,
     #[xml(ns(WSMAN))]
     OperationTimeout: &'a str,
+    SelectorSet: Option<SelectorSet<'a>>,
 }
 
 #[derive(ToXml)]
@@ -120,6 +152,7 @@ struct Pull<'a> {
 
 /// A reference to an instance (a WS-Addressing endpoint reference): its class and the keys that pick it out. It's
 /// written as the field that holds it, `<h:ManagedElement>` say, which a derived type can't do.
+#[derive(Clone, Copy)]
 pub struct Reference<'a> {
     pub class: &'a str,
     pub selectors: &'a [(&'a str, &'a str)],
@@ -134,7 +167,8 @@ impl ToXml for Reference<'_> {
         let field = field.ok_or(instant_xml::Error::UnexpectedState("a reference is always a field"))?;
         let element = serializer.write_start(field.name, field.ns, None::<Context<0>>)?;
         serializer.end_start()?;
-        let selectors: Vec<_> = self.selectors.iter().map(|&(name, value)| Selector { Name: name, value }).collect();
+        let keys: Vec<_> = self.selectors.iter().map(|&(name, value)| (name, Key::Value(value))).collect();
+        let selectors: Vec<_> = keys.iter().map(|(name, value)| Selector { Name: name, value }).collect();
         let parameters = ReferenceParameters {
             ResourceURI: &resource_uri(self.class),
             SelectorSet: SelectorSet { Selector: &selectors },
@@ -172,7 +206,7 @@ struct Selector<'a> {
     #[xml(attribute)]
     Name: &'a str,
     #[xml(direct)]
-    value: &'a str,
+    value: &'a Key<'a>,
 }
 
 /// A CIM instance with its properties in document order, array properties appear once per element. Values are trimmed
@@ -203,6 +237,20 @@ impl Instance {
         self.get(name)?.parse().ok()
     }
 
+    /// Changes a property for a Put, adding it when the instance doesn't have it.
+    pub fn set(&mut self, name: &str, value: impl ToString) {
+        self.set_all(name, [value]);
+    }
+
+    /// Changes an array property for a Put, or any property to have no value with no `values`.
+    pub fn set_all(&mut self, name: &str, values: impl IntoIterator<Item = impl ToString>) {
+        // Where the first was, which taking them all out leaves in place.
+        let at = self.properties.iter().position(|(key, _)| key == name).unwrap_or(self.properties.len());
+        self.properties.retain(|(key, _)| key != name);
+        let values = values.into_iter().map(|value| (name.to_owned(), value.to_string()));
+        self.properties.splice(at..at, values);
+    }
+
     fn from_node(node: Node) -> Self {
         Self {
             class: node.tag_name().name().to_owned(),
@@ -214,6 +262,24 @@ impl Instance {
                 })
                 .collect(),
         }
+    }
+}
+
+/// An instance as read, written back for a Put like MeshCommander does: AMT wants it whole, and this way we keep what
+/// we don't know of it. Only for instances of plain values, a nested one (a reference) we read as just its texts.
+impl ToXml for Instance {
+    fn serialize<W: fmt::Write + ?Sized>(
+        &self,
+        _field: Option<Id<'_>>,
+        serializer: &mut Serializer<'_, W>,
+    ) -> Result<(), instant_xml::Error> {
+        let uri = resource_uri(&self.class);
+        let element = serializer.write_start(&self.class, &uri, None::<Context<0>>)?;
+        serializer.end_start()?;
+        for (name, value) in &self.properties {
+            value.serialize(Some(Id { ns: &uri, name }), serializer)?;
+        }
+        serializer.write_close(element)
     }
 }
 
@@ -310,6 +376,16 @@ mod tests {
         // go-wsman-messages' Get template, rendered for message ID 0.
         let expected = r#"<?xml version="1.0" encoding="utf-8"?><Envelope xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xmlns:xsd="http://www.w3.org/2001/XMLSchema" xmlns:a="http://schemas.xmlsoap.org/ws/2004/08/addressing" xmlns:w="http://schemas.dmtf.org/wbem/wsman/1/wsman.xsd" xmlns="http://www.w3.org/2003/05/soap-envelope"><Header><a:Action>http://schemas.xmlsoap.org/ws/2004/09/transfer/Get</a:Action><a:To>/wsman</a:To><w:ResourceURI>http://intel.com/wbem/wscim/1/amt-schema/1/AMT_GeneralSettings</w:ResourceURI><a:MessageID>0</a:MessageID><a:ReplyTo><a:Address>http://schemas.xmlsoap.org/ws/2004/08/addressing/role/anonymous</a:Address></a:ReplyTo><w:OperationTimeout>PT60S</w:OperationTimeout></Header><Body></Body></Envelope>"#;
         assert_eq!(meaning(&get("AMT_GeneralSettings", 0)), meaning(expected));
+    }
+
+    #[test]
+    fn picks_an_instance_like_go_wsman_messages() {
+        // go-wsman-messages' header for a method of one instance, from `ethernetport/settings_test.go`.
+        let expected = r#"<Header xmlns="http://www.w3.org/2003/05/soap-envelope" xmlns:a="http://schemas.xmlsoap.org/ws/2004/08/addressing" xmlns:w="http://schemas.dmtf.org/wbem/wsman/1/wsman.xsd"><a:Action>http://intel.com/wbem/wscim/1/amt-schema/1/AMT_SystemPowerScheme/SetPowerScheme</a:Action><a:To>/wsman</a:To><w:ResourceURI>http://intel.com/wbem/wscim/1/amt-schema/1/AMT_SystemPowerScheme</w:ResourceURI><a:MessageID>0</a:MessageID><a:ReplyTo><a:Address>http://schemas.xmlsoap.org/ws/2004/08/addressing/role/anonymous</a:Address></a:ReplyTo><w:OperationTimeout>PT60S</w:OperationTimeout><w:SelectorSet><w:Selector Name="InstanceID">SCHEME 1</w:Selector></w:SelectorSet></Header>"#;
+        let request = invoke(&crate::settings::SetPowerScheme, Some("SCHEME 1"), 0);
+        let doc = parse(&request).unwrap();
+        let header = elements(doc.root_element()).find(|node| node.has_tag_name("Header")).unwrap();
+        assert_eq!(describe(header), meaning(expected));
     }
 
     #[test]

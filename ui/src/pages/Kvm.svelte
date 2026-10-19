@@ -1,41 +1,43 @@
 <!-- The device's screen, keyboard and mouse. Rust decodes, we paint what changed and send what's pressed: keys by
      where they sit, the mouse in the screen's own pixels. Full screen fills the screen with this alone. A screen that
-     goes away (AMT drops it while the device boots, say) keeps its last picture until it's back. Hidden, it stays open
-     and painted. -->
+     goes away (AMT drops it while the device boots, say) keeps its last picture until it's back, the footer saying so
+     meanwhile. Hidden, it stays open and painted. Without consent it stops, until connected again. -->
 <script lang="ts">
-  import { ChevronDown, LoaderCircle, Maximize, Minimize } from "@lucide/svelte";
+  import { ChevronDown, Maximize, Minimize, SendHorizontal } from "@lucide/svelte";
   import { invoke } from "@tauri-apps/api/core";
-  import type { Input } from "../bindings/core";
+  import type { Input, Screens } from "../bindings/core";
   import { stayOpen } from "../redirection";
 
-  let { host, hidden }: { host: string; hidden: boolean } = $props();
+  let {
+    host,
+    hidden,
+    consent,
+    status,
+  }: { host: string; hidden: boolean; consent: () => Promise<boolean>; status: (text: string) => void } = $props();
 
   let canvas: HTMLCanvasElement;
-  let painted = $state(false);
-  /** Why the screen went away, until it's back. */
-  let error = $state("");
   let fullscreen = $state(false);
+  /** Why it stopped, until connected again. */
+  let stopped = $state("");
+  /** The device's screens, to pick one of where there are several. */
+  let screens = $state<Screens>();
 
   // The screen is painted until we leave, each change asked for once the one before is painted.
   $effect(() => {
+    if (stopped) return;
     const target = host;
     const context = canvas.getContext("2d")!;
-    painted = false;
     return stayOpen(
       "kvm",
       target,
       async (open) => {
         canvas.focus();
-        while (open()) {
-          paint(context, await invoke<ArrayBuffer>("kvm_frame", { host: target }));
-          painted = true;
-          error = "";
-        }
+        invoke<Screens>("screens", { host: target }).then((found) => (screens = found), () => {});
+        while (open()) paint(context, await invoke<ArrayBuffer>("kvm_frame", { host: target }));
       },
-      (reason) => {
-        painted = false;
-        error = reason;
-      },
+      status,
+      consent,
+      (reason) => (stopped = reason),
     );
   });
 
@@ -110,8 +112,6 @@
     canvas.focus();
   }
 
-  let typing: HTMLDialogElement;
-  let text = $state("");
 
   function toggleFullscreen() {
     fullscreen = !fullscreen;
@@ -126,13 +126,47 @@
 </script>
 
 <main class={["grid min-h-0 grid-rows-[auto_1fr]", fullscreen ? "fixed inset-0 z-50 bg-canvas" : "px-8 pb-8"]} {hidden}>
-  <div class={["flex items-center gap-2", fullscreen ? "px-3 py-2" : "pt-4 pb-3"]}>
-    {#if !painted}
-      <LoaderCircle class="size-4 flex-none animate-spin text-muted" />
-      <span class="truncate text-muted" title={error}>{error ? `Reconnecting, ${error}` : "Opening the screen…"}</span>
+  <div class={["flex items-center gap-3", fullscreen ? "px-3 py-2" : "pt-4 pb-3"]}>
+    <!-- Text to type on the device, sent as keys on a US keyboard. -->
+    <form
+      class="field flex h-7 min-w-0 flex-1 items-center pr-0 pl-2.5"
+      onsubmit={(event) => {
+        event.preventDefault();
+        const field = event.currentTarget.elements.namedItem("text") as HTMLInputElement;
+        if (field.value) send({ kind: "Text", text: field.value });
+        field.value = "";
+      }}
+    >
+      <input
+        name="text"
+        autocapitalize="off"
+        spellcheck="false"
+        autocomplete="off"
+        placeholder="Text to type on the device"
+        title="Typed as a US keyboard would: its letters, digits and symbols."
+      />
+      <button class="btn-icon size-6 flex-none" title="Type it (Enter)">
+        <SendHorizontal class="size-4" />
+      </button>
+    </form>
+    <!-- Numbered like the OS numbers them, from 1, a choice once AMT says more than one is active. -->
+    {#if screens}
+      <select
+        class="field h-7 px-2"
+        disabled={screens.active.length < 2}
+        title="The device's screen to show"
+        onchange={(event) => {
+          const screen = Number(event.currentTarget.value);
+          invoke("show_screen", { host, screen }).then(() => screens && (screens.shown = screen));
+        }}
+      >
+        {#each screens.active.length ? screens.active : [screens.shown] as screen}
+          <option value={screen} selected={screen === screens.shown}>Screen {screen + 1}</option>
+        {/each}
+      </select>
     {/if}
     <!-- A native menu, looking like our buttons. -->
-    <label class="btn btn-secondary relative ml-auto h-7 px-2.5">
+    <label class="btn btn-secondary relative h-7 px-2.5">
       Send keys <ChevronDown class="size-4" />
       <select
         class="absolute inset-0 opacity-0"
@@ -154,13 +188,13 @@
         <option value="PrintScreen">Print Screen</option>
       </select>
     </label>
-    <button type="button" class="btn btn-secondary h-7 px-2.5" onclick={() => typing.showModal()}>Type text…</button>
     <button type="button" class="btn-icon size-7" title={fullscreen ? "Exit full screen" : "Full screen"} onclick={toggleFullscreen}>
       {#if fullscreen}<Minimize class="size-4" />{:else}<Maximize class="size-4" />{/if}
     </button>
   </div>
 
   <!-- The device's own screen, so its own pointer: ours stays visible on top, as it moves without delay. -->
+  <div class="relative grid min-h-0">
   <canvas
     bind:this={canvas}
     class="size-full min-h-0 bg-black object-contain outline-none"
@@ -177,23 +211,11 @@
     onwheel={wheel}
     oncontextmenu={(event) => event.preventDefault()}
   ></canvas>
-</main>
-
-<dialog
-  bind:this={typing}
-  class="dialog w-96"
-  onclose={() => {
-    if (typing.returnValue === "type") send({ kind: "Text", text });
-    text = "";
-    canvas.focus();
-  }}
->
-  <form method="dialog" class="grid gap-5">
-    <p class="font-medium">Type text on the device</p>
-    <textarea class="field h-32 py-2" bind:value={text} placeholder="A US keyboard's letters, digits and symbols"></textarea>
-    <div class="flex justify-end gap-2">
-      <button value="cancel" class="btn btn-secondary">Cancel</button>
-      <button value="type" class="btn btn-primary" disabled={!text}>Type</button>
+  {#if stopped}
+    <div class="absolute inset-0 grid place-content-center justify-items-center gap-3 bg-black/80 text-white/80">
+      <p>{stopped}</p>
+      <button type="button" class="btn btn-primary" onclick={() => (stopped = "")}>Connect</button>
     </div>
-  </form>
-</dialog>
+  {/if}
+  </div>
+</main>

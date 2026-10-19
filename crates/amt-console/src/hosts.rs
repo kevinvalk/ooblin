@@ -1,12 +1,12 @@
-//! Every device we logged in to, in `hosts.json`: its pinned certificate, the user that worked and whether we remember
-//! its password. Passwords only live in the OS credential store, Digest needs the real thing (or its HA1, which is just
-//! as good to an attacker). Both are keyed by the app's identifier, so the verify build never sees the real ones.
+//! Every device we logged in to, in `hosts.json`: its pinned certificate, name and AMT version, the user that worked and
+//! whether we remember its password. Passwords only live in the OS credential store, Digest needs the real thing (or its
+//! HA1, which is just as good to an attacker). Both are keyed by the app's identifier, so the verify build never sees the real ones.
 
 use std::collections::BTreeMap;
 use std::io;
 use std::path::PathBuf;
 
-use amt_core::Target;
+use amt_core::{Info, Target};
 use keyring::Entry;
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Manager};
@@ -23,15 +23,22 @@ pub struct Hosts {
 #[derive(Serialize, Deserialize)]
 struct Saved {
     pin: String,
+    #[serde(default)]
+    name: String,
+    #[serde(default)]
+    version: String,
     user: String,
     remembered: bool,
 }
 
-/// A device as the webview sees it. `remembered` means we can log in without asking for the password.
+/// A device as the webview sees it. We keep reaching it at the address it was given as, as AMT's own `name` (with its
+/// domain) may well not be in DNS. `remembered` means we can log in without asking for the password.
 #[derive(Serialize, TS)]
 #[ts(export, export_to = "console.ts")]
 pub struct Device {
     pub host: String,
+    pub name: String,
+    pub version: String,
     pub user: String,
     pub remembered: bool,
 }
@@ -57,13 +64,16 @@ impl Hosts {
 
     pub fn device(&self, host: &str) -> Option<Device> {
         let saved = self.hosts.get(host)?;
-        Some(Device { host: host.to_owned(), user: saved.user.clone(), remembered: saved.remembered })
+        let (name, version, user) = (saved.name.clone(), saved.version.clone(), saved.user.clone());
+        Some(Device { host: host.to_owned(), name, version, user, remembered: saved.remembered })
     }
 
-    /// After a successful login: we trust the certificate it used and remember the user that worked.
-    pub fn connected(&mut self, target: &Target, pin: String) -> io::Result<()> {
+    /// After a successful login: we trust the certificate it used and remember its name, version and the user that
+    /// worked.
+    pub fn connected(&mut self, target: &Target, info: &Info) -> io::Result<()> {
         let remembered = self.hosts.get(&target.host).is_some_and(|saved| saved.remembered);
-        self.hosts.insert(target.host.clone(), Saved { pin, user: target.user.clone(), remembered });
+        let (pin, name, version) = (info.fingerprint.clone(), info.name.clone(), info.version.clone());
+        self.hosts.insert(target.host.clone(), Saved { pin, name, version, user: target.user.clone(), remembered });
         self.save()
     }
 

@@ -1,7 +1,8 @@
 use serde::Serialize;
 use ts_rs::TS;
 
-use crate::{Client, Error, Result};
+use crate::settings::name;
+use crate::{Client, RemoteAccess, Result};
 
 #[derive(Debug, Serialize, TS)]
 #[ts(export, export_to = "core.ts")]
@@ -14,8 +15,8 @@ pub struct Info {
     pub control_mode: String,
     /// The pinned certificate's, see `fingerprint`.
     pub fingerprint: String,
-    /// Whether it has KVM at all, AMT's standard manageability doesn't. `Status` says whether it's on.
-    pub has_kvm: bool,
+    /// What it lets us redirect, KVM being `None` where it has none (AMT's standard manageability).
+    pub remote_access: RemoteAccess,
 }
 
 impl Client {
@@ -23,19 +24,13 @@ impl Client {
         let settings = self.get("AMT_GeneralSettings").await?;
         let setup = self.get("AMT_SetupAndConfigurationService").await?;
         let software = self.enumerate("CIM_SoftwareIdentity").await?;
-        // A device without KVM answers with a fault, like for any class it doesn't have.
-        let has_kvm = match self.get("CIM_KVMRedirectionSAP").await {
-            Err(Error::Fault(_) | Error::Http(_)) => false,
-            kvm => kvm.map(|_| true)?,
-        };
 
         let firmware = |id| {
             let component = software.iter().find(|component| component.get("InstanceID") == Some(id))?;
             component.get("VersionString").map(str::to_owned)
         };
-        let (host, domain) = (settings.text("HostName"), settings.text("DomainName"));
         Ok(Info {
-            name: if domain.is_empty() { host } else { format!("{host}.{domain}") },
+            name: name(&settings),
             version: firmware("AMT").unwrap_or_default(),
             build: firmware("Build Number"),
             control_mode: match setup.get("ProvisioningMode") {
@@ -45,7 +40,7 @@ impl Client {
             }
             .to_owned(),
             fingerprint: self.fingerprint().expect("a successful call has pinned a certificate"),
-            has_kvm,
+            remote_access: self.remote_access().await?,
         })
     }
 }

@@ -1,26 +1,17 @@
-use instant_xml::ToXml;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
 use crate::hardware::guid;
-use crate::wsman::Method;
+use crate::wsman::Instance;
 use crate::{Client, Info, PowerState, Result};
 
-/// What the device's own status page shows, and a bit more: the AMT itself, remote access and the network.
+/// What the device's own status page shows: the device, its AMT and its network.
 #[derive(Debug, Serialize, TS)]
 #[ts(export, export_to = "core.ts")]
 pub struct Status {
     pub info: Info,
     pub power: PowerState,
     pub system_id: String,
-    /// Unix seconds.
-    pub clock: Option<u32>,
-    pub redirection: bool,
-    pub serial_over_lan: bool,
-    pub ide_redirection: bool,
-    pub kvm: bool,
-    /// When someone at the device has to read out a code first: "Not required", "For KVM" or "For all redirection".
-    pub user_consent: String,
     pub ports: Vec<Port>,
 }
 
@@ -37,15 +28,43 @@ pub struct Port {
     pub ipv6: Option<Ipv6>,
 }
 
-#[derive(Debug, Serialize, TS)]
+/// The addresses are what AMT uses, which it gets from DHCP, the OS or what was set (`Manual`).
+#[derive(Debug, Serialize, Deserialize, TS)]
 #[ts(export, export_to = "core.ts")]
 pub struct Ipv4 {
-    pub dhcp: bool,
+    pub configuration: Configuration,
     pub address: String,
     pub subnet_mask: String,
     pub gateway: String,
     pub primary_dns: String,
     pub secondary_dns: String,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "core.ts")]
+pub enum Configuration {
+    Dhcp,
+    /// A static address shared with the OS, which AMT takes from it.
+    Os,
+    Manual,
+}
+
+impl Ipv4 {
+    /// From a port's `AMT_EthernetPortSettings`.
+    pub(crate) fn read(settings: &Instance) -> Self {
+        Self {
+            configuration: match (settings.get("DHCPEnabled"), settings.get("IpSyncEnabled")) {
+                (Some("true"), _) => Configuration::Dhcp,
+                (_, Some("true")) => Configuration::Os,
+                _ => Configuration::Manual,
+            },
+            address: settings.text("IPAddress"),
+            subnet_mask: settings.text("SubnetMask"),
+            gateway: settings.text("DefaultGateway"),
+            primary_dns: settings.text("PrimaryDNS"),
+            secondary_dns: settings.text("SecondaryDNS"),
+        }
+    }
 }
 
 #[derive(Debug, Serialize, TS)]
@@ -62,34 +81,32 @@ impl Client {
         let info = self.info().await?;
         let power = self.power().await?;
         let package = self.enumerate("CIM_ComputerSystemPackage").await?;
-        let clock = self.query(&GetLowAccuracyTimeSynch).await?;
         let settings = self.enumerate("AMT_EthernetPortSettings").await?;
         let ports = self.enumerate("CIM_EthernetPort").await?;
         let ipv6 = self.enumerate("IPS_IPv6PortSettings").await?;
-        let redirection = self.get("AMT_RedirectionService").await?;
-        let kvm = self.enumerate("CIM_KVMRedirectionSAP").await?;
-        let opt_in = self.get("IPS_OptInService").await?;
 
         // The three classes list the ports in the same order.
         let ports = settings.iter().zip(&ports).enumerate().map(|(i, (settings, port))| {
             let ipv6 = ipv6.get(i);
             // AMT reports an unset IPv6 address as `::`.
-            let v6 = |name| ipv6.map(|port| port.text(name)).filter(|address| address != "::").unwrap_or_default();
-            let addresses: Vec<_> =
-                ipv6.into_iter().flat_map(|port| port.all("CurrentAddressInfo")).map(str::to_owned).collect();
+            let v6 = |name| {
+                ipv6.map(|port| port.text(name).to_lowercase()).filter(|address| address != "::").unwrap_or_default()
+            };
+            // Each is `FE80::751:CC63:480F:CF6F,0,3`: the address, its kind and its state. We write them lowercase, as
+            // RFC 5952 has it.
+            let addresses: Vec<_> = ipv6
+                .into_iter()
+                .flat_map(|port| port.all("CurrentAddressInfo"))
+                .filter_map(|info| info.split(',').next())
+                .map(str::to_lowercase)
+                .collect();
             Port {
                 wireless: port.text("Description").starts_with("Wireless"),
-                mac: settings.text("MACAddress"),
+                // AMT writes `12-07-14-5f-37-f1`, we write them all the same: `12:07:14:5F:37:F1`.
+                mac: settings.text("MACAddress").to_uppercase().replace('-', ":"),
                 link_up: settings.parse("LinkIsUp").unwrap_or_default(),
                 mbps: port.parse::<u64>("Speed").filter(|&bits| bits > 0).map(|bits| bits / 1_000_000),
-                ipv4: Ipv4 {
-                    dhcp: settings.parse("DHCPEnabled").unwrap_or_default(),
-                    address: settings.text("IPAddress"),
-                    subnet_mask: settings.text("SubnetMask"),
-                    gateway: settings.text("DefaultGateway"),
-                    primary_dns: settings.text("PrimaryDNS"),
-                    secondary_dns: settings.text("SecondaryDNS"),
-                },
+                ipv4: Ipv4::read(settings),
                 ipv6: (!addresses.is_empty()).then(|| Ipv6 {
                     addresses,
                     gateway: v6("CurrentDefaultRouter"),
@@ -99,35 +116,11 @@ impl Client {
             }
         });
 
-        let state = redirection.parse::<u32>("EnabledState").unwrap_or(32768);
         Ok(Status {
             info,
             power: power.state,
             system_id: package.first().map(|package| guid(&package.text("PlatformGUID"))).unwrap_or_default(),
-            clock: clock.parse("Ta0"),
-            redirection: redirection.parse("ListenerEnabled").unwrap_or_default(),
-            serial_over_lan: state & 2 != 0,
-            ide_redirection: state & 1 != 0,
-            // KVM is enabled when its access point is enabled (2) or enabled but idle (6).
-            kvm: kvm.first().is_some_and(|kvm| matches!(kvm.get("EnabledState"), Some("2" | "6"))),
-            user_consent: match opt_in.get("OptInRequired") {
-                Some("0") => "Not required",
-                Some("1") => "For KVM",
-                _ => "For all redirection",
-            }
-            .to_owned(),
             ports: ports.collect(),
         })
     }
-}
-
-const TIME_SYNCHRONIZATION: &str = "http://intel.com/wbem/wscim/1/amt-schema/1/AMT_TimeSynchronizationService";
-
-#[derive(ToXml)]
-#[xml(rename = "GetLowAccuracyTimeSynch_INPUT", ns(TIME_SYNCHRONIZATION))]
-struct GetLowAccuracyTimeSynch;
-
-impl Method for GetLowAccuracyTimeSynch {
-    const URI: &'static str = TIME_SYNCHRONIZATION;
-    const NAME: &'static str = "GetLowAccuracyTimeSynch";
 }

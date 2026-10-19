@@ -20,7 +20,7 @@ use std::sync::{Arc, Mutex};
 
 use amt_core::Connection;
 use md5::{Digest as _, Md5};
-use tokio::net::{TcpListener, ToSocketAddrs};
+use tokio::net::{TcpListener, ToSocketAddrs, UdpSocket};
 use tokio_rustls::TlsAcceptor;
 use tokio_rustls::rustls::ServerConfig;
 use tokio_rustls::rustls::pki_types::{CertificateDer, PrivateKeyDer};
@@ -103,6 +103,31 @@ impl Amt {
     pub fn expire_nonce(&self) {
         *self.nonce.lock().unwrap() = "expired".into();
     }
+}
+
+/// Answers presence pings on `address` (UDP) as the MS-02 does: an acknowledgement, then its pong with the ping's tag.
+/// Only from this machine, nothing else on the network should find us. Says the port it got.
+pub async fn answer_pings(address: impl ToSocketAddrs) -> std::io::Result<u16> {
+    const PONG: [u8; 28] = [
+        0x06, 0, 0, 0x06, 0, 0, 0x01, 0x57, 0x40, 0, 0, 0x10, 0, 0, 0x01, 0x57, 0x42, 0x61, 0, 0x02, 0, 0x20, 0x13, 0,
+        0, 0, 0, 0,
+    ];
+    let socket = UdpSocket::bind(address).await?;
+    let port = socket.local_addr()?.port();
+    tokio::spawn(async move {
+        let mut ping = [0; 12];
+        while let Ok((length, from)) = socket.recv_from(&mut ping).await {
+            if length != 12 || !from.ip().is_loopback() {
+                continue;
+            }
+            let mut pong = PONG;
+            pong[9] = ping[9];
+            for datagram in [&[0x06, 0, ping[2], 0x86][..], &pong] {
+                socket.send_to(datagram, from).await.unwrap();
+            }
+        }
+    });
+    Ok(port)
 }
 
 /// Indexes replies laid out like go-wsman-messages' (`amt/general/get.xml`), by the class each one names.

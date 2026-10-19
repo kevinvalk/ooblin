@@ -1,9 +1,12 @@
 //! Our whole egress surface: nothing outside this module may touch the network (`tests/net_boundary.rs`). AMT 19 is
 //! TLS-only, so there is deliberately no plaintext path. This file speaks WS-Man on 16993, `redirection` the binary
-//! SOL, KVM and IDER sessions on 16995, and both pin the device's certificate the same way.
+//! SOL, KVM and IDER sessions on 16995, and both pin the device's certificate the same way. `discovery` finds devices
+//! with a UDP ping to 623.
 
+mod discovery;
 mod redirection;
 
+pub use discovery::{Found, RMCP_PORT, discover, nearby};
 pub use redirection::{REDIRECTION_PORT, Redirection, Session, Stream, decode_fields, encode_fields};
 
 use std::sync::{Arc, OnceLock};
@@ -76,7 +79,10 @@ impl Connection {
         match status {
             StatusCode::UNAUTHORIZED => Err(Error::Unauthorized),
             status if status.is_success() => Ok(body),
-            status => Err(wsman::fault(&body).map_or(Error::Http(status.as_u16()), Error::Fault)),
+            status => Err(match wsman::fault(&body) {
+                Some(fault) if fault.contains("UnsupportedFeature") => Error::Unsupported,
+                fault => fault.map_or(Error::Http(status.as_u16()), Error::Fault),
+            }),
         }
     }
 

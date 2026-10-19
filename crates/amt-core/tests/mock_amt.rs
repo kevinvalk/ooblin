@@ -5,7 +5,10 @@ use std::sync::Arc;
 use std::sync::atomic::Ordering;
 
 use amt_core::wsman::parse_instance;
-use amt_core::{Client, Error, PowerAction, PowerState, Redirection, Session, Target, fingerprint};
+use amt_core::{
+    Alarm, Availability, Client, Configuration, Consent, DnsUpdate, Error, General, Ipv4, Ipv6Configuration,
+    Ipv6Settings, PowerAction, PowerState, Redirection, RemoteAccess, Session, Target, discover, fingerprint,
+};
 use anyhow::{Context, Result, bail};
 use flate2::{Compress, Compression, FlushCompress};
 use mock_amt::{Amt, Direction, PASSWORD, Transcript, USER};
@@ -82,6 +85,11 @@ async fn reads_and_changes_the_power() -> Result<()> {
     );
     let put = sent().into_iter().find(|input| input.class == "AMT_BootSettingData").context("no boot settings")?;
     assert_eq!(put.get("BIOSSetup"), Some("true"));
+
+    // The BIOS's screen on SOL, booting as usual.
+    client.set_power(PowerAction::ResetToSerial).await?;
+    let put = sent().into_iter().rfind(|input| input.class == "AMT_BootSettingData").context("no boot settings")?;
+    assert_eq!((put.get("UseSOL"), put.get("BIOSSetup")), (Some("true"), Some("false")));
     Ok(())
 }
 
@@ -116,8 +124,6 @@ async fn reads_what_intels_samples_say() -> Result<()> {
     assert_eq!(hardware.processors[0].model, "Intel(R) Core(TM) i7-9850H CPU @ 2.60GHz");
     let module = hardware.memory.iter().find(|module| module.slot == "BANK 2").context("no BANK 2")?;
     assert_eq!(module.part_number, "CT16G4SFD824A.M16FE");
-    let admin = &client.settings().await?.accounts[0];
-    assert!(admin.admin && admin.name == "admin");
     let times: Vec<_> = client.audit_log().await?.into_iter().map(|record| record.time).collect();
     assert!(times.len() == 2 && times[0] > times[1], "newest first: {times:?}");
     Ok(())
@@ -146,6 +152,93 @@ async fn reads_what_the_ms_02_says() -> Result<()> {
     ] {
         assert!(times.is_sorted_by(|a, b| a >= b), "newest first");
     }
+    Ok(())
+}
+
+/// Each change is only what differs, an instance going back whole with it.
+#[tokio::test]
+async fn changes_the_settings() -> Result<()> {
+    let amt = start(&mock_amt::fixture("ms-02")).await;
+    let mut client = client(&amt, PASSWORD, None)?;
+    let settings = client.settings().await?;
+    let sent = || -> Vec<_> {
+        let requests = std::mem::take(&mut *amt.requests.lock().unwrap());
+        requests.iter().filter_map(|request| parse_instance(request).ok()).collect()
+    };
+    sent();
+
+    let access = RemoteAccess { sol: false, consent: Consent::All, ..settings.remote_access };
+    client.set_remote_access(&access).await?;
+    let changes = sent();
+    assert_eq!(changes[0].get("RequestedState"), Some("32769"));
+    assert_eq!((&*changes[1].class, changes[1].get("OptInRequired")), ("IPS_OptInService", Some("4294967295")));
+    assert_eq!(changes.len(), 2, "KVM and the listener stay on");
+
+    let general = General { name: "renamed.example.com".into(), respond_to_ping: false, ..settings.general };
+    client.set_general(&general).await?;
+    let put = sent().pop().context("no Put")?;
+    let name = (put.get("HostName"), put.get("DomainName"));
+    assert_eq!((name, put.get("PingResponseEnabled")), ((Some("renamed"), Some("example.com")), Some("false")));
+    assert_eq!(put.get("DigestRealm"), Some("Digest:FA88D31BAFC44865DC5345817456CFA3"), "kept");
+
+    let active: Vec<_> = settings.power_policies.iter().filter(|policy| policy.active).collect();
+    assert_eq!((&*active[0].id, &*active[0].description), ("SCHEME 1", "ON in S0, ME Wake in S3, S4-5 (AC only)"));
+    client.set_power_policy("SCHEME 0").await?;
+    let request = amt.requests.lock().unwrap().pop().context("no request")?;
+    assert!(request.contains(r#"Name="InstanceID">SCHEME 0<"#), "on the scheme: {request}");
+
+    // Network: a manual address names the port, DHCP takes the addresses out.
+    let ipv4 = Ipv4 { configuration: Configuration::Manual, address: "192.0.2.7".into(), ..settings.network.ipv4 };
+    client.set_ipv4(&ipv4).await?;
+    let request = amt.requests.lock().unwrap().pop().context("no Put")?;
+    assert!(request.contains(r#"Name="InstanceID">Intel(r) AMT Ethernet Port Settings 0<"#), "{request}");
+    let put = parse_instance(&request)?;
+    assert_eq!((put.get("DHCPEnabled"), put.get("IPAddress")), (Some("false"), Some("192.0.2.7")));
+    let available = Availability { asleep: true, ..settings.network.available };
+    client.set_availability(&available).await?;
+    let put = sent().pop().context("no Put")?;
+    assert_eq!((put.all("LinkPolicy").collect::<Vec<_>>(), put.get("IPAddress")), (vec!["1", "14", "16"], None));
+
+    // IPv6 is off on the MS-02: turning it on links it again, with the port and its settings as keys.
+    assert_eq!(settings.network.ipv6.configuration, Ipv6Configuration::Off);
+    let ipv6 = Ipv6Settings { configuration: Ipv6Configuration::Automatic, ..settings.network.ipv6 };
+    client.set_ipv6(&ipv6).await?;
+    let request = amt.requests.lock().unwrap().pop().context("no Put")?;
+    assert!(request.contains(">Intel(r) AMT Ethernet Port 0<") && request.contains(">Intel(r) IPS IPv6 Settings 0<"));
+    assert_eq!(parse_instance(&request)?.get("IsCurrent"), Some("1"), "{request}");
+
+    // Neither recovery nor erase on the MS-02, and only AMT's own certificate, in use and staying.
+    assert_eq!((settings.recovery.one_click, settings.recovery.platform_erase), (None, None));
+    let own = &settings.certificates[0];
+    assert!(own.read_only && own.in_use && own.name == "Intel® AMT self-signed certificate", "{own:?}");
+    assert!(settings.tls.iter().all(|tls| tls.enabled && !tls.mutual) && settings.tls[1].local);
+    client.add_certificate(b"-----BEGIN CERTIFICATE-----\nMIIB\n-----END CERTIFICATE-----\n", true).await?;
+    assert_eq!(sent().pop().context("no add")?.get("CertificateBlob"), Some("MIIB"));
+    client.delete_certificate("Intel(r) AMT Certificate: Handle: 1").await?;
+    let request = amt.requests.lock().unwrap().pop().context("no Delete")?;
+    assert!(request.contains("transfer/Delete") && request.contains(">Intel(r) AMT Certificate: Handle: 1<"));
+
+    let general = General { dns_update: DnsUpdate::Amt, ..client.settings().await?.general };
+    client.set_general(&general).await?;
+    let put = sent().pop().context("no Put")?;
+    assert_eq!((put.get("DDNSUpdateEnabled"), put.get("DDNSUpdateByDHCPServerEnabled")), (Some("true"), Some("false")));
+
+    let alarm = Alarm { name: "Backups".into(), at: 1_800_000_000, every_minutes: 1440, forget: false };
+    client.add_alarm(&alarm).await?;
+    let request = amt.requests.lock().unwrap().pop().context("no alarm")?;
+    assert!(request.contains(">2027-01-15T08:00:00Z<") && request.contains(">P1DT0H0M<"), "{request}");
+    client.delete_alarm("Backups").await?;
+    assert!(amt.requests.lock().unwrap().pop().context("no Delete")?.contains(r#"Name="InstanceID">Backups<"#));
+
+    // The MS-02 was recorded headless, so with no screen active, and shows the first.
+    let screens = client.screens().await?;
+    assert!(screens.active.is_empty() && screens.shown == 0, "{screens:?}");
+    client.show_screen(1).await?;
+    assert_eq!(sent().pop().context("no Put")?.get("DefaultScreen"), Some("1"));
+
+    client.set_clock().await?;
+    let set = sent().pop().context("no time")?;
+    assert_eq!((&*set.class, set.get("Ta0")), ("SetHighAccuracyTimeSynch_INPUT", Some("1792388976")));
     Ok(())
 }
 
@@ -250,14 +343,14 @@ async fn decodes_every_kind_of_zrle_tile() -> Result<()> {
     Ok(())
 }
 
-/// Like Intel's console: KVM on, then the redirection listener, then the session.
+/// What's off stays off: a session needs it turned on in the settings first, and changes nothing.
 #[tokio::test]
-async fn turns_kvm_and_the_listener_on_first() -> Result<()> {
+async fn opens_only_what_is_on() -> Result<()> {
     let fixture = tempfile::tempdir()?;
     std::fs::create_dir(fixture.path().join("wsman"))?;
     for (file, on, off) in [
         ("CIM_KVMRedirectionSAP.Get.xml", "EnabledState>6<", "EnabledState>3<"),
-        ("AMT_RedirectionService.Get.xml", "ListenerEnabled>true<", "ListenerEnabled>false<"),
+        ("AMT_RedirectionService.Get.xml", "ListenerEnabled>true<", "ListenerEnabled>true<"),
         ("IPS_OptInService.Get.xml", "OptInRequired>0<", "OptInRequired>0<"),
     ] {
         let xml = std::fs::read_to_string(mock_amt::fixture("ms-02").join("wsman").join(file))?;
@@ -265,15 +358,33 @@ async fn turns_kvm_and_the_listener_on_first() -> Result<()> {
         std::fs::write(fixture.path().join("wsman").join(file), xml.replace(on, off))?;
     }
     let amt = start(fixture.path()).await;
-    // Without a transcript the session is refused, as on a device where KVM didn't come on.
-    assert!(matches!(client(&amt, PASSWORD, None)?.kvm().await, Err(Error::Protocol(_))));
+    let mut client = client(&amt, PASSWORD, None)?;
+    assert!(matches!(client.kvm().await, Err(Error::Off)));
+    assert!(client.remote_access().await?.sol, "SOL is on");
+    let sent = amt.requests.lock().unwrap().iter().filter_map(|request| parse_instance(request).ok()).count();
+    assert_eq!(sent, 0, "nothing changed");
+    Ok(())
+}
 
+/// Where consent is required for everything, a session waits for the code someone at the device reads out.
+#[tokio::test]
+async fn asks_for_consent() -> Result<()> {
+    let fixture = tempfile::tempdir()?;
+    std::fs::create_dir(fixture.path().join("wsman"))?;
+    for file in ["CIM_KVMRedirectionSAP.Get.xml", "AMT_RedirectionService.Get.xml", "IPS_OptInService.Get.xml"] {
+        let xml = std::fs::read_to_string(mock_amt::fixture("ms-02").join("wsman").join(file))?;
+        let xml = xml.replace("OptInRequired>0<", "OptInRequired>4294967295<");
+        std::fs::write(fixture.path().join("wsman").join(file), xml)?;
+    }
+    let amt = start(fixture.path()).await;
+    let mut client = client(&amt, PASSWORD, None)?;
+    assert!(matches!(client.sol().await, Err(Error::Consent)));
+
+    client.start_consent().await?;
+    client.send_consent(123456).await?;
     let sent: Vec<_> = amt.requests.lock().unwrap().iter().filter_map(|request| parse_instance(request).ok()).collect();
-    let changes: Vec<_> = sent
-        .iter()
-        .map(|input| (&*input.class, input.get("RequestedState").or(input.get("ListenerEnabled"))))
-        .collect();
-    assert_eq!(changes, [("RequestStateChange_INPUT", Some("2")), ("AMT_RedirectionService", Some("true"))]);
+    let inputs: Vec<_> = sent.iter().map(|input| (&*input.class, input.get("OptInCode"))).collect();
+    assert_eq!(inputs, [("StartOptIn_INPUT", None), ("SendOptInCode_INPUT", Some("123456"))]);
     Ok(())
 }
 
@@ -390,5 +501,20 @@ async fn shows_the_ms_02_serial_console() -> Result<()> {
     }
     let text = String::from_utf8(text)?;
     assert!(text.contains("Intel    Virtual CD") && text.contains("USB disconnect"), "{text}");
+    Ok(())
+}
+
+/// The MS-02 answers a presence ping with an acknowledgement and then its pong, which reads as AMT 19.0, configured.
+/// An address in a network and on its own is pinged once, a silent one once more.
+#[tokio::test]
+async fn finds_the_ms_02_by_its_presence_pong() -> Result<()> {
+    let port = mock_amt::answer_pings("127.0.0.1:0").await?;
+    let mut found = Vec::new();
+    discover("127.0.0.1, 127.0.0.0/30", port, |device| found.push(device)).await?;
+    assert_eq!(found, [amt_core::Found { host: "127.0.0.1".into(), version: "19.0".into(), provisioned: true }]);
+
+    for networks in ["127.0.0.1/33", "localhost", "10.0.0.0/15", "10.0.0.0/16 10.1.0.0/16"] {
+        assert!(matches!(discover(networks, port, |_| {}).await, Err(Error::Invalid(_))), "{networks}");
+    }
     Ok(())
 }
