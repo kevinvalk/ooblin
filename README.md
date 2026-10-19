@@ -1,7 +1,7 @@
 # AMT Console
 
-A desktop console for Intel AMT. Power control and hardware inventory today, remote desktop, serial console and ISO
-boot next. No server, no cloud: the app talks to your devices directly, over TLS only, with pinned certificates and
+A desktop console for Intel AMT. Power control, hardware inventory and the device's screen, keyboard and mouse (KVM)
+today, serial console and ISO boot next. No server, no cloud: the app talks to your devices directly, over TLS only, with pinned certificates and
 passwords kept in your OS keychain.
 
 Built with [Tauri](https://tauri.app) for Linux, macOS and Windows.
@@ -33,7 +33,8 @@ devices once and replay them from then on: `mock-amt record <fixture> <host>` as
 the device offers, without changing anything: every WS-Man class it knows, the read-only methods the app uses (clock,
 accounts, event and audit log) and a short serial console, KVM and IDER session, all into `fixtures/<fixture>`.
 `mock-amt run <fixture>` then serves it on 127.0.0.1 as `admin` / `P@ssw0rd`, filling in by the spec what a recording
-can't hold: handshakes, authentication, method results. `cargo test` replays every fixture, so whatever a device once
+can't hold: handshakes, authentication, method results, and a KVM screen that waits for the viewer to ask for each
+update. `cargo test` replays every fixture, so whatever a device once
 told us keeps parsing.
 
 Fixtures are committed, so record a device that has nothing to hide. Serials, addresses and names are scrubbed, but the

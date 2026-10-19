@@ -418,7 +418,7 @@ impl Recording {
         self.listen(Duration::from_secs(3)).await
     }
 
-    /// Start KVM, do the RFB handshake the way MeshCommander does and fetch one full frame in Raw.
+    /// Start KVM, do the RFB handshake the way our client does and fetch one full frame.
     async fn kvm(&mut self) -> Result<(), Error> {
         self.send(&[0x40, 0, 0, 0, 0, 0, 0, 0]).await?;
         self.receive(8).await?;
@@ -434,8 +434,8 @@ impl Recording {
         let (mut width, mut height) = ([init[0], init[1]], [init[2], init[3]]);
         let bytes_per_pixel = usize::from(init[4] / 8);
 
-        // Raw plus the DesktopSize pseudo-encoding, AMT insists on Raw being there.
-        self.send(&[2, 0, 0, 2, 0, 0, 0, 0, 0xFF, 0xFF, 0xFF, 0x21]).await?;
+        // ZRLE, Raw (AMT insists on it) and the DesktopSize pseudo-encoding.
+        self.send(&[2, 0, 0, 3, 0, 0, 0, 16, 0, 0, 0, 0, 0xFF, 0xFF, 0xFF, 0x21]).await?;
         // AMT 19 answers the first request with only its desktop size, so we ask again until pixels arrive.
         for _ in 0..3 {
             self.send(&[&[3, 0, 0, 0, 0, 0], &width[..], &height[..]].concat()).await?;
@@ -449,6 +449,11 @@ impl Recording {
                     0 => {
                         let size = usize::from(u16::from_be_bytes(w)) * usize::from(u16::from_be_bytes(h));
                         self.receive(size * bytes_per_pixel).await?;
+                        pixels = true;
+                    }
+                    16 => {
+                        let len = self.receive(4).await?;
+                        self.receive(u32::from_be_bytes(len.try_into().unwrap()) as usize).await?;
                         pixels = true;
                     }
                     -223 => (width, height) = (w, h),

@@ -1,7 +1,7 @@
 use serde::Serialize;
 use ts_rs::TS;
 
-use crate::{Client, Result};
+use crate::{Client, Error, Result};
 
 #[derive(Debug, Serialize, TS)]
 #[ts(export, export_to = "core.ts")]
@@ -14,6 +14,8 @@ pub struct Info {
     pub control_mode: String,
     /// The pinned certificate's, see `fingerprint`.
     pub fingerprint: String,
+    /// Whether it has KVM at all, AMT's standard manageability doesn't. `Status` says whether it's on.
+    pub has_kvm: bool,
 }
 
 impl Client {
@@ -21,6 +23,11 @@ impl Client {
         let settings = self.get("AMT_GeneralSettings").await?;
         let setup = self.get("AMT_SetupAndConfigurationService").await?;
         let software = self.enumerate("CIM_SoftwareIdentity").await?;
+        // A device without KVM answers with a fault, like for any class it doesn't have.
+        let has_kvm = match self.get("CIM_KVMRedirectionSAP").await {
+            Err(Error::Fault(_) | Error::Http(_)) => false,
+            kvm => kvm.map(|_| true)?,
+        };
 
         let firmware = |id| {
             let component = software.iter().find(|component| component.get("InstanceID") == Some(id))?;
@@ -38,6 +45,7 @@ impl Client {
             }
             .to_owned(),
             fingerprint: self.fingerprint().expect("a successful call has pinned a certificate"),
+            has_kvm,
         })
     }
 }

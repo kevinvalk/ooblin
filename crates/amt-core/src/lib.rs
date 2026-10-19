@@ -5,6 +5,7 @@
 mod client;
 mod hardware;
 mod info;
+mod kvm;
 mod logs;
 mod net;
 mod power;
@@ -15,6 +16,7 @@ pub mod wsman;
 pub use client::Client;
 pub use hardware::{Battery, Bios, Disk, Hardware, Module, Motherboard, Processor, System};
 pub use info::Info;
+pub use kvm::{Input, Kvm};
 pub use logs::{AuditRecord, Event, Severity};
 pub use net::{Connection, Redirection, Session, decode_fields, encode_fields, fingerprint};
 pub use power::{Power, PowerAction, PowerState};
@@ -63,4 +65,10 @@ pub enum Error {
     Fault(String),
     #[error("unexpected response: {0}")]
     Protocol(String),
+}
+
+impl From<std::io::Error> for Error {
+    fn from(error: std::io::Error) -> Self {
+        Self::Transport(error.to_string())
+    }
 }

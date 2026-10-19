@@ -45,7 +45,18 @@ control_mode: string,
 /**
  * The pinned certificate's, see `fingerprint`.
  */
-fingerprint: string, };
+fingerprint: string, 
+/**
+ * Whether it has KVM at all, AMT's standard manageability doesn't. `Status` says whether it's on.
+ */
+has_kvm: boolean, };
+
+/**
+ * What the webview sends: keys by their DOM `code` (where they sit, not what they type), the mouse with the DOM
+ * `buttons` it holds and a notch of `scroll` up (negative) or down (positive), text to type, and letting go of every
+ * key still held, when the screen loses focus say.
+ */
+export type Input = { "kind": "Key", code: string, down: boolean, } | { "kind": "Pointer", x: number, y: number, buttons: number, scroll: number, } | { "kind": "Text", text: string, } | { "kind": "Release" };
 
 export type Ipv4 = { dhcp: boolean, address: string, subnet_mask: string, gateway: string, primary_dns: string, secondary_dns: string, };
 

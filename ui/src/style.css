@@ -110,6 +110,10 @@
     @apply grid size-8 place-items-center rounded-md text-muted hover:bg-hover hover:text-ink;
   }
 
+  .dialog {
+    @apply m-auto rounded-xl border border-line bg-canvas p-5 text-ink shadow-2xl backdrop:bg-black/30;
+  }
+
   .field {
     @apply h-9 rounded-lg border border-line bg-field px-3 select-text focus:border-accent focus:outline-3 focus:outline-accent/30;
   }

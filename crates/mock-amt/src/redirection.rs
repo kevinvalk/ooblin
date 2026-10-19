@@ -1,6 +1,7 @@
 //! The SOL, KVM and IDER sessions on 16995. The session start and Digest over the socket we do by the spec, from
 //! MeshCommander's `amt-redir-ws-0.1.0.js` (Apache-2.0). After that we replay the fixture's transcript for the session in
-//! step with the client, then idle until it hangs up.
+//! step with the client, then idle until it hangs up. A KVM client asks for updates when it likes and sends its input
+//! in between, so there we step by RFB message rather than by byte.
 
 use std::path::{Path, PathBuf};
 
@@ -61,6 +62,10 @@ async fn session<S: AsyncRead + AsyncWrite + Unpin>(mut stream: S, fixture: &Pat
 
     for (direction, data) in transcript.0 {
         match direction {
+            // A recorded SetEncodings or update request waits for the client's next one, its input goes nowhere.
+            Direction::Sent if name == "kvm" && matches!(data[0], 2 | 3) => {
+                while rfb_message(&mut stream).await? != data[0] {}
+            }
             Direction::Sent => stream.read_exact(&mut vec![0; data.len()]).await.map(drop)?,
             Direction::Received => stream.write_all(&data).await?,
         }
@@ -71,4 +76,28 @@ async fn session<S: AsyncRead + AsyncWrite + Unpin>(mut stream: S, fixture: &Pat
 async fn reply<S: AsyncWrite + Unpin>(stream: &mut S, status: u8, data: &[u8]) -> std::io::Result<()> {
     let header = [&[0x14, status, 0, 0, 4][..], &u32::try_from(data.len()).unwrap().to_le_bytes()].concat();
     stream.write_all(&[header.as_slice(), data].concat()).await
+}
+
+/// Reads an RFB client message (RFC 6143 7.5) and says which it was.
+async fn rfb_message<S: AsyncRead + Unpin>(stream: &mut S) -> std::io::Result<u8> {
+    let kind = stream.read_u8().await?;
+    let mut header = [0; 3]; // padding, and SetEncodings' count
+    let len = match kind {
+        0 => 19, // SetPixelFormat
+        2 => {
+            stream.read_exact(&mut header).await?;
+            usize::from(u16::from_be_bytes([header[1], header[2]])) * 4
+        }
+        3 => 9, // FramebufferUpdateRequest
+        4 => 7, // KeyEvent
+        5 => 5, // PointerEvent
+        6 => {
+            // ClientCutText
+            stream.read_exact(&mut header).await?;
+            stream.read_u32().await? as usize
+        }
+        _ => return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, format!("RFB message {kind}"))),
+    };
+    stream.read_exact(&mut vec![0; len]).await?;
+    Ok(kind)
 }

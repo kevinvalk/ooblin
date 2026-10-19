@@ -1,0 +1,472 @@
+//! KVM: the device's screen, keyboard and mouse, over RFB on a redirection session. We follow MeshCommander's
+//! `amt-desktop-0.0.2.js` and Intel's ui-toolkit (both Apache-2.0), RFC 6143 where they leave off, and decode in Rust,
+//! so the webview only paints.
+
+use std::collections::HashMap;
+use std::time::Duration;
+
+use flate2::{Decompress, FlushDecompress};
+use instant_xml::ToXml;
+use serde::Deserialize;
+use tokio::io::{AsyncReadExt, AsyncWriteExt, ReadHalf, WriteHalf};
+use tokio::sync::Mutex;
+use ts_rs::TS;
+
+use crate::net::{Redirection, Session, Stream};
+use crate::wsman::Method;
+use crate::{Client, Error, Result, Target};
+
+/// What the webview sends: keys by their DOM `code` (where they sit, not what they type), the mouse with the DOM
+/// `buttons` it holds and a notch of `scroll` up (negative) or down (positive), text to type, and letting go of every
+/// key still held, when the screen loses focus say.
+#[derive(Debug, Deserialize, TS)]
+#[ts(export, export_to = "core.ts")]
+#[serde(tag = "kind")]
+pub enum Input {
+    Key { code: String, down: bool },
+    Pointer { x: u16, y: u16, buttons: u8, scroll: i8 },
+    Text { text: String },
+    Release,
+}
+
+/// An open KVM session. The screen and what we send go separate ways, so typing never waits for the screen.
+pub struct Kvm {
+    screen: Mutex<Screen>,
+    keyboard: Mutex<Keyboard>,
+}
+
+struct Screen {
+    reader: ReadHalf<Stream>,
+    /// ZRLE is one zlib stream for the whole session.
+    inflater: Decompress,
+    width: u16,
+    height: u16,
+    /// Whether we asked for an update the device hasn't sent yet, and whether the next is for the whole screen.
+    asked: bool,
+    whole: bool,
+}
+
+/// Update requests, keys and the mouse, and the keysym each held key went down as.
+struct Keyboard {
+    writer: WriteHalf<Stream>,
+    held: HashMap<String, u32>,
+}
+
+/// 16-bit RGB565, little-endian: AMT's own pixel format, which MeshCommander and Intel's console keep.
+const RGB565: [u8; 13] = [16, 16, 0, 1, 0, 31, 0, 63, 0, 31, 11, 5, 0];
+
+impl Client {
+    /// Opens the device's screen, turning KVM and the redirection listener on first if they're off, the way Intel's
+    /// console does (`SetFeatures`).
+    pub async fn kvm(&mut self) -> Result<Kvm> {
+        let kvm = self.get("CIM_KVMRedirectionSAP").await?;
+        // Enabled (2) or enabled but idle (6).
+        if !matches!(kvm.get("EnabledState"), Some("2" | "6")) {
+            self.invoke(&RequestStateChange { RequestedState: 2 }).await?;
+        }
+        let redirection = self.get("AMT_RedirectionService").await?;
+        if redirection.get("ListenerEnabled") != Some("true") {
+            let kept = |name| redirection.get(name).unwrap_or_default();
+            let listening = RedirectionService {
+                CreationClassName: kept("CreationClassName"),
+                ElementName: kept("ElementName"),
+                EnabledState: kept("EnabledState"),
+                ListenerEnabled: true,
+                Name: kept("Name"),
+                SystemCreationClassName: kept("SystemCreationClassName"),
+                SystemName: kept("SystemName"),
+            };
+            self.put(REDIRECTION_SERVICE, &listening).await?;
+        }
+        // Like MeshCommander: consent is needed unless it's not required or already given (3) or in use (4).
+        let consent = self.get("IPS_OptInService").await?;
+        if consent.get("OptInRequired") != Some("0") && !matches!(consent.get("OptInState"), Some("3" | "4")) {
+            return Err(Error::Protocol("KVM needs user consent here, which we can't ask for yet".into()));
+        }
+        Kvm::open(&self.target, self.fingerprint()).await
+    }
+}
+
+impl Kvm {
+    async fn open(target: &Target, pin: Option<String>) -> Result<Self> {
+        let mut redirection = Redirection::open(target, pin, Session::Kvm).await?;
+        // AMT starts the KVM data, then RFB: AMT 19 says 4.0 and takes 3.8, no RFB security as the redirection
+        // handshake already authenticated us, a shared screen.
+        redirection.write_all(&[0x40, 0, 0, 0, 0, 0, 0, 0]).await?;
+        redirection.read_exact(8 + 12).await?;
+        redirection.write_all(b"RFB 003.008\n").await?;
+        let types = redirection.read_exact(1).await?[0];
+        redirection.read_exact(types.into()).await?;
+        redirection.write_all(&[1]).await?;
+        if redirection.read_exact(4).await? != [0; 4] {
+            return Err(Error::Protocol("the device refused the KVM session".into()));
+        }
+        redirection.write_all(&[1]).await?;
+        let init = redirection.read_exact(24).await?;
+        redirection.read_exact(u32::from_be_bytes(init[20..24].try_into().unwrap()) as usize).await?; // its name
+        if init[4..17] != RGB565 {
+            return Err(Error::Protocol(format!("a pixel format we don't decode: {:?}", &init[4..17])));
+        }
+        // ZRLE, Raw (AMT insists on it) and the DesktopSize pseudo-encoding.
+        redirection.write_all(&[2, 0, 0, 3, 0, 0, 0, 16, 0, 0, 0, 0, 0xFF, 0xFF, 0xFF, 0x21]).await?;
+
+        let (reader, writer) = redirection.split();
+        let (width, height) = (u16::from_be_bytes([init[0], init[1]]), u16::from_be_bytes([init[2], init[3]]));
+        let screen = Screen { reader, inflater: Decompress::new(true), width, height, asked: false, whole: true };
+        Ok(Self { screen: Mutex::new(screen), keyboard: Mutex::new(Keyboard { writer, held: HashMap::new() }) })
+    }
+
+    /// The next change on screen, the way a canvas takes it: the screen's width and height, then per changed
+    /// rectangle its x, y, width and height and its pixels as RGBA, numbers as little-endian u16s. Just the size if
+    /// nothing changed for a second, so a screen nobody asks for any more lets go of its session soon.
+    pub async fn frame(&self) -> Result<Vec<u8>> {
+        let mut screen = self.screen.lock().await;
+        if !screen.asked {
+            let request = [
+                &[3, u8::from(!screen.whole), 0, 0, 0, 0][..],
+                &screen.width.to_be_bytes(),
+                &screen.height.to_be_bytes(),
+            ];
+            self.keyboard.lock().await.send(&request.concat()).await?;
+            (screen.asked, screen.whole) = (true, false);
+        }
+        let mut frame = vec![0; 4];
+        loop {
+            // Reading a byte gives up nothing when it times out.
+            let mut kind = [0];
+            match tokio::time::timeout(Duration::from_secs(1), screen.reader.read(&mut kind)).await {
+                Err(_) => return Ok(screen.size(frame)),
+                Ok(Ok(0)) => return Err(Error::Transport("the device ended the KVM session".into())),
+                Ok(read) => read?,
+            };
+            match kind[0] {
+                0 => break,
+                2 => {} // the Bell, AMT 19 rings it before its first update
+                1 => {
+                    // SetColourMapEntries, which a true colour screen never needs
+                    let header = screen.read(5).await?;
+                    screen.read(usize::from(u16::from_be_bytes([header[3], header[4]])) * 6).await?;
+                }
+                3 => {
+                    // ServerCutText
+                    let header = screen.read(7).await?;
+                    screen.read(u32::from_be_bytes(header[3..7].try_into().unwrap()) as usize).await?;
+                }
+                other => return Err(Error::Protocol(format!("an RFB message we don't know: {other}"))),
+            }
+        }
+
+        let header = screen.read(3).await?;
+        for _ in 0..u16::from_be_bytes([header[1], header[2]]) {
+            let rect = screen.read(12).await?;
+            let [x, y, width, height] = [0, 2, 4, 6].map(|at| u16::from_be_bytes([rect[at], rect[at + 1]]));
+            match i32::from_be_bytes(rect[8..12].try_into().unwrap()) {
+                // DesktopSize: the screen changed size, the next update covers all of it.
+                -223 => (screen.width, screen.height, screen.whole) = (width, height, true),
+                // Raw and ZRLE: AMT sends at most 64 by 64 at a time, a tile.
+                encoding @ (0 | 16) if (1..=64).contains(&width) && (1..=64).contains(&height) => {
+                    frame.extend([x, y, width, height].iter().flat_map(|value| value.to_le_bytes()));
+                    let pixels = usize::from(width) * usize::from(height);
+                    if encoding == 0 {
+                        frame
+                            .extend(screen.read(pixels * 2).await?.as_chunks().0.iter().flat_map(|&pixel| rgba(pixel)));
+                    } else {
+                        let len = u32::from_be_bytes(screen.read(4).await?.try_into().unwrap());
+                        let data = screen.read(len as usize).await?;
+                        let tile = screen.inflate(&data)?;
+                        zrle(&tile, width.into(), height.into(), &mut frame)
+                            .ok_or_else(|| Error::Protocol("a ZRLE tile we can't decode".into()))?;
+                    }
+                }
+                encoding => return Err(Error::Protocol(format!("a {width} by {height} rectangle in {encoding}"))),
+            }
+        }
+        screen.asked = false;
+        Ok(screen.size(frame))
+    }
+
+    pub async fn input(&self, inputs: Vec<Input>) -> Result<()> {
+        let mut keyboard = self.keyboard.lock().await;
+        for input in inputs {
+            keyboard.input(input).await?;
+        }
+        Ok(())
+    }
+}
+
+impl Screen {
+    async fn read(&mut self, len: usize) -> Result<Vec<u8>> {
+        let mut bytes = vec![0; len];
+        self.reader.read_exact(&mut bytes).await?;
+        Ok(bytes)
+    }
+
+    /// One tile's worth of the zlib stream. A 64 by 64 tile inflates to at most 3 bytes a pixel (RLE, runs of one)
+    /// and its palette, anything more isn't a tile.
+    fn inflate(&mut self, data: &[u8]) -> Result<Vec<u8>> {
+        let mut tile = Vec::with_capacity(64 * 64 * 3 + 512);
+        let before = self.inflater.total_in();
+        let inflated = self.inflater.decompress_vec(data, &mut tile, FlushDecompress::Sync);
+        if inflated.is_err() || self.inflater.total_in() - before != data.len() as u64 {
+            return Err(Error::Protocol("ZRLE data that doesn't inflate to a tile".into()));
+        }
+        Ok(tile)
+    }
+
+    fn size(&self, mut frame: Vec<u8>) -> Vec<u8> {
+        frame[..4].copy_from_slice(&[self.width.to_le_bytes(), self.height.to_le_bytes()].concat());
+        frame
+    }
+}
+
+impl Keyboard {
+    async fn send(&mut self, bytes: &[u8]) -> Result<()> {
+        Ok(self.writer.write_all(bytes).await?)
+    }
+
+    async fn input(&mut self, input: Input) -> Result<()> {
+        match input {
+            Input::Key { code, down: true } => {
+                let shift = self.held.contains_key("ShiftLeft") || self.held.contains_key("ShiftRight");
+                if let Some(keysym) = keysym(&code, shift) {
+                    self.held.insert(code, keysym);
+                    self.send(&key(keysym, true)).await?;
+                }
+            }
+            Input::Key { code, down: false } => {
+                if let Some(keysym) = self.held.remove(&code) {
+                    self.send(&key(keysym, false)).await?;
+                }
+            }
+            Input::Pointer { x, y, buttons, scroll } => {
+                // The DOM's buttons are left, right and middle, RFB's left, middle and right. A notch of the wheel is
+                // a click of button 4 (up) or 5 (down).
+                let buttons = buttons & 1 | (buttons & 2) << 1 | (buttons & 4) >> 1;
+                let (x, y) = (x.to_be_bytes(), y.to_be_bytes());
+                if scroll != 0 {
+                    let notch = buttons | if scroll < 0 { 8 } else { 16 };
+                    self.send(&[5, notch, x[0], x[1], y[0], y[1]]).await?;
+                }
+                self.send(&[5, buttons, x[0], x[1], y[0], y[1]]).await?;
+            }
+            Input::Text { text } => {
+                // A US keyboard's Latin-1 keysyms are the characters, Shift held for the shifted ones. We type at a
+                // person's pace, so the device keeps up.
+                for char in text.chars() {
+                    let (keysym, shift) = match char {
+                        '\n' => (RETURN, false),
+                        '\t' => (TAB, false),
+                        ' '..='~' => {
+                            (u32::from(char), char.is_ascii_uppercase() || r#"~!@#$%^&*()_+{}|:"<>?"#.contains(char))
+                        }
+                        _ => continue,
+                    };
+                    let keys = [key(keysym, true), key(keysym, false)].concat();
+                    self.send(&if shift { [key(SHIFT, true), keys, key(SHIFT, false)].concat() } else { keys }).await?;
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            }
+            Input::Release => {
+                for keysym in std::mem::take(&mut self.held).into_values() {
+                    self.send(&key(keysym, false)).await?;
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+const TAB: u32 = 0xff09;
+const RETURN: u32 = 0xff0d;
+const SHIFT: u32 = 0xffe1;
+
+fn key(keysym: u32, down: bool) -> Vec<u8> {
+    [&[4, u8::from(down), 0, 0][..], &keysym.to_be_bytes()].concat()
+}
+
+/// A key's X11 keysym by its DOM `code`, letters by case. Digits and the punctuation are MeshCommander's and Intel's
+/// console's, the rest X11's own where theirs aren't keysyms (they send Print Screen as a comma).
+fn keysym(code: &str, shift: bool) -> Option<u32> {
+    let char = |prefix| match code.strip_prefix(prefix)?.as_bytes() {
+        &[char] => Some(char),
+        _ => None,
+    };
+    if let Some(letter) = char("Key") {
+        return Some(u32::from(if shift { letter } else { letter.to_ascii_lowercase() }));
+    }
+    if let Some(digit) = char("Digit").or_else(|| char("Numpad")) {
+        return Some(u32::from(digit));
+    }
+    if let Some(n) = code.strip_prefix('F').and_then(|n| n.parse::<u32>().ok()).filter(|n| (1..=12).contains(n)) {
+        return Some(0xffbe + n - 1);
+    }
+    Some(match code {
+        "Space" => 0x20,
+        "Quote" => 0x27,
+        "NumpadMultiply" => 0x2a,
+        "NumpadAdd" => 0x2b,
+        "Comma" => 0x2c,
+        "Minus" | "NumpadSubtract" => 0x2d,
+        "Period" | "NumpadDecimal" => 0x2e,
+        "Slash" | "NumpadDivide" => 0x2f,
+        "Semicolon" => 0x3b,
+        "Equal" => 0x3d,
+        "BracketLeft" => 0x5b,
+        "Backslash" => 0x5c,
+        "BracketRight" => 0x5d,
+        "Backquote" => 0x60,
+        "Backspace" => 0xff08,
+        "Tab" => TAB,
+        "Enter" | "NumpadEnter" => RETURN,
+        "Pause" => 0xff13,
+        "ScrollLock" => 0xff14,
+        "Escape" => 0xff1b,
+        "Home" => 0xff50,
+        "ArrowLeft" => 0xff51,
+        "ArrowUp" => 0xff52,
+        "ArrowRight" => 0xff53,
+        "ArrowDown" => 0xff54,
+        "PageUp" => 0xff55,
+        "PageDown" => 0xff56,
+        "End" => 0xff57,
+        "PrintScreen" => 0xff61,
+        "Insert" => 0xff63,
+        "ContextMenu" => 0xff67,
+        "NumLock" => 0xff7f,
+        "ShiftLeft" => SHIFT,
+        "ShiftRight" => 0xffe2,
+        "ControlLeft" => 0xffe3,
+        "ControlRight" => 0xffe4,
+        "CapsLock" => 0xffe5,
+        "MetaLeft" => 0xffe7,
+        "MetaRight" => 0xffe8,
+        "AltLeft" => 0xffe9,
+        "AltRight" => 0xffea,
+        "Delete" => 0xffff,
+        _ => return None,
+    })
+}
+
+/// A 16-bit pixel as RGBA, each channel stretched to the full byte so white stays white.
+fn rgba(pixel: [u8; 2]) -> [u8; 4] {
+    let pixel = u16::from_le_bytes(pixel);
+    let (r, g, b) = ((pixel >> 11) as u8, (pixel >> 5 & 63) as u8, (pixel & 31) as u8);
+    [r << 3 | r >> 2, g << 2 | g >> 4, b << 3 | b >> 2, 255]
+}
+
+/// A ZRLE tile (RFC 6143 7.7.6) as RGBA, its pixels 16-bit. `None` when the data doesn't add up to the tile.
+fn zrle(mut data: &[u8], width: usize, height: usize, out: &mut Vec<u8>) -> Option<()> {
+    let data = &mut data;
+    let pixel = |data: &mut &[u8]| Some(rgba(data.split_off(..2)?.try_into().ok()?));
+    let end = out.len() + width * height * 4;
+    let kind = *data.split_off_first()?;
+    let colors = match kind {
+        2..=16 => kind,
+        130.. => kind - 128,
+        _ => 0,
+    };
+    let palette: Vec<_> = (0..colors).map(|_| pixel(data)).collect::<Option<_>>()?;
+    // A run is one more than its bytes add up to, a byte of 255 saying another follows.
+    let run = |data: &mut &[u8]| {
+        let mut len = 1;
+        loop {
+            let byte = *data.split_off_first()?;
+            len += usize::from(byte);
+            if byte != 255 {
+                return Some(len);
+            }
+        }
+    };
+    let fill = |out: &mut Vec<u8>, color: [u8; 4], len: usize| {
+        (out.len() + len * 4 <= end).then(|| out.extend(color.repeat(len)))
+    };
+    match kind {
+        0 => (0..width * height).try_for_each(|_| fill(out, pixel(data)?, 1))?,
+        1 => fill(out, pixel(data)?, width * height)?,
+        // Indexes of 1, 2 or 4 bits, each row starting on a byte.
+        2..=16 => {
+            let bits = match colors {
+                2 => 1,
+                3 | 4 => 2,
+                _ => 4,
+            };
+            for _ in 0..height {
+                let row = data.split_off(..(width * bits).div_ceil(8))?;
+                for x in 0..width {
+                    let index = row[x * bits / 8] >> (8 - bits - x * bits % 8) & ((1 << bits) - 1);
+                    fill(out, *palette.get(usize::from(index))?, 1)?;
+                }
+            }
+        }
+        128 => {
+            while out.len() < end {
+                let color = pixel(data)?;
+                fill(out, color, run(data)?)?;
+            }
+        }
+        130.. => {
+            while out.len() < end {
+                let index = *data.split_off_first()?;
+                let len = if index & 128 == 0 { 1 } else { run(data)? };
+                fill(out, *palette.get(usize::from(index & 127))?, len)?;
+            }
+        }
+        _ => return None,
+    }
+    (out.len() == end).then_some(())
+}
+
+// The input and settings below are go-wsman-messages' (`pkg/wsman/cim/kvm`, `amt/redirection`), Copyright Intel
+// Corporation, Apache-2.0.
+
+const KVM_REDIRECTION: &str = "http://schemas.dmtf.org/wbem/wscim/1/cim-schema/2/CIM_KVMRedirectionSAP";
+const REDIRECTION_SERVICE: &str = "http://intel.com/wbem/wscim/1/amt-schema/1/AMT_RedirectionService";
+
+#[derive(ToXml)]
+#[xml(rename = "RequestStateChange_INPUT", ns(KVM_REDIRECTION))]
+struct RequestStateChange {
+    RequestedState: u8,
+}
+
+impl Method for RequestStateChange {
+    const URI: &'static str = KVM_REDIRECTION;
+    const NAME: &'static str = "RequestStateChange";
+}
+
+#[derive(ToXml)]
+#[xml(rename = "AMT_RedirectionService", ns(REDIRECTION_SERVICE))]
+struct RedirectionService<'a> {
+    CreationClassName: &'a str,
+    ElementName: &'a str,
+    EnabledState: &'a str,
+    ListenerEnabled: bool,
+    Name: &'a str,
+    SystemCreationClassName: &'a str,
+    SystemName: &'a str,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::wsman::{self, body_meaning, meaning};
+
+    #[test]
+    fn turns_kvm_on_like_go_wsman_messages() {
+        // From go-wsman-messages' `base_test.go` and `service_test.go`.
+        let expected = r#"<h:RequestStateChange_INPUT xmlns:h="http://schemas.dmtf.org/wbem/wscim/1/cim-schema/2/CIM_KVMRedirectionSAP"><h:RequestedState>2</h:RequestedState></h:RequestStateChange_INPUT>"#;
+        let request = wsman::invoke(&RequestStateChange { RequestedState: 2 }, 0);
+        assert_eq!(body_meaning(&request), meaning(expected));
+
+        let expected = r#"<h:AMT_RedirectionService xmlns:h="http://intel.com/wbem/wscim/1/amt-schema/1/AMT_RedirectionService"><h:CreationClassName>AMT_RedirectionService</h:CreationClassName><h:ElementName>Intel(r) AMT Redirection Service</h:ElementName><h:EnabledState>32771</h:EnabledState><h:ListenerEnabled>true</h:ListenerEnabled><h:Name>Intel(r) AMT Redirection Service</h:Name><h:SystemCreationClassName>CIM_ComputerSystem</h:SystemCreationClassName><h:SystemName>Intel(r) AMT</h:SystemName></h:AMT_RedirectionService>"#;
+        let service = RedirectionService {
+            CreationClassName: "AMT_RedirectionService",
+            ElementName: "Intel(r) AMT Redirection Service",
+            EnabledState: "32771",
+            ListenerEnabled: true,
+            Name: "Intel(r) AMT Redirection Service",
+            SystemCreationClassName: "CIM_ComputerSystem",
+            SystemName: "Intel(r) AMT",
+        };
+        assert_eq!(body_meaning(&wsman::put(REDIRECTION_SERVICE, &service, 0)), meaning(expected));
+    }
+}

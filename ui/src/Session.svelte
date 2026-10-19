@@ -21,6 +21,7 @@
   import AuditLog from "./pages/AuditLog.svelte";
   import EventLog from "./pages/EventLog.svelte";
   import Hardware from "./pages/Hardware.svelte";
+  import Kvm from "./pages/Kvm.svelte";
   import Settings from "./pages/Settings.svelte";
   import Status from "./pages/Status.svelte";
 
@@ -30,7 +31,8 @@
     onlost,
   }: { session: Session; say: (text: string) => void; onlost: (error: CommandError) => void } = $props();
 
-  /** The commands are named after the tabs. Status and the logs change often enough to want a refresh. */
+  /** The commands are named after the tabs that read. Status and the logs change often enough to want a refresh. The
+   * KVM tab is a screen of its own, for devices that have one. */
   const TABS = {
     status: { label: "Status", page: Status, live: true },
     hardware: { label: "Hardware", page: Hardware, live: false },
@@ -38,13 +40,13 @@
     audit_log: { label: "Audit log", page: AuditLog, live: true },
     settings: { label: "Settings", page: Settings, live: false },
   };
-  let tab: keyof typeof TABS = $state("status");
-  let page = $derived(session.pages[tab]);
-  let Page = $derived(TABS[tab].page);
+  let tab = $state<keyof typeof TABS | "kvm">("status");
+  let page = $derived(tab === "kvm" ? undefined : session.pages[tab]);
+  let live = $derived(tab !== "kvm" && TABS[tab].live);
 
   // Whatever is on screen gets read, unless we have it.
   $effect(() => {
-    if (!session.pages[tab]) read();
+    if (tab !== "kvm" && !session.pages[tab]) read();
   });
 
   /** Reads the tab afresh. It starts blank, so a refresh shows it happened, and replaces the page, so whatever the one
@@ -92,12 +94,26 @@
   function keydown(event: KeyboardEvent) {
     if ((event.metaKey || event.ctrlKey) && event.key === "r") {
       event.preventDefault();
-      if (TABS[tab].live) read();
+      if (live) read();
     }
   }
 </script>
 
 <svelte:window onkeydown={keydown} />
+
+{#snippet tabButton(name: typeof tab, label: string, disabled = false)}
+  <button
+    type="button"
+    role="tab"
+    class="-mb-px h-10 border-b-2 border-transparent text-muted enabled:hover:text-ink disabled:opacity-50 aria-selected:border-accent aria-selected:text-ink"
+    aria-selected={name === tab}
+    {disabled}
+    title={disabled ? "This device has no KVM." : undefined}
+    onclick={() => (tab = name)}
+  >
+    {label}
+  </button>
+{/snippet}
 
 {#snippet action(name: PowerAction, label: string, help: string)}
   <button
@@ -152,17 +168,10 @@
 
   <div class="mx-8 flex items-center gap-6 border-b border-line" role="tablist">
     {#each Object.entries(TABS) as [name, { label }]}
-      <button
-        type="button"
-        role="tab"
-        class="-mb-px h-10 border-b-2 border-transparent text-muted hover:text-ink aria-selected:border-accent aria-selected:text-ink"
-        aria-selected={name === tab}
-        onclick={() => (tab = name as keyof typeof TABS)}
-      >
-        {label}
-      </button>
+      {@render tabButton(name as keyof typeof TABS, label)}
     {/each}
-    {#if TABS[tab].live}
+    {@render tabButton("kvm", "KVM", !session.info.has_kvm)}
+    {#if live}
       <span class="ml-auto text-muted">{page?.read ? `Read at ${page.read.toLocaleTimeString()}` : ""}</span>
       <button
         type="button"
@@ -176,25 +185,30 @@
     {/if}
   </div>
 
-  <main class="overflow-y-auto px-8 pb-8 @container [scrollbar-gutter:stable]">
-    <div class="mx-auto grid max-w-5xl gap-12 pt-6" aria-busy={!page?.data && !page?.error}>
-      {#if page?.error}
-        <div class="grid justify-items-center gap-4 py-16 text-center">
-          <p class="text-muted">{page.error}</p>
-          <button type="button" class="btn btn-secondary" onclick={() => read()}>Try again</button>
-        </div>
-      {:else}
-        <!-- Each page knows the shape of its own data. -->
-        <Page data={page?.data as never} />
-      {/if}
-    </div>
-  </main>
+  {#if tab === "kvm"}
+    <Kvm host={session.host} />
+  {:else}
+    {@const Page = TABS[tab].page}
+    <main class="overflow-y-auto px-8 pb-8 @container [scrollbar-gutter:stable]">
+      <div class="mx-auto grid max-w-5xl gap-12 pt-6" aria-busy={!page?.data && !page?.error}>
+        {#if page?.error}
+          <div class="grid justify-items-center gap-4 py-16 text-center">
+            <p class="text-muted">{page.error}</p>
+            <button type="button" class="btn btn-secondary" onclick={() => read()}>Try again</button>
+          </div>
+        {:else}
+          <!-- Each page knows the shape of its own data. -->
+          <Page data={page?.data as never} />
+        {/if}
+      </div>
+    </main>
+  {/if}
 </section>
 
 <dialog
   bind:this={dialog}
   onclose={() => dialog.returnValue === "confirm" && change(confirming.action, confirming.label)}
-  class="m-auto w-80 rounded-xl border border-line bg-canvas p-5 text-ink shadow-2xl backdrop:bg-black/30"
+  class="dialog w-80"
 >
   <form method="dialog" class="grid gap-5">
     <p class="font-medium">{confirming.label} {session.info.name}?</p>

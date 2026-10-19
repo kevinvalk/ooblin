@@ -7,6 +7,7 @@ use std::sync::atomic::Ordering;
 use amt_core::wsman::parse_instance;
 use amt_core::{Client, Error, PowerAction, PowerState, Redirection, Session, Target, fingerprint};
 use anyhow::{Context, Result, bail};
+use flate2::{Compress, Compression, FlushCompress};
 use mock_amt::{Amt, Direction, PASSWORD, Transcript, USER};
 
 async fn start(fixture: &Path) -> Arc<Amt> {
@@ -158,5 +159,121 @@ async fn opens_redirection_sessions_with_digest() -> Result<()> {
     assert_eq!(sol.read_exact(5).await?, b"hello");
     let refused = Redirection::open(&target(&amt, "wrong"), None, Session::Sol).await;
     assert!(matches!(refused, Err(Error::Unauthorized)));
+    Ok(())
+}
+
+/// A frame's rectangles after its size: x, y, width, height and RGBA pixels (see `Kvm::frame`).
+fn rects(frame: &[u8]) -> Vec<(u16, u16, u16, u16, &[u8])> {
+    let u16 = |at: usize| u16::from_le_bytes([frame[at], frame[at + 1]]);
+    let mut rects = Vec::new();
+    let mut at = 4;
+    while at < frame.len() {
+        let (width, height) = (u16(at + 4), u16(at + 6));
+        let len = usize::from(width) * usize::from(height) * 4;
+        rects.push((u16(at), u16(at + 2), width, height, &frame[at + 8..at + 8 + len]));
+        at += 8 + len;
+    }
+    rects
+}
+
+/// As the MS-02 recorded it: AMT 19 first only says its size, then sends the screen in 64 by 64 tiles.
+#[tokio::test]
+async fn shows_the_ms_02_screen() -> Result<()> {
+    let amt = start(&mock_amt::fixture("ms-02")).await;
+    let kvm = client(&amt, PASSWORD, None)?.kvm().await?;
+    let size = [0, 4, 0, 3]; // 1024 by 768
+    assert_eq!(kvm.frame().await?, size);
+    let frame = kvm.frame().await?;
+    assert_eq!(frame[..4], size);
+    let rects = rects(&frame);
+    assert_eq!(rects.iter().map(|&(_, _, w, h, _)| u32::from(w) * u32::from(h)).sum::<u32>(), 1024 * 768);
+    assert_eq!(rects[0].4[..4], [123, 174, 255, 255], "RGB565 0x7d7f");
+    assert_eq!(kvm.frame().await?, size, "nothing changed, so after a second just the size");
+    Ok(())
+}
+
+/// Every kind of ZRLE tile (RFC 6143 7.7.6), all on one zlib stream, on a 3 by 10 screen.
+#[tokio::test]
+async fn decodes_every_kind_of_zrle_tile() -> Result<()> {
+    let [r, g, b] = [0xF800u16, 0x07E0, 0x001F].map(u16::to_le_bytes);
+    let tiles = [
+        ([&[1][..], &r].concat(), [r, r, r, r, r, r]),                     // solid
+        ([&[0][..], &r, &g, &b, &b, &g, &r].concat(), [r, g, b, b, g, r]), // raw
+        ([&[2][..], &r, &b, &[0b010_00000, 0b101_00000]].concat(), [r, b, r, b, r, b]), // a bit each, rows padded
+        ([&[128][..], &r, &[1], &g, &[3]].concat(), [r, r, g, g, g, g]),   // runs
+        ([&[131][..], &r, &g, &b, &[0x80, 2, 0x81, 1, 2]].concat(), [r, r, r, g, g, b]), // runs of a palette
+    ];
+    let mut update = vec![0, 0, 0, tiles.len() as u8];
+    let mut zlib = Compress::new(Compression::default(), true);
+    for (i, (tile, _)) in tiles.iter().enumerate() {
+        let mut data = Vec::with_capacity(1024);
+        zlib.compress_vec(tile, &mut data, FlushCompress::Sync)?;
+        update.extend(
+            [&[0, 0, 0, 2 * i as u8, 0, 3, 0, 2, 0, 0, 0, 16][..], &(data.len() as u32).to_be_bytes(), &data].concat(),
+        );
+    }
+    let init = [0, 3, 0, 10, 16, 16, 0, 1, 0, 31, 0, 63, 0, 31, 11, 5, 0, 0, 0, 0, 0, 0, 0, 0];
+    let fixture = tempfile::tempdir()?;
+    let (sent, received) =
+        (|bytes: &[u8]| (Direction::Sent, bytes.to_vec()), |bytes: &[u8]| (Direction::Received, bytes.to_vec()));
+    Transcript(vec![
+        sent(&[0x40, 0, 0, 0, 0, 0, 0, 0]),
+        received(&[&[0x41, 0, 0, 0, 0, 0, 0, 0][..], b"RFB 004.000\n"].concat()),
+        sent(b"RFB 003.008\n"),
+        received(&[1, 1]),
+        sent(&[1]),
+        received(&[0, 0, 0, 0]),
+        sent(&[1]),
+        received(&init),
+        sent(&[2]), // SetEncodings
+        sent(&[3]), // the update request
+        received(&update),
+    ])
+    .save(&fixture.path().join("kvm.transcript"))?;
+    std::fs::create_dir(fixture.path().join("wsman"))?;
+    for file in ["CIM_KVMRedirectionSAP.Get.xml", "AMT_RedirectionService.Get.xml", "IPS_OptInService.Get.xml"] {
+        std::fs::copy(mock_amt::fixture("ms-02").join("wsman").join(file), fixture.path().join("wsman").join(file))?;
+    }
+
+    let amt = start(fixture.path()).await;
+    let frame = client(&amt, PASSWORD, None)?.kvm().await?.frame().await?;
+    let rects = rects(&frame);
+    assert_eq!((&frame[..4], rects.len()), (&[3, 0, 10, 0][..], tiles.len()));
+    let rgba = |pixel: [u8; 2]| match pixel {
+        pixel if pixel == r => [255, 0, 0, 255],
+        pixel if pixel == g => [0, 255, 0, 255],
+        _ => [0, 0, 255, 255],
+    };
+    for (i, ((_, expected), (x, y, w, h, pixels))) in tiles.iter().zip(rects).enumerate() {
+        assert_eq!((x, y, w, h), (0, 2 * i as u16, 3, 2));
+        assert_eq!(pixels, expected.map(rgba).concat(), "tile {i}");
+    }
+    Ok(())
+}
+
+/// Like Intel's console: KVM on, then the redirection listener, then the session.
+#[tokio::test]
+async fn turns_kvm_and_the_listener_on_first() -> Result<()> {
+    let fixture = tempfile::tempdir()?;
+    std::fs::create_dir(fixture.path().join("wsman"))?;
+    for (file, on, off) in [
+        ("CIM_KVMRedirectionSAP.Get.xml", "EnabledState>6<", "EnabledState>3<"),
+        ("AMT_RedirectionService.Get.xml", "ListenerEnabled>true<", "ListenerEnabled>false<"),
+        ("IPS_OptInService.Get.xml", "OptInRequired>0<", "OptInRequired>0<"),
+    ] {
+        let xml = std::fs::read_to_string(mock_amt::fixture("ms-02").join("wsman").join(file))?;
+        anyhow::ensure!(xml.contains(on), "{file} has no {on}");
+        std::fs::write(fixture.path().join("wsman").join(file), xml.replace(on, off))?;
+    }
+    let amt = start(fixture.path()).await;
+    // Without a transcript the session is refused, as on a device where KVM didn't come on.
+    assert!(matches!(client(&amt, PASSWORD, None)?.kvm().await, Err(Error::Protocol(_))));
+
+    let sent: Vec<_> = amt.requests.lock().unwrap().iter().filter_map(|request| parse_instance(request).ok()).collect();
+    let changes: Vec<_> = sent
+        .iter()
+        .map(|input| (&*input.class, input.get("RequestedState").or(input.get("ListenerEnabled"))))
+        .collect();
+    assert_eq!(changes, [("RequestStateChange_INPUT", Some("2")), ("AMT_RedirectionService", Some("true"))]);
     Ok(())
 }

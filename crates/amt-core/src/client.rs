@@ -7,12 +7,14 @@ use crate::{Error, Result, Target};
 pub struct Client {
     connection: Connection,
     message_id: u32,
+    /// For the redirection sessions, which log in on their own.
+    pub(crate) target: Target,
 }
 
 impl Client {
     /// Connects lazily, the first call does the TLS handshake and checks the certificate against `pin`.
     pub fn new(target: &Target, pin: Option<String>) -> Result<Self> {
-        Ok(Self { connection: Connection::new(target, pin)?, message_id: 0 })
+        Ok(Self { connection: Connection::new(target, pin)?, message_id: 0, target: target.clone() })
     }
 
     /// Known after the first successful call.

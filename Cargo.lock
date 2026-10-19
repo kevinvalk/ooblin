@@ -65,6 +65,7 @@ dependencies = [
  "anyhow",
  "base64 0.23.1",
  "digest_auth",
+ "flate2",
  "instant-xml",
  "jiff",
  "mock-amt",

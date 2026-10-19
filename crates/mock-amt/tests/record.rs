@@ -46,7 +46,7 @@ fn kvm() -> Transcript {
         sent(&[1]),
         received(&init),
         received(b"test"),
-        sent(&[2, 0, 0, 2, 0, 0, 0, 0, 0xFF, 0xFF, 0xFF, 0x21]),
+        sent(&[2, 0, 0, 3, 0, 0, 0, 16, 0, 0, 0, 0, 0xFF, 0xFF, 0xFF, 0x21]),
         sent(&[3, 0, 0, 0, 0, 0, 0, 2, 0, 1]),
         received(&[2]), // AMT 19 rings the Bell, then only tells its desktop size
         received(&[0]),

@@ -38,4 +38,4 @@ Everything is `text-sm` (14px) unless it's a title. Sentence case, never upperca
 - Buttons are `btn` with `btn-primary` (the one main action), `btn-secondary` or `btn-danger`, 32px high.
 - Icons are 16px Lucide icons, icon-only buttons are `btn-icon` and have a `title`.
 - Explanations go in a native `title` tooltip, not in the layout.
-- Anything that can lose work asks first.
+- Anything that can lose work asks first, in a `<dialog class="dialog">`, as do small forms (typing text on KVM).

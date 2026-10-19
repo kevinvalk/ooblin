@@ -6,7 +6,7 @@ use std::time::Duration;
 
 use digest_auth::{AuthContext, Charset, Qop, WwwAuthenticateHeader};
 use rustls::pki_types::ServerName;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::{AsyncReadExt, AsyncWriteExt, ReadHalf, WriteHalf};
 use tokio::net::TcpStream;
 use tokio_rustls::TlsConnector;
 use tokio_rustls::client::TlsStream;
@@ -38,8 +38,10 @@ impl Session {
 
 /// An authenticated redirection session, ready for the session's own protocol.
 pub struct Redirection {
-    stream: TlsStream<TcpStream>,
+    stream: Stream,
 }
+
+pub type Stream = TlsStream<TcpStream>;
 
 impl Redirection {
     pub async fn open(target: &Target, pin: Option<String>, session: Session) -> Result<Self> {
@@ -47,13 +49,12 @@ impl Redirection {
         let address = (target.host.as_str(), target.redirection_port);
         let tcp = tokio::time::timeout(Duration::from_secs(10), TcpStream::connect(address))
             .await
-            .map_err(|_| Error::Transport(format!("connecting to {}:{} timed out", address.0, address.1)))?
-            .map_err(io)?;
+            .map_err(|_| Error::Transport(format!("connecting to {}:{} timed out", address.0, address.1)))??;
         let name = ServerName::try_from(target.host.clone()).map_err(|error| Error::Transport(error.to_string()))?;
         let stream = TlsConnector::from(std::sync::Arc::new(pin.tls()))
             .connect(name, tcp)
             .await
-            .map_err(|error| pin.mismatch().unwrap_or_else(|| io(error)))?;
+            .map_err(|error| pin.mismatch().unwrap_or_else(|| error.into()))?;
 
         let mut redirection = Self { stream };
         redirection.handshake(target, session).await?;
@@ -61,17 +62,22 @@ impl Redirection {
     }
 
     pub async fn read(&mut self, buf: &mut [u8]) -> Result<usize> {
-        self.stream.read(buf).await.map_err(io)
+        Ok(self.stream.read(buf).await?)
     }
 
     pub async fn read_exact(&mut self, len: usize) -> Result<Vec<u8>> {
         let mut buf = vec![0; len];
-        self.stream.read_exact(&mut buf).await.map_err(io)?;
+        self.stream.read_exact(&mut buf).await?;
         Ok(buf)
     }
 
     pub async fn write_all(&mut self, bytes: &[u8]) -> Result<()> {
-        self.stream.write_all(bytes).await.map_err(io)
+        Ok(self.stream.write_all(bytes).await?)
+    }
+
+    /// Its two directions, to read and write at once.
+    pub fn split(self) -> (ReadHalf<Stream>, WriteHalf<Stream>) {
+        tokio::io::split(self.stream)
     }
 
     async fn handshake(&mut self, target: &Target, session: Session) -> Result<()> {
@@ -146,8 +152,4 @@ pub fn decode_fields(mut data: &[u8]) -> Vec<String> {
         data = &rest[len..];
     }
     fields
-}
-
-fn io(error: std::io::Error) -> Error {
-    Error::Transport(error.to_string())
 }

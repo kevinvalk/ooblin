@@ -4,7 +4,7 @@
 
 mod redirection;
 
-pub use redirection::{REDIRECTION_PORT, Redirection, Session, decode_fields, encode_fields};
+pub use redirection::{REDIRECTION_PORT, Redirection, Session, Stream, decode_fields, encode_fields};
 
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
