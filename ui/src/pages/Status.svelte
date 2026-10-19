@@ -36,7 +36,7 @@
 {#each data?.ports ?? [undefined] as port (port?.mac)}
   <section>
     <h2>{port?.wireless ? "Wireless network" : "Wired network"}</h2>
-    <div class="grid gap-x-4 gap-y-6 @3xl:grid-cols-2">
+    <div class="cards">
       <div class="@3xl:col-span-2">
         <h3>Link</h3>
         <dl class="card">

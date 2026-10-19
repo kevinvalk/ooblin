@@ -295,8 +295,9 @@
 {/snippet}
 
 <!-- What the footer says of it while it's on screen: what its screen and serial console wait for, how large its screen
-     is, and its disk image as the device reads it, like a defragmenter's map: its stretches fade for as long as reading
-     all of it at the top speed would take, so a whole read leaves a trail across them. -->
+     is, and its disk image as the device reads it: how fast, from red to green at the top speed, and like a
+     defragmenter's map which stretches, fading for as long as reading all of it at the top speed would take, so a whole
+     read leaves a trail across them. -->
 {#snippet status()}
   {@const opening = waiting.kvm || waiting.sol}
   {#if opening}
@@ -311,18 +312,29 @@
       </span>
     {/if}
     {#if image}
+      {@const speed = Math.min(image.rate / TOP, 1)}
       <div
         class="flex gap-0.75"
-        style:--speed={Math.min(image.rate / TOP, 1)}
-        style:--decay="{image.size / TOP}s"
         title="Disk read {(image.rate / 1e6).toFixed(2)} MB/s which top out at about {TOP /
           1e6} MB/s as each read goes through a small management engine."
       >
-        <div class="disk-speed"></div>
-        <div class="disk-map">
+        <div class="flex w-1 items-end outline outline-line">
+          <div
+            class="w-full transition-[height] duration-1000 ease-linear"
+            style:height="{speed * 100}%"
+            style:background-color="hsl({speed * 120} 80% 45%)"
+          ></div>
+        </div>
+        <div
+          class="grid grid-flow-col grid-rows-4 gap-px"
+          style:--decay="{image.size / TOP}s"
+        >
           {#each image.cells as read}
             <!-- Each read restarts its animation, which shown again goes on where it is by now. -->
-            {#key read}<div data-read={read || undefined} style:animation-delay="{read - Date.now()}ms"></div>{/key}
+            {#key read}<div
+                class={["size-1", read ? "animate-[read_var(--decay)_linear_forwards] bg-accent" : "bg-line"]}
+                style:animation-delay="{read - Date.now()}ms"
+              ></div>{/key}
           {/each}
         </div>
       </div>
@@ -433,7 +445,7 @@
   {/if}
   {#if tab !== "kvm" && tab !== "sol"}
     {@const Page = TABS[tab].page}
-    <main class="overflow-y-auto px-8 pb-8 @container [scrollbar-gutter:stable]">
+    <main class="overflow-y-auto px-8 pb-8 @container scrollbar-gutter-stable">
       <div class="mx-auto grid max-w-5xl gap-12 pt-6" aria-busy={!page?.data && !page?.error}>
         {#if page?.error}
           <div class="grid justify-items-center gap-4 py-16 text-center">
@@ -456,7 +468,7 @@
       <button value="" class="btn btn-secondary">Cancel</button>
       {#each asking.answers as answer, i (answer)}
         {@const last = i === asking.answers.length - 1}
-        <button value={answer} class={["btn", !last ? "btn-secondary" : asking.safe ? "btn-primary" : "btn-danger"]}>
+        <button value={answer} class={["btn", !last ? "btn-secondary" : asking.safe ? "btn-primary" : "bg-danger text-white hover:bg-danger/90"]}>
           {answer}
         </button>
       {/each}

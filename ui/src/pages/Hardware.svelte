@@ -46,7 +46,7 @@
 
 <section>
   <h2>Processors</h2>
-  <div class="grid gap-x-4 gap-y-6 @3xl:grid-cols-2">
+  <div class="cards">
     {#each data?.processors ?? [undefined] as processor, i}
       <div>
         {#if data && data.processors.length > 1}<h3>Processor {i}</h3>{/if}
@@ -67,7 +67,7 @@
 
 <section>
   <h2>Memory</h2>
-  <div class="grid gap-x-4 gap-y-6 @3xl:grid-cols-2">
+  <div class="cards">
     {#each data?.memory ?? [undefined] as module}
       <div>
         <h3>{module?.slot}</h3>
@@ -88,7 +88,7 @@
 
 <section>
   <h2>Disks</h2>
-  <div class="grid gap-x-4 gap-y-6 @3xl:grid-cols-2">
+  <div class="cards">
     {#each data?.disks ?? [undefined] as disk, i}
       <div>
         {#if data && data.disks.length > 1}<h3>Disk {i}</h3>{/if}
@@ -105,7 +105,7 @@
 <!-- The device lists no battery when it has none. -->
 <section>
   <h2>Battery</h2>
-  <div class="grid gap-x-4 gap-y-6 @3xl:grid-cols-2">
+  <div class="cards">
     {#each data?.batteries ?? [] as battery, i}
       <div>
         {#if data && data.batteries.length > 1}<h3>Battery {i}</h3>{/if}

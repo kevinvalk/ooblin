@@ -22,10 +22,11 @@ sidebar's device names and the footer included. MAC addresses are written `12:07
 ## Layout
 
 - A page is sections 48px apart (`gap-12`), at most `max-w-5xl` wide, 32px from the window's edges (`px-8`).
-- A section is a title and one card, or a grid of titled cards when there are several of a thing (processors, memory,
-  IPv4 and IPv6). Cards that belong to all of them (a port's link) span the grid.
+- A section is a title and one card, or a grid of titled cards (`cards`) when there are several of a thing (processors,
+  memory, IPv4 and IPv6). Cards that belong to all of them (a port's link) span the grid.
 - A card is `<dl class="card">` with a `<div><dt>…</dt><dd>…</dd></div>` per row: `rounded-xl`, hairline border and
-  dividers, rows `px-4 py-2.5`. Headings, cards and tables are styled once in `src/style.css`.
+  dividers, rows `px-4 py-2.5`. Headings, cards, table cells and dialogs are styled once in `src/style.css`, what's
+  used once or twice is styled where it's used.
 - Tables span the page, their header stays in view.
 
 ## States
@@ -44,7 +45,8 @@ sidebar's device names and the footer included. MAC addresses are written `12:07
 
 ## Controls
 
-- Buttons are `btn` with `btn-primary` (the one main action), `btn-secondary` or `btn-danger`, 32px high.
+- Buttons are `btn` with `btn-primary` (the one main action), `btn-secondary`, or `bg-danger text-white` for what can't
+  be undone, 32px high.
 - Icons are 16px Lucide icons, icon-only buttons are `btn-icon` and have a `title`.
 - Explanations go in a native `title` tooltip, not in the layout.
 - Settings that can change are a `<form class="card">` of `label` and field rows (checkboxes, `.field` inputs and

@@ -83,13 +83,7 @@ against the MS-02 (AMT 19). Partly: some of it, see the notes.
 
 ## TODO
 
-- [ ] Show which parts of a disk image the device reads: a strip of cells in the footer, one per stretch of the image, lit as it's read and fading after. Maybe also show a way on max speed IDE-R supports which in theory according intel caps out to 2 MB/s
 - [ ] Have an optional built in PXE boot system where our tool hosts the PXE server directly.
-- [ ] The features above, starting with: the other boot options (One-Click Recovery's boots among them), exporting and
-      clearing the logs, TLS's certificate, platform erase itself. Wi-Fi last.
-- [ ] Say in the README that ⌘Tab and other system shortcuts can't reach the device.
-- [ ] Give the verify build its own target directory: it shares `target/debug/amt-console` and port 9223 with
-      `cargo tauri dev`, so one can't run while the other does.
-- [ ] CI: tests, clippy, the UI build, and releases with tauri-action (as `cargo release` builds them), SHA-256 sums and a
-      provenance attestation.
+- [ ] The features above, starting with: the other boot options (One-Click Recovery's boots among them), exporting and clearing the logs, TLS's certificate, platform erase itself. Wi-Fi last.
+- [ ] CI: tests, clippy, the UI build, and releases with tauri-action (as `cargo release` builds them), SHA-256 sums and a provenance attestation.
 - [ ] Build from a fresh clone on macOS, Linux and Windows.

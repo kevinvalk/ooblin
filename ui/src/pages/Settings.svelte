@@ -343,7 +343,7 @@
 
 <section>
   <h2>Network</h2>
-  <div class="grid gap-x-4 gap-y-6 @3xl:grid-cols-2">
+  <div class="cards">
     {#snippet reachable()}
       {@render check("ping", "Respond to ping", data?.general.respond_to_ping)}
       <div title="When AMT is on the network: with the device on, or asleep or off, and on mains power or a battery.">
@@ -542,7 +542,7 @@
 
 <section>
   <h2>Security</h2>
-  <div class="grid gap-x-4 gap-y-6 @3xl:grid-cols-2">
+  <div class="cards">
     {#each data?.tls ?? [undefined] as tls (tls?.local)}
       <div title="As AMT was set up: changing it would lock us out, or isn't supported.">
         <h3>{tls && (tls.local ? "TLS on the device" : "TLS on the network")}</h3>

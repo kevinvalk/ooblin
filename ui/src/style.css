@@ -2,177 +2,158 @@
 
 /* macOS-like colors, the dark ones follow the system. */
 @theme {
-  --font-sans: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
-  --font-mono: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
-  --color-canvas: #fff;
-  --color-pane: #f5f5f7;
-  --color-field: #fff;
-  --color-line: rgb(0 0 0 / 0.1);
-  --color-hover: rgb(0 0 0 / 0.05);
-  --color-ink: #1d1d1f;
-  --color-muted: #6e6e73;
-  --color-accent: #0a84ff;
-  --color-danger: #d70015;
-  --color-on: #30d158;
-  --color-asleep: #ff9f0a;
+    --color-canvas: #fff;
+    --color-pane: #f5f5f7;
+    --color-field: #fff;
+    --color-line: rgb(0 0 0 / 0.1);
+    --color-hover: rgb(0 0 0 / 0.05);
+    --color-ink: #1d1d1f;
+    --color-muted: #6e6e73;
+    --color-accent: #0a84ff;
+    --color-danger: #d70015;
+    --color-on: #30d158;
+    --color-asleep: #ff9f0a;
 }
 
 @media (prefers-color-scheme: dark) {
-  :root {
-    --color-canvas: #1e1e20;
-    --color-pane: #262628;
-    --color-field: #2c2c2e;
-    --color-line: rgb(255 255 255 / 0.1);
-    --color-hover: rgb(255 255 255 / 0.06);
-    --color-ink: #f5f5f7;
-    --color-muted: #98989d;
-    --color-danger: #ff453a;
-  }
+    :root {
+        --color-canvas: #1e1e20;
+        --color-pane: #262628;
+        --color-field: #2c2c2e;
+        --color-line: rgb(255 255 255 / 0.1);
+        --color-hover: rgb(255 255 255 / 0.06);
+        --color-ink: #f5f5f7;
+        --color-muted: #98989d;
+        --color-danger: #ff453a;
+    }
+}
+
+/* A stretch of a disk image the device just read, fading to merely read, see Session's footer. */
+@keyframes read {
+    to {
+        opacity: 0.35;
+    }
 }
 
 /* Only what can be used reacts to the pointer, for every `hover:`. */
 @custom-variant hover {
-  @media (hover: hover) {
-    &:hover:not(:disabled, [aria-disabled="true"]) {
-      @slot;
+    @media (hover: hover) {
+        &:hover:not(:disabled, [aria-disabled="true"]) {
+            @slot;
+        }
     }
-  }
 }
 
 @layer base {
-  :root {
-    color-scheme: light dark;
-    /* The window stays put when scrolled past its edge, sideways too, it's not a page. */
-    overscroll-behavior: none;
-    @apply bg-canvas font-sans text-sm text-ink antialiased select-none;
-  }
+    :root {
+        color-scheme: light dark;
+        /* The window stays put when scrolled past its edge, sideways too, it's not a page. */
+        overscroll-behavior: none;
+    }
 
-  [inert] {
-    @apply opacity-60;
-  }
+    body {
+        @apply bg-canvas text-sm text-ink antialiased select-none;
+    }
 
-  /* Section titles stay in view while their section scrolls by, card titles name one of several (ui/DESIGN.md). */
-  h2 {
-    @apply sticky top-0 z-10 bg-canvas pt-1 pb-3 text-base font-semibold;
-  }
+    [inert] {
+        @apply opacity-60;
+    }
 
-  h3 {
-    @apply mb-2 font-medium text-muted;
-  }
+    /* Section titles stay in view while their section scrolls by, card titles name one of several (ui/DESIGN.md). */
+    h2 {
+        @apply sticky top-0 z-10 bg-canvas pt-1 pb-3 text-base font-semibold;
+    }
 
-  th {
-    @apply sticky top-0 border-b border-line bg-canvas py-2.5 pr-4 text-left font-medium text-muted;
-  }
+    h3 {
+        @apply mb-2 font-medium text-muted;
+    }
 
-  td {
-    @apply border-b border-line py-2.5 pr-4 align-top wrap-anywhere select-text first:whitespace-nowrap;
-  }
+    th {
+        @apply sticky top-0 border-b border-line bg-canvas py-2.5 pr-4 text-left font-medium text-muted;
+    }
 
-  dialog {
-    @apply m-auto w-96 rounded-xl border border-line bg-canvas p-5 text-ink shadow-2xl backdrop:bg-black/30;
-  }
+    td {
+        @apply border-b border-line py-2.5 pr-4 align-top wrap-anywhere select-text first:whitespace-nowrap;
+    }
+
+    dialog {
+        @apply m-auto w-96 rounded-xl border border-line bg-canvas p-5 text-ink shadow-2xl backdrop:bg-black/30;
+    }
 }
 
 @layer components {
-  /* Rows of label and value, or of label and field in a form. */
-  .card {
-    @apply divide-y divide-line rounded-xl border border-line bg-pane/50;
+    /* Rows of label and value, or of label and field in a form. */
+    .card {
+        @apply divide-y divide-line rounded-xl border border-line bg-pane/50;
 
-    & > div {
-      @apply grid grid-cols-[11rem_1fr] items-baseline gap-4 px-4 py-2.5;
+        & > div {
+            @apply grid grid-cols-[11rem_1fr] items-baseline gap-4 px-4 py-2.5;
+        }
+
+        /* A row's label, not the labels of the choices in it. */
+        & > div > :is(dt, label) {
+            @apply text-muted;
+        }
+
+        & .field {
+            @apply -my-1 h-7 max-w-96 px-2;
+        }
+
+        & [type="checkbox"] {
+            @apply size-4 accent-accent disabled:opacity-40;
+        }
+
+        & dd {
+            @apply wrap-anywhere whitespace-pre-line select-text;
+        }
     }
 
-    /* A row's label, not the labels of the choices in it. */
-    & > div > :is(dt, label) {
-      @apply text-muted;
+    /* Several cards of a thing side by side, where there's room. */
+    .cards {
+        @apply grid gap-x-4 gap-y-6 @3xl:grid-cols-2;
     }
 
-    & .field {
-      @apply -my-1 h-7 max-w-96 px-2;
+    /* What the device left out reads as a dash, what's still loading (in an `aria-busy` page) as a gray bar. */
+    :is(dt, dd, td, h3):empty::after {
+        @apply text-muted content-['—'];
     }
 
-    & [type="checkbox"] {
-      @apply size-4 accent-accent disabled:opacity-40;
+    [aria-busy="true"] :is(dt, dd, td, h3):empty::after {
+        @apply inline-block h-3.5 w-36 max-w-full animate-pulse rounded bg-line align-middle content-[''];
     }
 
-    & dd {
-      @apply wrap-anywhere whitespace-pre-line select-text;
+    /* A power state, named by `data-power`. */
+    .dot {
+        @apply size-2.5 flex-none rounded-full bg-muted data-[power=Asleep]:bg-asleep data-[power=Hibernating]:bg-asleep data-[power=On]:bg-on;
     }
-  }
 
-  /* What the device left out reads as a dash, what's still loading (in an `aria-busy` page) as a gray bar. */
-  :is(dt, dd, td, h3):empty::after {
-    @apply text-muted content-['—'];
-  }
-
-  [aria-busy="true"] :is(dt, dd, td, h3):empty::after {
-    @apply inline-block h-3.5 w-36 max-w-full animate-pulse rounded bg-line align-middle content-[''];
-  }
-
-  /* A power state, named by `data-power`. */
-  .dot {
-    @apply size-2.5 flex-none rounded-full bg-muted data-[power=Asleep]:bg-asleep data-[power=Hibernating]:bg-asleep data-[power=On]:bg-on;
-  }
-
-  /* A disk image as the device reads it: its stretches, lit as they're read (`data-read`) and fading for `--decay`, and
-     how fast, from red to green as `--speed` goes from 0 to 1. In whole pixels, as our rem is 14px. */
-  .disk-map {
-    @apply grid auto-cols-[4px] grid-flow-col grid-rows-[repeat(4,4px)] gap-px;
-    > * {
-      @apply bg-line;
+    .btn {
+        @apply inline-flex h-8 items-center justify-center gap-2 rounded-lg px-3.5 font-medium whitespace-nowrap;
     }
-    > [data-read] {
-      @apply bg-accent;
-      animation: read var(--decay) linear forwards;
+
+    /* What can't be used now looks it, a button or a tab that says why when clicked (`aria-disabled`) alike. */
+    :is(.btn, .btn-icon, [role="tab"]):is(:disabled, [aria-disabled="true"]) {
+        @apply opacity-50;
     }
-  }
 
-  @keyframes read {
-    to {
-      opacity: 0.35;
+    .btn-primary {
+        @apply bg-accent text-white hover:bg-accent/90;
     }
-  }
 
-  .disk-speed {
-    @apply flex w-[4px] items-end outline outline-line;
-    &::after {
-      @apply w-full transition-[height] duration-1000 ease-linear content-[''];
-      height: calc(var(--speed) * 100%);
-      background-color: hsl(calc(var(--speed) * 120) 80% 45%);
+    .btn-secondary {
+        @apply border border-line bg-field hover:bg-hover;
     }
-  }
 
-  .btn {
-    @apply inline-flex h-8 items-center justify-center gap-2 rounded-lg px-3.5 font-medium whitespace-nowrap;
-  }
-
-  /* What can't be used now looks it, a button or a tab that says why when clicked (`aria-disabled`) alike. */
-  :is(.btn, .btn-icon, [role="tab"]):is(:disabled, [aria-disabled="true"]) {
-    @apply opacity-50;
-  }
-
-  .btn-primary {
-    @apply bg-accent text-white hover:bg-accent/90;
-  }
-
-  .btn-secondary {
-    @apply border border-line bg-field hover:bg-hover;
-  }
-
-  .btn-danger {
-    @apply bg-danger text-white hover:bg-danger/90;
-  }
-
-  .btn-icon {
-    @apply grid size-8 place-items-center rounded-md text-muted hover:bg-hover hover:text-ink;
-  }
-
-  /* An input, or a group of one with its button (the focus taking them both in), which then has no look of its own. */
-  .field {
-    @apply h-9 rounded-lg border border-line bg-field px-3 select-text outline-none focus-within:border-accent/60 disabled:bg-transparent disabled:text-muted;
-
-    & > input {
-      @apply min-w-0 flex-1 bg-transparent outline-none;
+    .btn-icon {
+        @apply grid size-8 place-items-center rounded-md text-muted hover:bg-hover hover:text-ink;
     }
-  }
+
+    /* An input, or a group of one with its button (the focus taking them both in), which then has no look of its own. */
+    .field {
+        @apply h-9 rounded-lg border border-line bg-field px-3 select-text outline-none focus-within:border-accent/60 disabled:bg-transparent disabled:text-muted;
+
+        & > input {
+            @apply min-w-0 flex-1 bg-transparent outline-none;
+        }
+    }
 }

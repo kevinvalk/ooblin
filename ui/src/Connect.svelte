@@ -75,7 +75,7 @@
       </dl>
       <button
         type="button"
-        class="btn btn-danger justify-self-start"
+        class="btn justify-self-start bg-danger text-white hover:bg-danger/90"
         onclick={() => ontrust(login.host, error.actual).then(() => onsubmit(login))}
       >
         Trust the new certificate
