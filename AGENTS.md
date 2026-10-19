@@ -13,9 +13,9 @@ the UI puts it in words.
   `npm run build --prefix ui` typechecks the UI. Only `crates/amt-core/src/net/` may touch the network, tests enforce it.
 - `anyhow` and `?` outside the library. Spec and integration tests (fixtures, the running app) over unit tests.
 - Comments only where a reader would otherwise get it wrong: terse, "we" voice, lines up to ~120 chars.
-- Not sure how the protocol, firmware or a library behaves? Ask, don't guess.
-- `AMT Console PoC Handover.md` is an unchecked guideline: use it for protocol facts. Where it disagrees, this file and
-  the code win.
+- Not sure how the protocol, firmware or a library behaves? Ask, don't guess. Where sources disagree, trust the MS-02's
+  behavior, then Intel's Device Management Toolkit (console, ui-toolkit, go-wsman-messages), then MeshCommander, then
+  Intel's AMT Implementation and Reference Guide.
 - The user reviews all code, edits files while you work (unexpected changes are theirs), does the commits and is the
   only one to test against the real device (MS-02, AMT 19).
 
