@@ -1,5 +1,5 @@
 <script lang="ts">
-  import type { Hardware } from "../bindings/core";
+  import type { Hardware } from "../../bindings/core";
 
   /** While loading, every list shows one of its thing. Several are told apart by number, from 0 like the OS does. */
   let { data }: { data?: Hardware } = $props();

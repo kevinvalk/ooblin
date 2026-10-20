@@ -12,8 +12,8 @@
 <script lang="ts">
   import { invoke } from "@tauri-apps/api/core";
   import type { Snippet } from "svelte";
-  import type { CommandError } from "./bindings/ooblin";
-  import { reason } from "./Session.svelte";
+  import type { CommandError } from "../bindings/ooblin";
+  import { reason } from "./Device.svelte";
 
   let {
     kind,

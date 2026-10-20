@@ -5,7 +5,7 @@
 <script lang="ts">
   import { ChevronDown, Maximize, Minimize, SendHorizontal } from "@lucide/svelte";
   import { invoke } from "@tauri-apps/api/core";
-  import type { Input, Screens } from "../bindings/core";
+  import type { Input, Screens } from "../../bindings/core";
   import Redirection from "../Redirection.svelte";
 
   let {

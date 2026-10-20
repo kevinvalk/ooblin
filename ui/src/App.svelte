@@ -1,38 +1,21 @@
-<!-- The window: devices on the left, the connect form or a session on the right, a status line at the bottom. -->
+<!-- The window: devices on the left, the connect form or a device on the right, a status line at the bottom. -->
 <script lang="ts">
-    import { LoaderCircle, PanelLeft, Search, Trash2, X } from "@lucide/svelte";
-    import { Channel, invoke } from "@tauri-apps/api/core";
-    import type { CommandError, Device } from "./bindings/ooblin";
-    import type { Found, Info } from "./bindings/core";
+    import { PanelLeft } from "@lucide/svelte";
+    import { invoke } from "@tauri-apps/api/core";
+    import type { CommandError, Device as Saved } from "./bindings/ooblin";
+    import type { Info } from "./bindings/core";
     import Connect from "./Connect.svelte";
-    import Session, { type Session as Open } from "./Session.svelte";
+    import Device, { type Connection } from "./device/Device.svelte";
+    import Sidebar from "./Sidebar.svelte";
 
     /** Every device we logged in to, the open ones by host, and the one on screen (none: the connect form). */
-    let devices: Device[] = $state.raw([]);
-    let sessions: Record<string, Open> = $state({});
+    let devices: Saved[] = $state.raw([]);
+    let connections: Record<string, Connection> = $state({});
     let current: string | null = $state(null);
-    /** What answered our presence pings by host, the networks we look on and whether we are, see `discover`. */
-    let found: Record<string, Found> = $state({});
-    let networks = $state("");
-    let discovering = $state(false);
-    /** Our devices, then those we only found, which we know too little of to log in to without the connect form. */
-    let listed: Device[] = $derived([
-        ...devices,
-        ...Object.keys(found)
-            .filter((host) => !devices.some((device) => device.host === host))
-            .sort((a, b) => a.localeCompare(b, undefined, { numeric: true }))
-            .map((host) => ({
-                host,
-                name: "",
-                version: found[host].version,
-                user: "admin",
-                remembered: false,
-            })),
-    ]);
     /** The connect form, for `device` if given: a new `key` is a fresh one. `error` is why the last attempt failed. */
     let form = $state({
         key: 0,
-        device: undefined as Device | undefined,
+        device: undefined as Saved | undefined,
         error: undefined as CommandError | undefined,
     });
     /** The device we're connecting to: it spins, and a second click on it does nothing. */
@@ -50,12 +33,12 @@
     }
 
     async function listDevices() {
-        devices = await invoke<Device[]>("devices").catch((error) => (say(String(error), true), []));
+        devices = await invoke<Saved[]>("devices").catch((error) => (say(String(error), true), []));
     }
 
-    /** Open sessions show, remembered devices log in, the rest ask for their password. */
-    function select(device: Device) {
-        if (sessions[device.host]) return show(device.host);
+    /** Open devices show, remembered devices log in, the rest ask for their password. */
+    function select(device: Saved) {
+        if (connections[device.host]) return show(device.host);
         if (connecting === device.host) return;
         showForm(device);
         if (device.remembered)
@@ -67,7 +50,7 @@
             });
     }
 
-    function showForm(device?: Device, error?: CommandError) {
+    function showForm(device?: Saved, error?: CommandError) {
         form = { key: form.key + 1, device, error };
         current = null;
         say("");
@@ -80,7 +63,7 @@
         connecting = host;
         form.error = undefined;
         try {
-            sessions[host] = { host, info: await invoke<Info>("connect", login) };
+            connections[host] = { host, info: await invoke<Info>("connect", login) };
             show(host);
         } catch (error) {
             form.error = explain(error, `Couldn't reach ${host}`);
@@ -104,35 +87,19 @@
 
     async function disconnect(host: string) {
         await invoke("disconnect", { host });
-        delete sessions[host];
+        delete connections[host];
         if (host === current) showForm();
     }
 
     async function forget(host: string) {
         await invoke("forget", { host });
-        delete found[host];
         listDevices();
-    }
-
-    /** Looks for devices on `networks` until they answered or we stop, says how many did. */
-    async function discover() {
-        discovering = true;
-        let answered = 0;
-        const channel = new Channel<Found>((device) => ((found[device.host] = device), answered++));
-        try {
-            await invoke("discover", { networks, found: channel });
-        } catch (error) {
-            say(explain(error, "Couldn't look for devices").message, true);
-        } finally {
-            discovering = false;
-        }
-        return answered;
     }
 
     /** The device stopped answering for good: we let go of it and say why, Connect tries again. */
     function lost(host: string, error: CommandError) {
         invoke("disconnect", { host });
-        delete sessions[host];
+        delete connections[host];
         const failure = explain(error, `Lost the connection to ${host}`);
         if (host === current)
             showForm(
@@ -142,13 +109,12 @@
         else say(failure.message, true);
     }
 
-    // The window is titled after the session on screen.
+    // The window is titled after the device on screen.
     $effect(() => {
         invoke("title", {
-            title: current ? `${sessions[current].info.name} – Ooblin` : "Ooblin",
+            title: current ? `${connections[current].info.name} – Ooblin` : "Ooblin",
         });
     });
-
 
     function keydown(event: KeyboardEvent) {
         if ((event.metaKey || event.ctrlKey) && event.key === "b") {
@@ -158,119 +124,29 @@
     }
 
     // Started with a host on the command line? Open it as if it was picked from the sidebar.
-    invoke<Device | null>("launch").then((device) => (device ? select(device) : showForm()));
-
-    // A /24 takes seconds, so we look around on every start: our network and our devices'.
-    invoke<string>("networks").then((nearby) => ((networks = nearby), discover()));
+    invoke<Saved | null>("launch").then((device) => (device ? select(device) : showForm()));
 </script>
 
 <svelte:window onkeydown={keydown} />
 
 <div class={["grid h-screen grid-rows-[1fr_auto]", collapsed ? "grid-cols-[0_1fr]" : "grid-cols-[16rem_1fr]"]}>
-    <nav
-        class={[
-            "flex min-w-0 flex-col gap-3 overflow-hidden border-r border-line bg-pane p-3",
-            collapsed && "invisible",
-        ]}
-    >
-        <p class="px-2.5 pt-1 font-semibold text-muted">Devices</p>
-        {#if listed.length}
-            <ul class="grid flex-1 content-start gap-1 overflow-y-auto">
-                {#each listed as device (device.host)}
-                    {@const open = sessions[device.host]}
-                    {@const answer = found[device.host]}
-                    {@const name = open?.info.name || device.name}
-                    <!-- One action per device, on hover: disconnect an open one, forget a closed one. -->
-                    <li
-                        class="group flex items-center rounded-md pr-0.5 text-muted hover:bg-hover data-open:text-ink aria-current:bg-accent aria-current:text-white"
-                        data-open={open || connecting === device.host ? "" : undefined}
-                        aria-current={device.host === current}
-                    >
-                        <button
-                            type="button"
-                            class="flex min-w-0 flex-1 items-center gap-2.5 px-2.5 py-1.5 text-left"
-                            title={answer?.provisioned === false ? "Not provisioned" : undefined}
-                            onclick={() => select(device)}
-                        >
-                            {#if connecting === device.host}
-                                <LoaderCircle class="-mx-0.5 size-3.5 flex-none animate-spin" />
-                            {:else}
-                                <span
-                                    class={["dot", !open && "invisible", open?.changing && "animate-pulse"]}
-                                    data-power={open?.power?.state}
-                                    title={open?.power?.state}
-                                ></span>
-                            {/if}
-                            <!-- Its name, and the address we reach it at. -->
-                            <span class="grid min-w-0">
-                                <span class="truncate">{name || device.host}</span>
-                                {#if name}
-                                    <span
-                                        class="truncate font-mono text-xs text-muted group-aria-current:text-white/80"
-                                    >
-                                        {device.host}
-                                    </span>
-                                {/if}
-                            </span>
-                            {#if device.version || answer}
-                                <span
-                                    class="ml-auto flex-none rounded-full bg-hover px-1 text-[10px]/4 tabular-nums group-aria-current:bg-white/20"
-                                    title="AMT version"
-                                >
-                                    {device.version || answer?.version}
-                                </span>
-                            {/if}
-                        </button>
-                        <button
-                            type="button"
-                            class="btn-icon hidden size-7 group-hover:grid group-aria-current:text-white/80 group-aria-current:hover:bg-white/20"
-                            title={open ? "Disconnect" : "Forget"}
-                            onclick={() => (open ? disconnect(device.host) : forget(device.host))}
-                        >
-                            {#if open}<X class="size-4" />{:else}<Trash2 class="size-4" />{/if}
-                        </button>
-                    </li>
-                {/each}
-            </ul>
-        {:else}
-            <p class="grid flex-1 place-items-center text-muted">
-                {discovering ? "Looking for devices…" : "No devices yet"}
-            </p>
-        {/if}
-        <button type="button" class="btn btn-secondary" onclick={() => showForm()}>New connection</button>
-        <!-- Where to look for devices, our own network to start with. -->
-        <form
-            class="field flex h-8 items-center pr-0 pl-2.5 font-mono text-xs"
-            onsubmit={async (event) => {
-                event.preventDefault();
-                if (discovering) return invoke("stop_discovery");
-                const answered = await discover();
-                say(
-                    answered
-                        ? `${answered} device${answered === 1 ? "" : "s"} answered on ${networks}.`
-                        : `No device answered on ${networks}.`,
-                );
-            }}
-        >
-            <input
-                bind:value={networks}
-                autocapitalize="off"
-                spellcheck="false"
-                placeholder="192.168.1.0/24"
-                required
-                title="Addresses, ranges like 192.168.88.10-192.168.88.50 and networks like 192.168.88.0/22, separated by commas. A /24
-takes seconds, a /16 (the most at a time) minutes."
-            />
-            <button class="btn-icon size-7 flex-none" title={discovering ? "Stop looking" : "Look for devices there"}>
-                {#if discovering}<LoaderCircle class="size-4 animate-spin" />{:else}<Search class="size-4" />{/if}
-            </button>
-        </form>
-    </nav>
+    <Sidebar
+        {devices}
+        {connections}
+        {current}
+        {connecting}
+        {collapsed}
+        {say}
+        onselect={select}
+        ondisconnect={disconnect}
+        onforget={forget}
+        onnew={() => showForm()}
+    />
 
     <div class="grid min-w-0 overflow-hidden">
-        {#each Object.keys(sessions) as host (host)}
-            <Session
-                bind:session={sessions[host]}
+        {#each Object.keys(connections) as host (host)}
+            <Device
+                bind:connection={connections[host]}
                 hidden={host !== current}
                 {say}
                 lost={(error) => lost(host, error)}
@@ -299,7 +175,7 @@ takes seconds, a /16 (the most at a time) minutes."
             <PanelLeft class="size-4" />
         </button>
         <!-- What's true now outlasts what just happened. -->
-        {#if current && sessions[current].silent}
+        {#if current && connections[current].silent}
             <output class="truncate text-muted">{current} isn't answering, trying again…</output>
         {:else}
             <!-- Selectable, and kept while the pointer is on it, to copy. -->
@@ -311,7 +187,7 @@ takes seconds, a /16 (the most at a time) minutes."
                 {message.text}
             </output>
         {/if}
-        <!-- Then what the session on screen says. -->
-        {#if current}{@render sessions[current].footer?.()}{/if}
+        <!-- Then what the device on screen says. -->
+        {#if current}{@render connections[current].footer?.()}{/if}
     </footer>
 </div>

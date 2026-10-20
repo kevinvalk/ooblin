@@ -17,24 +17,24 @@
     Ipv6Configuration,
     Ipv6Settings,
     Settings,
-  } from "../bindings/core";
-  import { reason, type Session } from "../Session.svelte";
+  } from "../../bindings/core";
+  import { reason, type Connection } from "../Device.svelte";
   import { CONFIGURATIONS } from "./Status.svelte";
 
   let {
     data,
-    session,
+    connection,
     say,
     ask,
     saved,
   }: {
     data?: Settings;
-    session: Session;
+    connection: Connection;
     say: (text: string, failed?: boolean) => void;
     ask: (question: string, answers: string[], safe?: boolean) => Promise<string>;
     saved: (data: Settings) => void;
   } = $props();
-  /** Ours, as another session's settings may be open too. */
+  /** Ours, as another device's settings may be open too. */
   const id = $props.id();
 
   let saving = $state(false);
@@ -45,7 +45,7 @@
   async function save(done: string, change: Change) {
     saving = true;
     try {
-      saved(await invoke<Settings>("change", { host: session.host, change }));
+      saved(await invoke<Settings>("change", { host: connection.host, change }));
       say(done);
     } catch (error) {
       say(reason(error), true);
@@ -133,7 +133,7 @@
   async function ipv4(fields: FormData, done: string) {
     const addresses = Object.fromEntries(ADDRESSES.map(([name]) => [name, text(fields, `ipv4_${name}`)]));
     const ipv4 = { configuration: fields.get("ipv4") as Configuration, ...addresses } as Ipv4;
-    const question = `AMT may get another address, which ${session.host} doesn't reach.`;
+    const question = `AMT may get another address, which ${connection.host} doesn't reach.`;
     if (await ask(question, ["Save"])) await save(done, { Ipv4: ipv4 });
   }
 
@@ -157,7 +157,7 @@
     const path = await invoke<string | null>("pick_save", { name: `${certificate.name}.pem` });
     if (!path) return;
     try {
-      await invoke("save_certificate", { host: session.host, id: certificate.id, path });
+      await invoke("save_certificate", { host: connection.host, id: certificate.id, path });
       say(`${certificate.name} saved.`);
     } catch (error) {
       say(reason(error), true);
@@ -165,7 +165,7 @@
   }
 
   async function deleteCertificate(certificate: Certificate) {
-    if (await ask(`Delete ${certificate.name} from ${session.info.name}?`, ["Delete"])) {
+    if (await ask(`Delete ${certificate.name} from ${connection.info.name}?`, ["Delete"])) {
       await save(`${certificate.name} deleted.`, { DeleteCertificate: certificate.id });
     }
   }
@@ -607,7 +607,7 @@
   <button
     type="button"
     class="text-accent hover:underline"
-    onclick={() => invoke("web_pages", { host: session.host }).catch((error) => say(reason(error), true))}
+    onclick={() => invoke("web_pages", { host: connection.host }).catch((error) => say(reason(error), true))}
   >
     AMT's own web pages</button
   >.
@@ -616,7 +616,7 @@
 <dialog bind:this={alarmDialog}>
   <form method="dialog" class="grid gap-4" onsubmit={addAlarm}>
     <p class="font-medium">Schedule a wake-up</p>
-    <p class="text-muted">AMT turns {session.info.name} on then, or wakes it from sleep.</p>
+    <p class="text-muted">AMT turns {connection.info.name} on then, or wakes it from sleep.</p>
     <label class="grid gap-1.5">
       Name
       <input name="name" class="field" autocapitalize="off" spellcheck="false" maxlength="32" required />

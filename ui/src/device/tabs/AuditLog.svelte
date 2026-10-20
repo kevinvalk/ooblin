@@ -1,5 +1,5 @@
 <script lang="ts">
-  import type { AuditRecord } from "../bindings/core";
+  import type { AuditRecord } from "../../bindings/core";
 
   let { data }: { data?: AuditRecord[] } = $props();
 </script>

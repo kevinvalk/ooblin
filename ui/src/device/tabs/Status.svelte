@@ -4,7 +4,7 @@
 </script>
 
 <script lang="ts">
-  import type { Status } from "../bindings/core";
+  import type { Status } from "../../bindings/core";
 
   let { data }: { data?: Status } = $props();
 </script>

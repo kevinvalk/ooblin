@@ -1,5 +1,5 @@
 <script lang="ts">
-  import type { Event } from "../bindings/core";
+  import type { Event } from "../../bindings/core";
 
   let { data }: { data?: Event[] } = $props();
 </script>

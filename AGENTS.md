@@ -12,6 +12,8 @@ the UI puts it in words.
 - `cargo test` runs the library against the mock AMT and writes the UI's types to `ui/src/bindings` (ts-rs, committed),
   `npm run build --prefix ui` typechecks the UI. Only `crates/amt-core/src/net/` may touch the network, tests enforce it.
 - `anyhow` and `?` outside the library. Spec and integration tests (fixtures, the running app) over unit tests.
+- UI components sit in the folder of what uses them (`ui/src/device/` for a device, its tabs in `device/tabs/`), named
+  for what they are, not where they show.
 - Comments only where a reader would otherwise get it wrong: terse, "we" voice, lines up to ~120 chars.
 - Not sure how the protocol, firmware or a library behaves? Ask, don't guess. Where sources disagree, trust the MS-02's
   behavior, then Intel's Device Management Toolkit (console, ui-toolkit, go-wsman-messages), then MeshCommander, then

@@ -1,17 +1,17 @@
-<!-- An open session: its power, the disk image in its drive and a tab at a time. There's one per open device, shown or
+<!-- A device we're connected to: its power, the disk image in its drive and a tab at a time. There's one per open device, shown or
      not, so all of it stays as it was while another one is: pages until refreshed, the screen and serial console open.
      Whether a device that doesn't answer is gone is App's to say. -->
 <script module lang="ts">
   import type { Snippet } from "svelte";
-  import type { CommandError } from "./bindings/ooblin";
-  import type { Info, Power, PowerAction, PowerState, RemoteAccess, Settings as SettingsData } from "./bindings/core";
+  import type { CommandError } from "../bindings/ooblin";
+  import type { Info, Power, PowerAction, PowerState, RemoteAccess, Settings as SettingsData } from "../bindings/core";
 
-  /** What App shows of a session too: in the sidebar, the title and the footer. */
-  export interface Session {
+  /** What App shows of a connection too: in the sidebar, the title and the footer. */
+  export interface Connection {
     host: string;
     info: Info;
     power?: Power;
-    /** Since when it hasn't answered, see Session's `readPower`. */
+    /** Since when it hasn't answered, see Device's `readPower`. */
     silent?: number;
     /** Set from a power change until the state moves or a minute has passed, a reset never shows as another state. */
     changing?: { from: PowerState; until: number };
@@ -34,27 +34,27 @@
   import { Channel, invoke } from "@tauri-apps/api/core";
   import { untrack } from "svelte";
   import { SvelteMap } from "svelte/reactivity";
-  import AuditLog from "./pages/AuditLog.svelte";
-  import EventLog from "./pages/EventLog.svelte";
-  import Hardware from "./pages/Hardware.svelte";
-  import Kvm from "./pages/Kvm.svelte";
-  import Settings from "./pages/Settings.svelte";
-  import Sol from "./pages/Sol.svelte";
-  import Status from "./pages/Status.svelte";
+  import AuditLog from "./tabs/AuditLog.svelte";
+  import EventLog from "./tabs/EventLog.svelte";
+  import Hardware from "./tabs/Hardware.svelte";
+  import Kvm from "./tabs/Kvm.svelte";
+  import Settings from "./tabs/Settings.svelte";
+  import Sol from "./tabs/Sol.svelte";
+  import Status from "./tabs/Status.svelte";
 
   let {
-    session = $bindable(),
+    connection = $bindable(),
     hidden,
     say,
     lost,
   }: {
-    session: Session;
+    connection: Connection;
     hidden: boolean;
     say: (text: string, failed?: boolean) => void;
     lost: (error: CommandError) => void;
   } = $props();
   const id = $props.id();
-  session.footer = status;
+  connection.footer = status;
 
   /** The commands are named after the tabs that read. All but the hardware change often enough to want a refresh. The
    * KVM tab is a screen of its own, for devices that have one. */
@@ -91,13 +91,13 @@
 
   /** What the device lets us redirect, as the settings last said. */
   let access: RemoteAccess = $derived(
-    (pages.get("settings")?.data as SettingsData | undefined)?.remote_access ?? session.info.remote_access,
+    (pages.get("settings")?.data as SettingsData | undefined)?.remote_access ?? connection.info.remote_access,
   );
 
   /** What Settings saved, which it then shows: the name, and what's turned off goes (Rust ejects the image itself). */
   function saved(data: SettingsData) {
     pages.set("settings", { data, read: new Date() });
-    session.info.name = data.general.name;
+    connection.info.name = data.general.name;
     opened.kvm &&= !!data.remote_access.kvm;
     opened.sol &&= data.remote_access.sol;
     if (!data.remote_access.ider) image = undefined;
@@ -115,7 +115,7 @@
   async function read(name = tab) {
     const blank = {};
     pages.set(name, blank);
-    const page = await invoke(name, { host: session.host }).then(
+    const page = await invoke(name, { host: connection.host }).then(
       (data) => ({ data, read: new Date() }),
       (error) => ({ error: reason(error) }),
     );
@@ -148,7 +148,7 @@
     const what = { kvm: "Seeing its screen", sol: "Its serial console", ider: "Putting a disk image in its drive" }[kind];
     consented ??= (async () => {
       try {
-        await invoke("consent_start", { host: session.host });
+        await invoke("consent_start", { host: connection.host });
       } catch (error) {
         say(reason(error), true);
         return false;
@@ -168,7 +168,7 @@
     if (digits.length !== 6) return (consenting.error = "The code has 6 digits.");
     consenting = { ...consenting, error: "", sending: true };
     try {
-      await invoke("consent_send", { host: session.host, code: Number(digits) });
+      await invoke("consent_send", { host: connection.host, code: Number(digits) });
       consentDialog.close();
       say("Consent given.");
       answer(true);
@@ -179,7 +179,7 @@
 
   /** The code goes off the device's screen too. */
   function decline() {
-    invoke("consent_cancel", { host: session.host }).catch(() => {});
+    invoke("consent_cancel", { host: connection.host }).catch(() => {});
     answer(false);
   }
 
@@ -193,17 +193,17 @@
     if (reading) return;
     reading = true;
     try {
-      session.power = await invoke<Power>("power", { host: session.host });
-      session.silent = undefined;
-      const changing = session.changing;
-      if (changing && (session.power.state !== changing.from || Date.now() > changing.until)) session.changing = undefined;
+      connection.power = await invoke<Power>("power", { host: connection.host });
+      connection.silent = undefined;
+      const changing = connection.changing;
+      if (changing && (connection.power.state !== changing.from || Date.now() > changing.until)) connection.changing = undefined;
     } catch (error) {
       if ((error as CommandError).kind !== "Unreachable") {
         if (!hidden) say(reason(error), true);
-      } else if (Date.now() - (session.silent ??= Date.now()) > 120_000) {
+      } else if (Date.now() - (connection.silent ??= Date.now()) > 120_000) {
         lost(error as CommandError);
       } else {
-        session.power = undefined;
+        connection.power = undefined;
       }
     } finally {
       reading = false;
@@ -219,10 +219,10 @@
 
   /** Powering on needs no second thought, everything else does. */
   async function choose(action: PowerAction, label: string) {
-    if (!action.startsWith("On") && !(await ask(`${label} ${session.info.name}?`, [label]))) return;
+    if (!action.startsWith("On") && !(await ask(`${label} ${connection.info.name}?`, [label]))) return;
     try {
-      await invoke("set_power", { host: session.host, action });
-      if (session.power) session.changing = { from: session.power.state, until: Date.now() + 60_000 };
+      await invoke("set_power", { host: connection.host, action });
+      if (connection.power) connection.changing = { from: connection.power.state, until: Date.now() + 60_000 };
       say(`${label} sent.`);
       // The BIOS's screen goes there.
       if (action.endsWith("Serial")) show("sol");
@@ -250,7 +250,7 @@
       if (image !== mounted) return;
       if (!read) {
         image = undefined;
-        return say(`${session.info.name} closed the disk image (a reset, say), mount it again to use it.`);
+        return say(`${connection.info.name} closed the disk image (a reset, say), mount it again to use it.`);
       }
       mounted.read += read.end - read.start;
       const cell = (at: number) => (at * CELLS) / mounted.size;
@@ -263,7 +263,7 @@
       }, 1000);
     };
     try {
-      [mounted.name, mounted.size] = await invoke<[string, number]>("ider_mount", { host: session.host, path, reads });
+      [mounted.name, mounted.size] = await invoke<[string, number]>("ider_mount", { host: connection.host, path, reads });
       image = mounted;
       say(`${mounted.name} is in the drive, the device sees it from its next boot on.`);
     } catch (error) {
@@ -275,7 +275,7 @@
   }
 
   function eject() {
-    invoke("ider_eject", { host: session.host });
+    invoke("ider_eject", { host: connection.host });
     image = undefined;
   }
 
@@ -325,7 +325,7 @@
     class="block h-8 w-full rounded-md px-3 text-left hover:bg-accent hover:text-white disabled:text-muted"
     popovertarget="{id}-power"
     popovertargetaction="hide"
-    disabled={!session.power?.actions.includes(name) ||
+    disabled={!connection.power?.actions.includes(name) ||
       (name.endsWith("Image") && !image) ||
       (name.endsWith("Serial") && !!off("sol"))}
     title={help}
@@ -386,11 +386,11 @@
 <section class="grid min-h-0 grid-rows-[auto_auto_1fr]" {hidden}>
   <header class="flex items-center gap-3 px-8 pt-6 pb-4">
     <span
-      class={["dot", session.changing && "animate-pulse"]}
-      data-power={session.power?.state}
-      title={session.power && session.power.state + (session.changing ? ", changing…" : "")}
+      class={["dot", connection.changing && "animate-pulse"]}
+      data-power={connection.power?.state}
+      title={connection.power && connection.power.state + (connection.changing ? ", changing…" : "")}
     ></span>
-    <h1 class="truncate text-xl font-semibold">{session.info.name}</h1>
+    <h1 class="truncate text-xl font-semibold">{connection.info.name}</h1>
     <!-- The disk image in the device's drive, for booting from (IDER). -->
     {#if image}
       <!-- Lit while the device reads, like a drive's light. -->
@@ -470,7 +470,7 @@
 
   {#if opened.kvm}
     <Kvm
-      host={session.host}
+      host={connection.host}
       hidden={tab !== "kvm"}
       consent={() => consent("kvm")}
       status={(text) => (waiting.kvm = text)}
@@ -479,7 +479,7 @@
   {/if}
   {#if opened.sol}
     <Sol
-      host={session.host}
+      host={connection.host}
       hidden={tab !== "sol"}
       consent={() => consent("sol")}
       status={(text) => (waiting.sol = text)}
@@ -496,7 +496,7 @@
           </div>
         {:else}
           <!-- Each page knows the shape of its own data, the ones that change something take the rest too. -->
-          <Page data={page?.data as never} {session} {say} {ask} {saved} />
+          <Page data={page?.data as never} {connection} {say} {ask} {saved} />
         {/if}
       </div>
     </main>
@@ -521,7 +521,7 @@
 <!-- Escape is a no, like Cancel. -->
 <dialog bind:this={consentDialog} oncancel={decline}>
   <form class="grid gap-4" onsubmit={sendCode}>
-    <p class="font-medium">Ask someone at {session.info.name}</p>
+    <p class="font-medium">Ask someone at {connection.info.name}</p>
     <p>
       {consenting.what} needs the consent of someone at the device. It shows a 6-digit code on its screen now: have them
       read it out to you.

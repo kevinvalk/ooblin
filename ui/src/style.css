@@ -28,7 +28,7 @@
     }
 }
 
-/* A stretch of a disk image the device just read, fading to merely read, see Session's footer. */
+/* A stretch of a disk image the device just read, fading to merely read, see Device's footer. */
 @keyframes read {
     to {
         opacity: 0.35;
