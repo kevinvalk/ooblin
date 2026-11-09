@@ -12,15 +12,20 @@ Built with [Tauri](https://tauri.app) for Linux, macOS and Windows.
 ## Run
 
 `cargo release` bundles the app (`cargo tauri build`, set up for shipping). Start it with a host to connect straight
-away, using its saved credentials or the ones you pass:
+away, using its saved credentials or the ones you pass, in the Ooblin that's already running if there is one:
 
 ```sh
 ooblin [host] [--user admin] [--password <password>]
 ```
 
+Ooblin logs what it does and what goes wrong, a megabyte and the one before, in your OS's log folder. The button at the
+right of the status bar saves it for a bug report: it has your devices' addresses and names, never a password.
+
 ## Develop
 
-With Rust, Node and the [Tauri prerequisites](https://v2.tauri.app/start/prerequisites/) in place:
+With the Rust of `rust-toolchain.toml`, the Node of `.node-version` and the
+[Tauri prerequisites](https://v2.tauri.app/start/prerequisites/) in place (CI checks every push on Linux, macOS and
+Windows the same way):
 
 ```sh
 cargo install tauri-cli --locked

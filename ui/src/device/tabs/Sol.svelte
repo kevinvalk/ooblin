@@ -8,11 +8,18 @@
   import Redirection from "../Redirection.svelte";
 
   let {
+    id: panel,
     host,
     hidden,
     consent,
     status,
-  }: { host: string; hidden: boolean; consent: () => Promise<boolean>; status: (text: string) => void } = $props();
+  }: {
+    id: string;
+    host: string;
+    hidden: boolean;
+    consent: () => Promise<boolean>;
+    status: (text: string) => void;
+  } = $props();
 
   const terminal = new Terminal({
     cols: 80,
@@ -21,22 +28,28 @@
     fontSize: 14,
     theme: { background: "#000000" },
   });
+  /** The open session's id, which what's typed goes to: typing for one since closed goes nowhere. */
+  let id: number | undefined;
+
   // What's typed goes out in the order it was typed. A console that's gone says so in its reads. Backspace is ^H, as
   // MeshCommander sends it: what the BIOS takes, and shells do too.
   let typing: Promise<unknown> = Promise.resolve();
   terminal.onData((data) => {
+    const to = id;
+    if (to === undefined) return;
     data = data.replaceAll("\x7f", "\b");
-    typing = typing.then(() => invoke("sol_write", { host, data }).catch(() => {}));
+    typing = typing.then(() => invoke("sol_write", { host, id: to, data }).catch(() => {}));
   });
 
   /** What the device writes, while it's open. */
-  async function read(open: () => boolean) {
-    terminal.focus();
-    while (open()) terminal.write(new Uint8Array(await invoke<ArrayBuffer>("sol_read", { host })));
+  async function read(opened: number, open: () => boolean) {
+    id = opened;
+    if (!hidden) terminal.focus();
+    while (open()) terminal.write(new Uint8Array(await invoke<ArrayBuffer>("sol_read", { host, id: opened })));
   }
 </script>
 
-<main class="grid min-h-0 px-8 pt-6 pb-8" {hidden}>
+<div id={panel} class="grid min-h-0 px-8 pt-6 pb-8" role="tabpanel" aria-label="Serial console" {hidden}>
   <Redirection kind="sol" {host} {consent} {status} {read}>
     <div
       {@attach (element) => {
@@ -45,4 +58,4 @@
       }}
     ></div>
   </Redirection>
-</main>
+</div>

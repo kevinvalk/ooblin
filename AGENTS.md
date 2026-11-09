@@ -9,8 +9,8 @@ the UI puts it in words.
 - **Rule one, above all others: elegance.** Run the `elegance` skill (`.claude/skills/elegance/SKILL.md`), at least
   three rounds, on every change before calling it done, and whenever the user asks for elegance.
 - Tauri drives everything, `cargo tauri dev` and `build` start Vite. Cross-platform from day one.
-- `cargo test` runs the library against the mock AMT and writes the UI's types to `ui/src/bindings` (ts-rs, committed),
-  `npm run build --prefix ui` typechecks the UI. Only `crates/amt-core/src/net/` may touch the network, tests enforce it.
+- `cargo test` runs the library against the mock AMT and writes the UI's types to `ui/src/bindings` (ts-rs, committed:
+  amt-core's by `#[ts(export)]`, the app's own by its `bindings` test), `npm run build --prefix ui` typechecks the UI. Only `crates/amt-core/src/net/` may touch the network, tests enforce it.
 - `anyhow` and `?` outside the library. Spec and integration tests (fixtures, the running app) over unit tests.
 - UI components sit in the folder of what uses them (`ui/src/device/` for a device, its tabs in `device/tabs/`), named
   for what they are, not where they show.
@@ -32,7 +32,7 @@ We check our own work in the running app against the mock AMT, every command wit
 2. Run `target/debug/mock-amt run ms-02` (`go-wsman-messages` for Intel's samples) and
    `TAURI_MCP_NO_FOREGROUND=1 target/debug/ooblin 127.0.0.1 --password 'P@ssw0rd'` as background tasks, the
    binaries themselves so stopping a task stops it. The variable keeps screenshots from raising the window on macOS. A
-   second session connects to the same mock as `localhost`.
+   second connection goes to the same mock as `localhost`, and `ooblin localhost` hands it to the running app.
 3. `npx -y -p @hypothesi/tauri-mcp-cli@0.13 tauri-mcp driver-session start --port 9223`, at most 20 tries a second
    apart, then read the tasks' output instead.
 4. Drive it (`webview-execute-js`, `-interact`, `-screenshot`, `-wait-for`, `read-logs --source console`, or the `tauri`

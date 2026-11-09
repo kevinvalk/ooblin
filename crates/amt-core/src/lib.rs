@@ -31,9 +31,7 @@ pub use net::{
 };
 pub use power::{Power, PowerAction, PowerState, Recovery};
 pub use redirection::{Consent, RemoteAccess};
-pub use settings::{
-    Availability, Change, DnsUpdate, General, Ipv6Configuration, Ipv6Settings, Network, PowerPolicy, Settings,
-};
+pub use settings::{Availability, DnsUpdate, General, Ipv6Configuration, Ipv6Settings, Network, PowerPolicy, Settings};
 pub use sol::Sol;
 pub use status::{Configuration, Ipv4, Ipv6, Port, Status};
 

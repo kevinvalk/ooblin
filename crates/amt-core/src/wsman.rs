@@ -33,6 +33,20 @@ pub trait Method: ToXml {
     const NAME: &'static str;
 }
 
+/// Makes `$input` the input of the method in `$uri` that it's named after, or `$name`.
+macro_rules! method {
+    ($input:ident$(<$lifetime:lifetime>)?, $uri:expr) => {
+        $crate::wsman::method!($input$(<$lifetime>)?, $uri, stringify!($input));
+    };
+    ($input:ident$(<$lifetime:lifetime>)?, $uri:expr, $name:expr) => {
+        impl $crate::wsman::Method for $input$(<$lifetime>)? {
+            const URI: &'static str = $uri;
+            const NAME: &'static str = $name;
+        }
+    };
+}
+pub(crate) use method;
+
 pub fn get(class: &str, message_id: u32) -> String {
     envelope(&format!("{TRANSFER}/Get"), &resource_uri(class), &[], message_id, None::<Enumerate>)
 }

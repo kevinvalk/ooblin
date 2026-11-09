@@ -1,0 +1,7 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "What the window may use besides our own commands: our events and the log.",
+  "windows": ["main"],
+  "permissions": ["core:event:default", "core:window:allow-is-fullscreen", "log:default"]
+}

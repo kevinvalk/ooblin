@@ -6,7 +6,7 @@ use std::sync::atomic::Ordering;
 
 use amt_core::wsman::parse_instance;
 use amt_core::{
-    Alarm, Availability, Client, Configuration, Consent, DnsUpdate, Error, General, Ipv4, Ipv6Configuration,
+    Alarm, Availability, Client, Configuration, Consent, DnsUpdate, Error, General, Input, Ipv4, Ipv6Configuration,
     Ipv6Settings, PowerAction, PowerState, Redirection, RemoteAccess, Session, Target, discover, fingerprint,
 };
 use anyhow::{Context, Result, bail};
@@ -187,7 +187,14 @@ async fn changes_the_settings() -> Result<()> {
     let request = amt.requests.lock().unwrap().pop().context("no request")?;
     assert!(request.contains(r#"Name="InstanceID">SCHEME 0<"#), "on the scheme: {request}");
 
-    // Network: a manual address names the port, DHCP takes the addresses out.
+    // Network: what isn't an address never goes out, a manual address names the port, DHCP takes the addresses out.
+    let typo = Ipv4 { address: "192.0.2.700".into(), ..client.settings().await?.network.ipv4 };
+    sent();
+    assert!(matches!(client.set_ipv4(&typo).await, Err(Error::Invalid(_))));
+    let typo = Ipv6Settings { address: "2001:db8::g".into(), ..client.settings().await?.network.ipv6 };
+    sent();
+    assert!(matches!(client.set_ipv6(&typo).await, Err(Error::Invalid(_))));
+    assert!(amt.requests.lock().unwrap().is_empty(), "sent");
     let ipv4 = Ipv4 { configuration: Configuration::Manual, address: "192.0.2.7".into(), ..settings.network.ipv4 };
     client.set_ipv4(&ipv4).await?;
     let request = amt.requests.lock().unwrap().pop().context("no Put")?;
@@ -245,7 +252,7 @@ async fn changes_the_settings() -> Result<()> {
 #[tokio::test]
 async fn opens_redirection_sessions_with_digest() -> Result<()> {
     let fixture = tempfile::tempdir()?;
-    Transcript(vec![(Direction::Received, b"hello".to_vec())]).save(&fixture.path().join("sol.transcript"))?;
+    Transcript(vec![received(b"hello")]).save(&fixture.path().join("sol.transcript"))?;
     let amt = start(fixture.path()).await;
 
     let mut sol = Redirection::open(&target(&amt, PASSWORD), None, Session::Sol).await?;
@@ -312,28 +319,7 @@ async fn decodes_every_kind_of_zrle_tile() -> Result<()> {
             [&[0, 0, 0, 2 * i as u8, 0, 3, 0, 2, 0, 0, 0, 16][..], &(data.len() as u32).to_be_bytes(), &data].concat(),
         );
     }
-    let init = [0, 3, 0, 14, 16, 16, 0, 1, 0, 31, 0, 63, 0, 31, 11, 5, 0, 0, 0, 0, 0, 0, 0, 0];
-    let fixture = tempfile::tempdir()?;
-    let (sent, received) =
-        (|bytes: &[u8]| (Direction::Sent, bytes.to_vec()), |bytes: &[u8]| (Direction::Received, bytes.to_vec()));
-    Transcript(vec![
-        sent(&[0x40, 0, 0, 0, 0, 0, 0, 0]),
-        received(&[&[0x41, 0, 0, 0, 0, 0, 0, 0][..], b"RFB 004.000\n"].concat()),
-        sent(b"RFB 003.008\n"),
-        received(&[1, 1]),
-        sent(&[1]),
-        received(&[0, 0, 0, 0]),
-        sent(&[1]),
-        received(&init),
-        sent(&[2]), // SetEncodings
-        sent(&[3]), // the update request
-        received(&update),
-    ])
-    .save(&fixture.path().join("kvm.transcript"))?;
-    std::fs::create_dir(fixture.path().join("wsman"))?;
-    for file in ["CIM_KVMRedirectionSAP.Get.xml", "AMT_RedirectionService.Get.xml", "IPS_OptInService.Get.xml"] {
-        std::fs::copy(mock_amt::fixture("ms-02").join("wsman").join(file), fixture.path().join("wsman").join(file))?;
-    }
+    let fixture = kvm(vec![sent(&[3]), received(&update)])?; // the update request, then the update
 
     let amt = start(fixture.path()).await;
     let frame = client(&amt, PASSWORD, None)?.kvm().await?.frame().await?;
@@ -349,6 +335,63 @@ async fn decodes_every_kind_of_zrle_tile() -> Result<()> {
         assert_eq!(pixels, expected.map(rgba).concat(), "tile {i}");
     }
     Ok(())
+}
+
+/// A key and a mouse button held when the screen loses focus are let go of, the mouse where it was. The mock hangs up on
+/// any byte we get wrong, which the next frame would see.
+#[tokio::test]
+async fn lets_go_of_what_is_held() -> Result<()> {
+    let fixture = kvm(vec![
+        sent(&[4, 1, 0, 0, 0, 0, 0, b'a']),
+        sent(&[5, 1, 0, 2, 0, 9]), // the left button, at 2, 9
+        sent(&[4, 0, 0, 0, 0, 0, 0, b'a']),
+        sent(&[5, 0, 0, 2, 0, 9]),
+        sent(&[3]),
+        received(&[0, 0, 0, 0]), // an update of nothing
+    ])?;
+    let amt = start(fixture.path()).await;
+    let kvm = client(&amt, PASSWORD, None)?.kvm().await?;
+    let held = [Input::Key { code: "KeyA".into(), down: true }, Input::Pointer { x: 2, y: 9, buttons: 1, scroll: 0 }];
+    kvm.input(held.into()).await?;
+    kvm.input(vec![Input::Release, Input::Release]).await?;
+    assert_eq!(kvm.frame().await?, [3, 0, 14, 0]);
+    Ok(())
+}
+
+fn sent(bytes: &[u8]) -> (Direction, Vec<u8>) {
+    (Direction::Sent, bytes.to_vec())
+}
+
+fn received(bytes: &[u8]) -> (Direction, Vec<u8>) {
+    (Direction::Received, bytes.to_vec())
+}
+
+/// A KVM session on a 3 by 14 screen, opened as AMT 19 does, then `then` after our SetEncodings.
+fn kvm(then: Vec<(Direction, Vec<u8>)>) -> Result<tempfile::TempDir> {
+    let init = [0, 3, 0, 14, 16, 16, 0, 1, 0, 31, 0, 63, 0, 31, 11, 5, 0, 0, 0, 0, 0, 0, 0, 0];
+    let opened = [
+        sent(&[0x40, 0, 0, 0, 0, 0, 0, 0]),
+        received(&[&[0x41, 0, 0, 0, 0, 0, 0, 0][..], b"RFB 004.000\n"].concat()),
+        sent(b"RFB 003.008\n"),
+        received(&[1, 1]),
+        sent(&[1]),
+        received(&[0, 0, 0, 0]),
+        sent(&[1]),
+        received(&init),
+        sent(&[2]),
+    ];
+    redirecting("kvm", [opened.to_vec(), then].concat())
+}
+
+/// A device whose `session` ("kvm", "sol" or "ider") goes as `transcript` has it, all of them on as on the MS-02.
+fn redirecting(session: &str, transcript: Vec<(Direction, Vec<u8>)>) -> Result<tempfile::TempDir> {
+    let fixture = tempfile::tempdir()?;
+    Transcript(transcript).save(&fixture.path().join(format!("{session}.transcript")))?;
+    std::fs::create_dir(fixture.path().join("wsman"))?;
+    for file in ["CIM_KVMRedirectionSAP.Get.xml", "AMT_RedirectionService.Get.xml", "IPS_OptInService.Get.xml"] {
+        std::fs::copy(mock_amt::fixture("ms-02").join("wsman").join(file), fixture.path().join("wsman").join(file))?;
+    }
+    Ok(fixture)
 }
 
 /// What's off stays off: a session needs it turned on in the settings first, and changes nothing.
@@ -431,37 +474,31 @@ async fn serves_a_disk_image_over_ider() -> Result<()> {
         let end: [u8; 14] = if last { [0x85, 0, 3, 0, 0, 0, 0xB0, 0x50, 0, 0, 0, 0, 0, 0] } else { [0; 14] };
         message(0x54, if last { 2 } else { 0 }, sequence, &[&header[..], &end, data].concat())
     };
-    let (sent, received) = (|bytes: Vec<u8>| (Direction::Sent, bytes), |bytes: Vec<u8>| (Direction::Received, bytes));
     let opened = Transcript::load(&mock_amt::fixture("ms-02").join("ider.transcript"))?;
-    let fixture = tempfile::tempdir()?;
     let mut transcript = opened.0; // our open and the MS-02's answer, 8192 bytes at most a message
     transcript.extend([
-        sent(message(0x48, 0, 1, &[3, 0x09, 0, 0, 0])),
-        received(message(0x49, 0, 1, &[3, 1, 0, 0, 0])),
-        received(command(2, &[0x00])), // TEST UNIT READY
-        sent(ok(2)),
-        received(command(3, &[0x25])), // READ CAPACITY
-        sent(data(3, &[0, 0, 0, 5, 0, 0, 8, 0], true)),
-        received(command(4, &[0x28, 0, 0, 0, 0, 1, 0, 0, 5])), // READ (10), blocks 1 to 5
-        sent(data(4, &image[2048..2048 + 8192], false)),
-        sent(data(5, &image[2048 + 8192..], true)),
-        received(command(5, &[0x12])), // INQUIRY, which AMT answers itself
-        sent(failed(6, 0xB0, [5, 0x20])),
-        received(command(6, &[0x28, 0, 0, 0, 0, 5, 0, 0, 2])), // READ (10), blocks 5 and 6 of 6
-        sent(failed(7, 0xB0, [5, 0x21])),
-        received(command(7, &[0x03, 0, 0, 0, 18])), // REQUEST SENSE: why, out of range
-        sent(data(8, &[0x70, 0, 5, 0, 0, 0, 0, 10, 0, 0, 0, 0, 0x21, 0, 0, 0, 0, 0], true)),
-        received(command(8, &[0xA8, 0, 0, 0, 0, 0, 0, 0, 0, 1])), // READ (12), block 0
-        sent(data(9, &image[..2048], true)),
-        received(to(0xA0, 9, &[0x28, 0, 0, 0, 0, 0, 0, 0, 1])), // a read from the floppy drive
-        sent(failed(10, 0xA0, [2, 0x3A])),
-        received(message(0x43, 0, 10, &[])),
+        sent(&message(0x48, 0, 1, &[3, 0x09, 0, 0, 0])),
+        received(&message(0x49, 0, 1, &[3, 1, 0, 0, 0])),
+        received(&command(2, &[0x00])), // TEST UNIT READY
+        sent(&ok(2)),
+        received(&command(3, &[0x25])), // READ CAPACITY
+        sent(&data(3, &[0, 0, 0, 5, 0, 0, 8, 0], true)),
+        received(&command(4, &[0x28, 0, 0, 0, 0, 1, 0, 0, 5])), // READ (10), blocks 1 to 5
+        sent(&data(4, &image[2048..2048 + 8192], false)),
+        sent(&data(5, &image[2048 + 8192..], true)),
+        received(&command(5, &[0x12])), // INQUIRY, which AMT answers itself
+        sent(&failed(6, 0xB0, [5, 0x20])),
+        received(&command(6, &[0x28, 0, 0, 0, 0, 5, 0, 0, 2])), // READ (10), blocks 5 and 6 of 6
+        sent(&failed(7, 0xB0, [5, 0x21])),
+        received(&command(7, &[0x03, 0, 0, 0, 18])), // REQUEST SENSE: why, out of range
+        sent(&data(8, &[0x70, 0, 5, 0, 0, 0, 0, 10, 0, 0, 0, 0, 0x21, 0, 0, 0, 0, 0], true)),
+        received(&command(8, &[0xA8, 0, 0, 0, 0, 0, 0, 0, 0, 1])), // READ (12), block 0
+        sent(&data(9, &image[..2048], true)),
+        received(&to(0xA0, 9, &[0x28, 0, 0, 0, 0, 0, 0, 0, 1])), // a read from the floppy drive
+        sent(&failed(10, 0xA0, [2, 0x3A])),
+        received(&message(0x43, 0, 10, &[])),
     ]);
-    Transcript(transcript).save(&fixture.path().join("ider.transcript"))?;
-    std::fs::create_dir(fixture.path().join("wsman"))?;
-    for file in ["AMT_RedirectionService.Get.xml", "IPS_OptInService.Get.xml"] {
-        std::fs::copy(mock_amt::fixture("ms-02").join("wsman").join(file), fixture.path().join("wsman").join(file))?;
-    }
+    let fixture = redirecting("ider", transcript)?;
 
     let amt = start(fixture.path()).await;
     let ider = client(&amt, PASSWORD, None)?.ider(std::fs::File::open(file.path())?).await?;
@@ -478,20 +515,11 @@ async fn reads_and_types_on_the_serial_console() -> Result<()> {
     let opened = Transcript::load(&mock_amt::fixture("ms-02").join("sol.transcript"))?;
     let output = |sequence: u8, text: &[u8]| {
         let len = (text.len() as u16).to_le_bytes();
-        (Direction::Received, [&[0x2A, 0, 0, 0, sequence, 0, 0, 0, len[0], len[1]][..], text].concat())
+        received(&[&[0x2A, 0, 0, 0, sequence, 0, 0, 0, len[0], len[1]][..], text].concat())
     };
     let mut transcript = opened.0[..3].to_vec(); // our start, the MS-02's answer, our control lines
-    transcript.extend([
-        output(1, b"hello"),
-        (Direction::Sent, vec![0x28, 0, 0, 0, 3, 0, 0, 0, 1, 0, b'\r']),
-        output(2, b"login: "),
-    ]);
-    let fixture = tempfile::tempdir()?;
-    Transcript(transcript).save(&fixture.path().join("sol.transcript"))?;
-    std::fs::create_dir(fixture.path().join("wsman"))?;
-    for file in ["AMT_RedirectionService.Get.xml", "IPS_OptInService.Get.xml"] {
-        std::fs::copy(mock_amt::fixture("ms-02").join("wsman").join(file), fixture.path().join("wsman").join(file))?;
-    }
+    transcript.extend([output(1, b"hello"), sent(&[0x28, 0, 0, 0, 3, 0, 0, 0, 1, 0, b'\r']), output(2, b"login: ")]);
+    let fixture = redirecting("sol", transcript)?;
 
     let amt = start(fixture.path()).await;
     let sol = client(&amt, PASSWORD, None)?.sol().await?;

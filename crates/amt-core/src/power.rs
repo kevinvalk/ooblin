@@ -2,7 +2,7 @@ use instant_xml::ToXml;
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
-use crate::wsman::{Instance, Method, Reference};
+use crate::wsman::{Instance, Reference, method};
 use crate::{Client, Error, Result};
 
 /// The power state, and what the device offers to do about it right now.
@@ -213,10 +213,7 @@ struct RequestPowerStateChange<'a> {
     ManagedElement: Reference<'a>,
 }
 
-impl Method for RequestPowerStateChange<'_> {
-    const URI: &'static str = POWER_MANAGEMENT;
-    const NAME: &'static str = "RequestPowerStateChange";
-}
+method!(RequestPowerStateChange<'_>, POWER_MANAGEMENT);
 
 /// Without a `Source`, it clears the boot order.
 #[derive(ToXml)]
@@ -225,10 +222,7 @@ struct ChangeBootOrder<'a> {
     Source: Option<Reference<'a>>,
 }
 
-impl Method for ChangeBootOrder<'_> {
-    const URI: &'static str = BOOT_CONFIG;
-    const NAME: &'static str = "ChangeBootOrder";
-}
+method!(ChangeBootOrder<'_>, BOOT_CONFIG);
 
 #[derive(ToXml)]
 #[xml(rename = "SetBootConfigRole_INPUT", ns(BOOT_SERVICE))]
@@ -237,10 +231,7 @@ struct SetBootConfigRole<'a> {
     Role: u8,
 }
 
-impl Method for SetBootConfigRole<'_> {
-    const URI: &'static str = BOOT_SERVICE;
-    const NAME: &'static str = "SetBootConfigRole";
-}
+method!(SetBootConfigRole<'_>, BOOT_SERVICE);
 
 /// Exactly the settings AMT takes back.
 #[derive(ToXml)]
@@ -249,10 +240,7 @@ struct BootStateChange {
     RequestedState: u16,
 }
 
-impl Method for BootStateChange {
-    const URI: &'static str = BOOT_SERVICE;
-    const NAME: &'static str = "RequestStateChange";
-}
+method!(BootStateChange, BOOT_SERVICE, "RequestStateChange");
 
 #[derive(ToXml)]
 #[xml(rename = "AMT_BootSettingData", ns(BOOT_SETTINGS))]

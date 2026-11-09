@@ -8,6 +8,7 @@
   },
   "dependencies": {
     "@tauri-apps/api": "~2.12",
+    "@tauri-apps/plugin-log": "~2.10",
     "@xterm/xterm": "^6.0.0"
   },
   "devDependencies": {

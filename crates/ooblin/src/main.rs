@@ -2,80 +2,29 @@
 
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod connections;
 mod hosts;
 
-use std::collections::HashMap;
 use std::fmt::Display;
+use std::io;
 use std::ops::Range;
 use std::path::PathBuf;
 use std::sync::Arc;
 
 use amt_core::{
-    AuditRecord, Change, Client, Error, Event, Found, Hardware, Info, Input, Kvm, Power, PowerAction, RMCP_PORT,
-    Screens, Settings, Sol, Status, Target,
+    AuditRecord, Error, Event, Found, Hardware, Ider, Input, Power, PowerAction, RMCP_PORT, Screens, Settings, Status,
+    Target,
 };
 use clap::Parser;
-use hosts::{Device, Hosts};
+use connections::{Change, Changed, Connected, Connections, Task};
+use hosts::Device;
 use serde::Serialize;
-use tauri::async_runtime::{JoinHandle, Mutex};
 use tauri::ipc::{Channel, Response};
-use tauri::{AppHandle, State, WebviewWindow};
+use tauri::{AppHandle, Emitter, Manager, State, WebviewWindow};
+use tauri_plugin_log::RotationStrategy;
 use tauri_plugin_opener::OpenerExt;
 use tauri_plugin_window_state::StateFlags;
 use ts_rs::TS;
-
-/// One session per connected device: its client, on its own lock as AMT wants its calls one at a time (other devices
-/// don't care), its screen and serial console while they're open and the disk image in its drive.
-#[derive(Default)]
-struct Sessions(std::sync::Mutex<HashMap<String, Session>>);
-
-#[derive(Clone)]
-struct Session {
-    client: Arc<Mutex<Client>>,
-    kvm: Option<Arc<Kvm>>,
-    sol: Option<Arc<Sol>>,
-    image: Option<Arc<Task>>,
-}
-
-/// A task that stops with the last copy of it: one serving a disk image, or looking for devices.
-struct Task(JoinHandle<()>);
-
-impl Drop for Task {
-    fn drop(&mut self) {
-        self.0.abort();
-    }
-}
-
-impl Sessions {
-    fn get(&self, host: &str) -> Result<Session, CommandError> {
-        let session = self.0.lock().unwrap().get(host).cloned();
-        session.ok_or_else(|| CommandError::failed(format!("Not connected to {host}.")))
-    }
-
-    fn kvm(&self, host: &str) -> Result<Arc<Kvm>, CommandError> {
-        self.get(host)?.kvm.ok_or_else(|| CommandError::failed("The screen isn't open."))
-    }
-
-    fn sol(&self, host: &str) -> Result<Arc<Sol>, CommandError> {
-        self.get(host)?.sol.ok_or_else(|| CommandError::failed("The serial console isn't open."))
-    }
-
-    fn update<T>(&self, host: &str, change: impl FnOnce(&mut Session) -> T) -> Option<T> {
-        self.0.lock().unwrap().get_mut(host).map(change)
-    }
-
-    async fn close_kvm(&self, host: &str) {
-        if let Some(kvm) = self.update(host, |session| session.kvm.take()).flatten() {
-            kvm.close().await;
-        }
-    }
-
-    async fn close_sol(&self, host: &str) {
-        if let Some(sol) = self.update(host, |session| session.sol.take()).flatten() {
-            sol.close().await;
-        }
-    }
-}
 
 /// A desktop console for Intel AMT.
 #[derive(Parser)]
@@ -89,67 +38,68 @@ struct Args {
     password: Option<String>,
 }
 
-/// The device to open on start, if any. The webview connects to it like a click in the sidebar would.
+/// What we were started with last, which a second start with a host replaces (see `main`).
+struct Launch(std::sync::Mutex<Args>);
+
+impl Launch {
+    /// The login the command line gives `host`, if it gives a password.
+    fn login(&self, host: &str) -> Option<Target> {
+        let args = self.0.lock().unwrap();
+        let password = args.password.clone().filter(|_| args.host.as_deref() == Some(host))?;
+        Some(Target::new(host, &args.user, password))
+    }
+}
+
+/// The device the command line names, if any. The webview opens it like a click in the sidebar would, on start and when
+/// we're started again.
 #[tauri::command]
-fn launch(app: AppHandle, args: State<'_, Args>) -> Result<Option<Device>, CommandError> {
+fn launch(connections: State<'_, Connections>, launch: State<'_, Launch>) -> Result<Option<Device>, CommandError> {
+    let args = launch.0.lock().unwrap();
     let Some(host) = args.host.clone() else { return Ok(None) };
-    let saved = Hosts::open(&app)?.device(&host).filter(|_| args.password.is_none());
+    let saved = connections.hosts()?.device(&host).filter(|_| args.password.is_none());
     let (user, remembered) = (args.user.clone(), args.password.is_some());
     Ok(Some(saved.unwrap_or(Device { host, name: String::new(), version: String::new(), user, remembered })))
 }
 
 #[tauri::command]
-fn devices(app: AppHandle) -> Result<Vec<Device>, CommandError> {
-    Ok(Hosts::open(&app)?.devices())
+fn devices(connections: State<'_, Connections>) -> Result<Vec<Device>, CommandError> {
+    Ok(connections.hosts()?.devices())
 }
 
 /// Without a `password`, with the one we have: from the command line or the OS credential store. `remember` keeps
 /// a typed one there.
 #[tauri::command]
 async fn connect(
-    app: AppHandle,
-    sessions: State<'_, Sessions>,
-    args: State<'_, Args>,
+    connections: State<'_, Connections>,
+    launch: State<'_, Launch>,
     host: String,
     user: String,
     password: Option<String>,
     remember: bool,
-) -> Result<Info, CommandError> {
-    let mut hosts = Hosts::open(&app)?;
+) -> Result<Connected, CommandError> {
     let remember = remember && password.is_some();
-    let target = match (password, &args.password) {
+    let target = match (password, launch.login(&host)) {
         (Some(password), _) => Target::new(host, user, password),
-        (None, Some(password)) if args.host.as_ref() == Some(&host) => Target::new(host, &args.user, password),
-        (None, _) => hosts.target(&host)?,
+        (None, Some(target)) => target,
+        (None, None) => connections.hosts()?.target(&host)?,
     };
-    let mut client = Client::new(&target, hosts.pin(&target.host))?;
-    let info = client.info().await?;
-    hosts.connected(&target, &info)?;
-    if remember {
-        hosts.remember(&target)?;
-    }
-    sessions
-        .0
-        .lock()
-        .unwrap()
-        .insert(target.host, Session { client: Arc::new(Mutex::new(client)), kvm: None, sol: None, image: None });
-    Ok(info)
+    connections.connect(target, remember).await
 }
 
 #[tauri::command]
-fn disconnect(sessions: State<'_, Sessions>, host: &str) {
-    sessions.0.lock().unwrap().remove(host);
+async fn disconnect(connections: State<'_, Connections>, host: &str) -> Result<(), CommandError> {
+    connections.close(host).await;
+    Ok(())
 }
 
 #[tauri::command]
-fn forget(app: AppHandle, sessions: State<'_, Sessions>, host: &str) -> Result<(), CommandError> {
-    disconnect(sessions, host);
-    Hosts::open(&app)?.forget(host)
+async fn forget(connections: State<'_, Connections>, host: &str) -> Result<(), CommandError> {
+    connections.forget(host).await
 }
 
 #[tauri::command]
-fn trust(app: AppHandle, host: &str, fingerprint: String) -> Result<(), CommandError> {
-    Ok(Hosts::open(&app)?.trust(host, fingerprint)?)
+fn trust(connections: State<'_, Connections>, host: &str, fingerprint: String) -> Result<(), CommandError> {
+    Ok(connections.edit(|hosts| hosts.trust(host, fingerprint))?)
 }
 
 /// Whether this is the verify build (AGENTS.md), which keeps to the mock and off the user's screen.
@@ -192,144 +142,134 @@ fn stop_discovery(discovery: State<'_, Discovery>) {
 }
 
 #[tauri::command]
-async fn set_power(sessions: State<'_, Sessions>, host: &str, action: PowerAction) -> Result<(), CommandError> {
-    let session = sessions.get(host)?;
-    let serving = session.image.is_some_and(|image| !image.0.inner().is_finished());
-    if matches!(action, PowerAction::OnToImage | PowerAction::ResetToImage) && !serving {
+async fn set_power(connections: State<'_, Connections>, host: &str, action: PowerAction) -> Result<(), CommandError> {
+    let connection = connections.get(host)?;
+    if matches!(action, PowerAction::OnToImage | PowerAction::ResetToImage) && !connection.image.serving().await {
         return Err(CommandError::failed("No disk image is mounted, mount one again."));
     }
-    Ok(session.client.lock().await.set_power(action).await?)
+    log::info!("{action:?} on {host}");
+    Ok(connection.client.lock().await.set_power(action).await?)
 }
 
-/// What the UI reads from a session: a command per `Client` read, named after it.
+/// What the UI reads from a device: a command per `Client` read, named after it.
 macro_rules! reads {
     ($($name:ident: $type:ty),*) => {$(
         #[tauri::command]
-        async fn $name(sessions: State<'_, Sessions>, host: &str) -> Result<$type, CommandError> {
-            Ok(sessions.get(host)?.client.lock().await.$name().await?)
+        async fn $name(connections: State<'_, Connections>, host: &str) -> Result<$type, CommandError> {
+            Ok(connections.get(host)?.client.lock().await.$name().await?)
         }
     )*};
 }
 
 reads!(power: Power, status: Status, hardware: Hardware, settings: Settings, event_log: Vec<Event>, audit_log: Vec<AuditRecord>);
 
-/// Changes a setting and says them all after, see `Client::change`. A disk image goes when they're turned off, the
-/// webview closes the screen and serial console. A new name goes in the device list.
+/// Changes a setting and says how it went, see `Connections::change`. The webview closes the screen and serial console
+/// once they're off.
 #[tauri::command]
-async fn change(
-    app: AppHandle,
-    sessions: State<'_, Sessions>,
-    host: &str,
-    change: Change,
-) -> Result<Settings, CommandError> {
-    let client = sessions.get(host)?.client;
-    let mut client = client.lock().await;
-    client.change(&change).await?;
-    if let Change::RemoteAccess(access) = change
-        && !access.ider
-    {
-        sessions.update(host, |session| session.image = None);
-    }
-    let settings = client.settings().await?;
-    Hosts::open(&app)?.renamed(host, &settings.general.name)?;
-    Ok(settings)
+async fn change(connections: State<'_, Connections>, host: &str, change: Change) -> Result<Changed, CommandError> {
+    connections.change(host, change).await
 }
 
 /// Writes the certificate as PEM to `path`.
 #[tauri::command]
 async fn save_certificate(
-    sessions: State<'_, Sessions>,
+    connections: State<'_, Connections>,
     host: &str,
     id: &str,
     path: PathBuf,
 ) -> Result<(), CommandError> {
-    let pem = sessions.get(host)?.client.lock().await.certificate(id).await?;
+    let pem = connections.get(host)?.client.lock().await.certificate(id).await?;
     Ok(std::fs::write(path, pem)?)
 }
 
 /// Opens AMT's own web pages in the browser.
 #[tauri::command]
-async fn web_pages(app: AppHandle, sessions: State<'_, Sessions>, host: &str) -> Result<(), CommandError> {
-    let url = sessions.get(host)?.client.lock().await.web_pages();
+async fn web_pages(app: AppHandle, connections: State<'_, Connections>, host: &str) -> Result<(), CommandError> {
+    let url = connections.get(host)?.client.lock().await.web_pages();
     app.opener().open_url(url, None::<&str>).map_err(CommandError::failed)
 }
 
 /// Has the device show a code for someone at it to read out, see `Client::start_consent`.
 #[tauri::command]
-async fn consent_start(sessions: State<'_, Sessions>, host: &str) -> Result<(), CommandError> {
-    Ok(sessions.get(host)?.client.lock().await.start_consent().await?)
+async fn consent_start(connections: State<'_, Connections>, host: &str) -> Result<(), CommandError> {
+    Ok(connections.get(host)?.client.lock().await.start_consent().await?)
 }
 
 #[tauri::command]
-async fn consent_send(sessions: State<'_, Sessions>, host: &str, code: u32) -> Result<(), CommandError> {
-    Ok(sessions.get(host)?.client.lock().await.send_consent(code).await?)
+async fn consent_send(connections: State<'_, Connections>, host: &str, code: u32) -> Result<(), CommandError> {
+    Ok(connections.get(host)?.client.lock().await.send_consent(code).await?)
 }
 
 #[tauri::command]
-async fn consent_cancel(sessions: State<'_, Sessions>, host: &str) -> Result<(), CommandError> {
-    Ok(sessions.get(host)?.client.lock().await.cancel_consent().await?)
+async fn consent_cancel(connections: State<'_, Connections>, host: &str) -> Result<(), CommandError> {
+    Ok(connections.get(host)?.client.lock().await.cancel_consent().await?)
 }
 
-/// Opens the device's screen, see `Client::kvm`, closing the one that may be open: AMT takes one at a time.
+/// Opens the device's screen and says its id, which the other `kvm_` commands take. See `Connections::open`.
 #[tauri::command]
-async fn kvm_open(sessions: State<'_, Sessions>, host: &str) -> Result<(), CommandError> {
-    sessions.close_kvm(host).await;
-    let kvm = Arc::new(sessions.get(host)?.client.lock().await.kvm().await?);
-    sessions.update(host, |session| session.kvm = Some(kvm));
-    Ok(())
+async fn kvm_open(connections: State<'_, Connections>, host: &str) -> Result<u64, CommandError> {
+    connections.open(host, |connection| &connection.kvm, async |client| client.kvm().await.map(Arc::new)).await
 }
 
 /// See `Client::screens`.
 #[tauri::command]
-async fn screens(sessions: State<'_, Sessions>, host: &str) -> Result<Screens, CommandError> {
-    Ok(sessions.get(host)?.client.lock().await.screens().await?)
+async fn screens(connections: State<'_, Connections>, host: &str) -> Result<Screens, CommandError> {
+    Ok(connections.get(host)?.client.lock().await.screens().await?)
 }
 
 #[tauri::command]
-async fn show_screen(sessions: State<'_, Sessions>, host: &str, screen: u8) -> Result<(), CommandError> {
-    Ok(sessions.get(host)?.client.lock().await.show_screen(screen).await?)
+async fn show_screen(connections: State<'_, Connections>, host: &str, screen: u8) -> Result<(), CommandError> {
+    Ok(connections.get(host)?.client.lock().await.show_screen(screen).await?)
 }
 
 /// The next change on screen, as bytes rather than JSON (see `Kvm::frame`).
 #[tauri::command]
-async fn kvm_frame(sessions: State<'_, Sessions>, host: &str) -> Result<Response, CommandError> {
-    Ok(Response::new(sessions.kvm(host)?.frame().await?))
+async fn kvm_frame(connections: State<'_, Connections>, host: &str, id: u64) -> Result<Response, CommandError> {
+    Ok(Response::new(connections.get(host)?.kvm.get(id).await?.frame().await?))
 }
 
 #[tauri::command]
-async fn kvm_input(sessions: State<'_, Sessions>, host: &str, inputs: Vec<Input>) -> Result<(), CommandError> {
-    Ok(sessions.kvm(host)?.input(inputs).await?)
+async fn kvm_input(
+    connections: State<'_, Connections>,
+    host: &str,
+    id: u64,
+    inputs: Vec<Input>,
+) -> Result<(), CommandError> {
+    Ok(connections.get(host)?.kvm.get(id).await?.input(inputs).await?)
 }
 
+/// Closes the screen `id` names, unless another one opened since or the device was disconnected, which closed it.
 #[tauri::command]
-async fn kvm_close(sessions: State<'_, Sessions>, host: &str) -> Result<(), CommandError> {
-    sessions.close_kvm(host).await;
+async fn kvm_close(connections: State<'_, Connections>, host: &str, id: u64) -> Result<(), CommandError> {
+    if let Ok(connection) = connections.get(host) {
+        connection.kvm.close(Some(id)).await;
+    }
     Ok(())
 }
 
-/// Opens the device's serial console, see `Client::sol`, closing the one that may be open.
+/// Opens the device's serial console and says its id, which the other `sol_` commands take, like `kvm_open`.
 #[tauri::command]
-async fn sol_open(sessions: State<'_, Sessions>, host: &str) -> Result<(), CommandError> {
-    sessions.close_sol(host).await;
-    let sol = Arc::new(sessions.get(host)?.client.lock().await.sol().await?);
-    sessions.update(host, |session| session.sol = Some(sol));
-    Ok(())
+async fn sol_open(connections: State<'_, Connections>, host: &str) -> Result<u64, CommandError> {
+    connections.open(host, |connection| &connection.sol, async |client| client.sol().await.map(Arc::new)).await
 }
 
 /// What the device wrote to its serial port since, see `Sol::read`, as bytes rather than JSON.
 #[tauri::command]
-async fn sol_read(sessions: State<'_, Sessions>, host: &str) -> Result<Response, CommandError> {
-    Ok(Response::new(sessions.sol(host)?.read().await?))
+async fn sol_read(connections: State<'_, Connections>, host: &str, id: u64) -> Result<Response, CommandError> {
+    Ok(Response::new(connections.get(host)?.sol.get(id).await?.read().await?))
 }
 
 #[tauri::command]
-async fn sol_write(sessions: State<'_, Sessions>, host: &str, data: String) -> Result<(), CommandError> {
-    Ok(sessions.sol(host)?.write(data.as_bytes()).await?)
+async fn sol_write(connections: State<'_, Connections>, host: &str, id: u64, data: String) -> Result<(), CommandError> {
+    Ok(connections.get(host)?.sol.get(id).await?.write(data.as_bytes()).await?)
 }
 
+/// Like `kvm_close`.
 #[tauri::command]
-async fn sol_close(sessions: State<'_, Sessions>, host: &str) -> Result<(), CommandError> {
-    sessions.close_sol(host).await;
+async fn sol_close(connections: State<'_, Connections>, host: &str, id: u64) -> Result<(), CommandError> {
+    if let Ok(connection) = connections.get(host) {
+        connection.sol.close(Some(id)).await;
+    }
     Ok(())
 }
 
@@ -352,37 +292,68 @@ fn pick_save(app: AppHandle, window: WebviewWindow, name: &str) -> Option<PathBu
     rfd::FileDialog::new().set_parent(&window).set_file_name(name).save_file()
 }
 
-/// Puts the image at `path` in the device's drive (see `Client::ider`) and says its name and size, then what of it the
-/// device reads on `reads` as it goes, and nothing once the device closed the drive. AMT has one drive, so the image in
-/// it comes out first. Ejecting it says nothing, the webview knows.
+/// A disk image in a device's drive: the id `ider_eject` takes, its file's name and its size.
+#[derive(Serialize, TS)]
+#[ts(export_to = "ooblin.ts")]
+struct Mounted {
+    id: u64,
+    name: String,
+    size: u64,
+}
+
+/// What the device does with the disk image in its drive: reads part of it, in bytes, or ends the session, a reset say,
+/// saying why if it broke off. Taking it out says neither, the webview knows.
+#[derive(Serialize, TS)]
+#[ts(export_to = "ooblin.ts")]
+#[serde(tag = "kind")]
+enum Drive {
+    Read(Range<u64>),
+    Ended { error: Option<CommandError> },
+}
+
+/// Puts the image at `path` in the device's drive (see `Client::ider`), taking out the one in it, then says on `drive`
+/// what the device does with it.
 #[tauri::command]
 async fn ider_mount(
-    sessions: State<'_, Sessions>,
+    connections: State<'_, Connections>,
     host: &str,
     path: PathBuf,
-    reads: Channel<Option<Range<u64>>>,
-) -> Result<(String, u64), CommandError> {
+    drive: Channel<Drive>,
+) -> Result<Mounted, CommandError> {
     let file = std::fs::File::open(&path)?;
     let size = file.metadata()?.len();
-    sessions.update(host, |session| session.image = None);
-    let ider = sessions.get(host)?.client.lock().await.ider(file).await?;
-    let ended = reads.clone();
-    let serve = ider.serve(move |read| reads.send(Some(read)).unwrap_or_default());
-    let image = Arc::new(Task(tauri::async_runtime::spawn(async move {
-        // How it ended doesn't matter, that it did does.
-        serve.await.unwrap_or_default();
-        ended.send(None).unwrap_or_default();
-    })));
-    sessions.update(host, |session| session.image = Some(image));
-    Ok((path.file_name().unwrap_or_default().to_string_lossy().into_owned(), size))
+    let name = path.file_name().unwrap_or_default().to_string_lossy().into_owned();
+    let image = format!("{name} in {host}'s drive");
+    let id = connections
+        .open(
+            host,
+            |connection| &connection.image,
+            async |client| Ok(Task(tauri::async_runtime::spawn(serve(client.ider(file).await?, drive, image)))),
+        )
+        .await?;
+    Ok(Mounted { id, name, size })
 }
 
+/// Serves the disk `image` (see `Ider::serve`), saying on `drive` what the device reads of it and how serving it ended.
+async fn serve(ider: Ider, drive: Channel<Drive>, image: String) {
+    let ended = ider.serve(|read| drive.send(Drive::Read(read)).unwrap_or_default()).await;
+    match &ended {
+        Ok(()) => log::info!("The device closed {image}"),
+        Err(error) => log::warn!("Serving {image} broke off: {error}"),
+    }
+    drive.send(Drive::Ended { error: ended.err().map(Into::into) }).unwrap_or_default();
+}
+
+/// Takes the disk image `id` names out of the drive, like `kvm_close`.
 #[tauri::command]
-fn ider_eject(sessions: State<'_, Sessions>, host: &str) {
-    sessions.update(host, |session| session.image = None);
+async fn ider_eject(connections: State<'_, Connections>, host: &str, id: u64) -> Result<(), CommandError> {
+    if let Ok(connection) = connections.get(host) {
+        connection.image.close(Some(id)).await;
+    }
+    Ok(())
 }
 
-/// The window is titled after the session on screen.
+/// The window is titled after the device on screen.
 #[tauri::command]
 fn title(window: WebviewWindow, title: &str) -> Result<(), CommandError> {
     window.set_title(title).map_err(CommandError::failed)
@@ -394,11 +365,22 @@ fn fullscreen(window: WebviewWindow, on: bool) -> Result<(), CommandError> {
     window.set_fullscreen(on).map_err(CommandError::failed)
 }
 
+/// Writes the log (see `main`) to `path`, the older file first.
+#[tauri::command]
+fn save_log(app: AppHandle, path: PathBuf) -> Result<(), CommandError> {
+    let logs = app.path().app_log_dir().map_err(CommandError::failed)?;
+    let mut files = std::fs::read_dir(logs)?.collect::<io::Result<Vec<_>>>()?;
+    files.retain(|file| file.path().extension().is_some_and(|extension| extension == "log"));
+    files.sort_by_key(|file| file.metadata().and_then(|metadata| metadata.modified()).ok());
+    let log = files.iter().map(|file| std::fs::read(file.path())).collect::<io::Result<Vec<_>>>()?;
+    Ok(std::fs::write(path, log.concat())?)
+}
+
 /// What the webview gets when a command fails: always a message, and both fingerprints when the certificate changed.
 /// `Unreachable` means the device stopped answering, even to a second try, `Consent` that someone at it has to read out
 /// a code first (see `consent_start`).
-#[derive(Serialize, TS)]
-#[ts(export, export_to = "ooblin.ts")]
+#[derive(Debug, Serialize, TS)]
+#[ts(export_to = "ooblin.ts")]
 #[serde(tag = "kind")]
 enum CommandError {
     PinMismatch { message: String, expected: String, actual: String },
@@ -410,6 +392,16 @@ enum CommandError {
 impl CommandError {
     fn failed(message: impl Display) -> Self {
         Self::Failed { message: message.to_string() }
+    }
+}
+
+impl Display for CommandError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let (Self::PinMismatch { message, .. }
+        | Self::Unreachable { message }
+        | Self::Consent { message }
+        | Self::Failed { message }) = self;
+        formatter.write_str(message)
     }
 }
 
@@ -425,8 +417,8 @@ impl From<Error> for CommandError {
     }
 }
 
-impl From<std::io::Error> for CommandError {
-    fn from(error: std::io::Error) -> Self {
+impl From<io::Error> for CommandError {
+    fn from(error: io::Error) -> Self {
         Self::failed(error)
     }
 }
@@ -437,18 +429,60 @@ impl From<keyring::Error> for CommandError {
     }
 }
 
+/// Writes our types the webview sees to ui/src/bindings/ooblin.ts (see .cargo/config.toml), without the amt-core types
+/// they hold: amt-core's tests write those, and ts-rs writes a file anew the first time a test run writes to it.
+#[test]
+fn bindings() -> Result<(), ts_rs::ExportError> {
+    let config = ts_rs::Config::from_env();
+    Change::export(&config)?;
+    Changed::export(&config)?;
+    CommandError::export(&config)?;
+    Connected::export(&config)?;
+    Device::export(&config)?;
+    Drive::export(&config)?;
+    Mounted::export(&config)
+}
+
 fn main() {
-    let builder = tauri::Builder::default();
+    let args = Args::parse();
+    // First, so a second start hands its command line to us and quits before anything else of it starts: we open its
+    // host, if it names one, as on start.
+    let builder = tauri::Builder::default().plugin(tauri_plugin_single_instance::init(|app, args, _| {
+        if let Ok(args) = Args::try_parse_from(args)
+            && args.host.is_some()
+        {
+            *app.state::<Launch>().0.lock().unwrap() = args;
+            app.emit("launch", ()).unwrap_or_default();
+        }
+        if let Some(window) = app.get_webview_window("main") {
+            window.unminimize().unwrap_or_default();
+            window.set_focus().unwrap_or_default();
+        }
+    }));
     // Debug builds let agents drive the app through a localhost WebSocket (mcp-server-tauri), release builds don't.
     #[cfg(debug_assertions)]
-    let builder =
-        builder.plugin(tauri_plugin_mcp_bridge::Builder::new().bind_address("127.0.0.1").build()).setup(|app| {
-            let bridge =
-                tauri::ipc::CapabilityBuilder::new("mcp-bridge").window("main").permission("mcp-bridge:default");
-            Ok(tauri::Manager::add_capability(app, bridge)?)
-        });
+    let builder = builder.plugin(tauri_plugin_mcp_bridge::Builder::new().bind_address("127.0.0.1").build());
 
     builder
+        // What happened, from Rust and the webview, in the OS's log folder: a megabyte at most and the one before, which
+        // `save_log` saves.
+        .plugin(
+            tauri_plugin_log::Builder::new()
+                .level(log::LevelFilter::Info)
+                .max_file_size(1_000_000)
+                .rotation_strategy(RotationStrategy::KeepSome(1))
+                .build(),
+        )
+        .setup(|app| {
+            let hosts = app.path().app_config_dir()?.join("hosts.json");
+            app.manage(Connections::new(hosts, app.config().identifier.clone()));
+            #[cfg(debug_assertions)]
+            app.add_capability(
+                tauri::ipc::CapabilityBuilder::new("mcp-bridge").window("main").permission("mcp-bridge:default"),
+            )?;
+            log::info!("Ooblin {} on {}", app.package_info().version, std::env::consts::OS);
+            Ok(())
+        })
         .plugin(tauri_plugin_opener::init())
         // The window opens where and as large as it was, but neither hidden (the verify build's) nor full screen.
         .plugin(
@@ -456,8 +490,7 @@ fn main() {
                 .with_state_flags(StateFlags::SIZE | StateFlags::POSITION | StateFlags::MAXIMIZED)
                 .build(),
         )
-        .manage(Args::parse())
-        .manage(Sessions::default())
+        .manage(Launch(args.into()))
         .manage(Discovery::default())
         .invoke_handler(tauri::generate_handler![
             launch,
@@ -497,7 +530,8 @@ fn main() {
             ider_mount,
             ider_eject,
             title,
-            fullscreen
+            fullscreen,
+            save_log
         ])
         .run(tauri::generate_context!())
         .expect("the Tauri runtime starts");

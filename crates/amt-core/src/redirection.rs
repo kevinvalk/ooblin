@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
 use crate::net::{Redirection, Session};
-use crate::wsman::{Instance, Method};
+use crate::wsman::{Instance, method};
 use crate::{Client, Error, Result};
 
 /// What may be redirected, each only while the listener is on too, and when someone at the device has to read out a
@@ -163,10 +163,7 @@ struct KvmStateChange {
     RequestedState: u16,
 }
 
-impl Method for KvmStateChange {
-    const URI: &'static str = KVM_REDIRECTION;
-    const NAME: &'static str = "RequestStateChange";
-}
+method!(KvmStateChange, KVM_REDIRECTION, "RequestStateChange");
 
 #[derive(ToXml)]
 #[xml(rename = "RequestStateChange_INPUT", ns(REDIRECTION_SERVICE))]
@@ -174,10 +171,7 @@ struct RedirectionStateChange {
     RequestedState: u16,
 }
 
-impl Method for RedirectionStateChange {
-    const URI: &'static str = REDIRECTION_SERVICE;
-    const NAME: &'static str = "RequestStateChange";
-}
+method!(RedirectionStateChange, REDIRECTION_SERVICE, "RequestStateChange");
 
 // From go-wsman-messages' `ips/optin`, Copyright Intel Corporation, Apache-2.0.
 
@@ -187,10 +181,7 @@ const OPT_IN_SERVICE: &str = "http://intel.com/wbem/wscim/1/ips-schema/1/IPS_Opt
 #[xml(rename = "StartOptIn_INPUT", ns(OPT_IN_SERVICE))]
 struct StartOptIn;
 
-impl Method for StartOptIn {
-    const URI: &'static str = OPT_IN_SERVICE;
-    const NAME: &'static str = "StartOptIn";
-}
+method!(StartOptIn, OPT_IN_SERVICE);
 
 #[derive(ToXml)]
 #[xml(rename = "SendOptInCode_INPUT", ns(OPT_IN_SERVICE))]
@@ -198,19 +189,13 @@ struct SendOptInCode {
     OptInCode: u32,
 }
 
-impl Method for SendOptInCode {
-    const URI: &'static str = OPT_IN_SERVICE;
-    const NAME: &'static str = "SendOptInCode";
-}
+method!(SendOptInCode, OPT_IN_SERVICE);
 
 #[derive(ToXml)]
 #[xml(rename = "CancelOptIn_INPUT", ns(OPT_IN_SERVICE))]
 struct CancelOptIn;
 
-impl Method for CancelOptIn {
-    const URI: &'static str = OPT_IN_SERVICE;
-    const NAME: &'static str = "CancelOptIn";
-}
+method!(CancelOptIn, OPT_IN_SERVICE);
 
 #[cfg(test)]
 mod tests {

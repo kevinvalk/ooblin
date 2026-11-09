@@ -3,7 +3,7 @@
      Whether a device that doesn't answer is gone is App's to say. -->
 <script module lang="ts">
   import type { Snippet } from "svelte";
-  import type { CommandError } from "../bindings/ooblin";
+  import type { CommandError, Drive, Mounted } from "../bindings/ooblin";
   import type { Info, Power, PowerAction, PowerState, RemoteAccess, Settings as SettingsData } from "../bindings/core";
 
   /** What App shows of a connection too: in the sidebar, the title and the footer. */
@@ -231,9 +231,9 @@
     }
   }
 
-  /** The disk image in its drive: its name and size, how much of it the device read and how fast (bytes a second), and
+  /** The disk image in its drive (see `Mounted`), how much of it the device read and how fast (bytes a second), and
    * when it last read each of its `CELLS` stretches (`Date.now()`, 0 for never). And whether one is on its way in. */
-  let image: { name: string; size: number; read: number; rate: number; cells: number[] } | undefined = $state();
+  let image: (Mounted & { read: number; rate: number; cells: number[] }) | undefined = $state();
   let mounting = $state(false);
 
   /** The image is read from here as the device asks for it, the file never goes through the webview. Rust tells us what
@@ -242,28 +242,28 @@
     path ??= await invoke<string | null>("pick", { kind: "Disk image", extensions: ["iso"] });
     if (!path) return;
     mounting = true;
-    const mounted = $state({ name: "", size: 0, read: 0, rate: 0, cells: Array<number>(CELLS).fill(0) });
+    const mounted = $state({ id: 0, name: "", size: 0, read: 0, rate: 0, cells: Array<number>(CELLS).fill(0) });
     let [tick, last] = [0, 0];
-    const reads = new Channel<{ start: number; end: number } | null>();
-    reads.onmessage = (read) => {
+    const drive = new Channel<Drive>((event) => {
       // Until it's in, and once it's out, it's not ours to show.
       if (image !== mounted) return;
-      if (!read) {
+      if (event.kind === "Ended") {
         image = undefined;
+        if (event.error) return say(`${mounted.name} came out of the drive: ${reason(event.error)}`, true);
         return say(`${connection.info.name} closed the disk image (a reset, say), mount it again to use it.`);
       }
-      mounted.read += read.end - read.start;
+      mounted.read += event.end - event.start;
       const cell = (at: number) => (at * CELLS) / mounted.size;
-      for (let i = Math.floor(cell(read.start)); i < cell(read.end); i++) mounted.cells[i] = Date.now();
+      for (let i = Math.floor(cell(event.start)); i < cell(event.end); i++) mounted.cells[i] = Date.now();
       tick ||= setInterval(() => {
         [mounted.rate, last] = [mounted.read - last, mounted.read];
         if (mounted.rate) return;
         clearInterval(tick);
         tick = 0;
       }, 1000);
-    };
+    });
     try {
-      [mounted.name, mounted.size] = await invoke<[string, number]>("ider_mount", { host: connection.host, path, reads });
+      Object.assign(mounted, await invoke<Mounted>("ider_mount", { host: connection.host, path, drive }));
       image = mounted;
       say(`${mounted.name} is in the drive, the device sees it from its next boot on.`);
     } catch (error) {
@@ -275,8 +275,20 @@
   }
 
   function eject() {
-    invoke("ider_eject", { host: connection.host });
+    invoke("ider_eject", { host: connection.host, id: image!.id });
     image = undefined;
+  }
+
+  /** Moves between the tabs as tabs do: the arrow keys to the one before or after, Home and End to the first or last. */
+  function arrows(event: KeyboardEvent & { currentTarget: HTMLElement }) {
+    const tabs = [...event.currentTarget.querySelectorAll<HTMLElement>("[role=tab]")];
+    const at = tabs.indexOf(document.activeElement as HTMLElement);
+    const to = { ArrowLeft: at - 1, ArrowRight: at + 1, Home: 0, End: -1 }[event.key];
+    if (at < 0 || to === undefined) return;
+    event.preventDefault();
+    const next = tabs.at(to % tabs.length)!;
+    next.focus();
+    next.click();
   }
 
   // ⌘R would reload the whole app, we read the tab on screen again instead.
@@ -290,14 +302,18 @@
 
 <svelte:window onkeydown={keydown} />
 
-<!-- A tab that's `off` looks it, and says why when clicked. -->
+<!-- A tab that's `off` looks it, and says why when clicked. Only the one shown is in the tab order, the arrow keys move
+     between them (see `arrows`). -->
 {#snippet tabButton(name: typeof tab, label: string, off?: string)}
   <button
     type="button"
     role="tab"
+    id="{id}-{name}"
     class="-mb-px h-10 border-b-2 border-transparent text-muted hover:text-ink aria-selected:border-accent aria-selected:text-ink"
     aria-selected={name === tab}
+    aria-controls="{id}-{name === 'kvm' || name === 'sol' ? name : 'page'}-panel"
     aria-disabled={!!off}
+    tabindex={name === tab ? 0 : -1}
     title={off}
     onclick={() => (off ? say(off) : show(name))}
   >
@@ -373,7 +389,7 @@
           {#each image.cells as read}
             <!-- Each read restarts its animation, which shown again goes on where it is by now. -->
             {#key read}<div
-                class={["size-1", read ? "animate-[read_var(--decay)_linear_forwards] bg-accent" : "bg-line"]}
+                class={["size-1 bg-line", read && "animate-[read_var(--decay)_linear]"]}
                 style:animation-delay="{read - Date.now()}ms"
               ></div>{/key}
           {/each}
@@ -444,7 +460,7 @@
     </div>
   </header>
 
-  <div class="mx-8 flex items-center gap-6 border-b border-line" role="tablist">
+  <div class="mx-8 flex items-center gap-6 border-b border-line" role="tablist" tabindex="-1" onkeydown={arrows}>
     {#each Object.entries(TABS) as [name, { label }] (name)}
       {#if name !== "settings"}{@render tabButton(name as keyof typeof TABS, label)}{/if}
     {/each}
@@ -470,24 +486,32 @@
 
   {#if opened.kvm}
     <Kvm
+      id="{id}-kvm-panel"
       host={connection.host}
-      hidden={tab !== "kvm"}
+      hidden={hidden || tab !== "kvm"}
       consent={() => consent("kvm")}
       status={(text) => (waiting.kvm = text)}
+      {say}
       measured={(measured) => (screen = measured)}
     />
   {/if}
   {#if opened.sol}
     <Sol
+      id="{id}-sol-panel"
       host={connection.host}
-      hidden={tab !== "sol"}
+      hidden={hidden || tab !== "sol"}
       consent={() => consent("sol")}
       status={(text) => (waiting.sol = text)}
     />
   {/if}
   {#if tab !== "kvm" && tab !== "sol"}
     {@const Page = TABS[tab].page}
-    <main class="overflow-y-auto px-8 pb-8 @container scrollbar-gutter-stable">
+    <div
+      id="{id}-page-panel"
+      class="overflow-y-auto px-8 pb-8 @container scrollbar-gutter-stable"
+      role="tabpanel"
+      aria-labelledby="{id}-{tab}"
+    >
       <div class="mx-auto grid max-w-5xl gap-12 pt-6" aria-busy={!page?.data && !page?.error}>
         {#if page?.error}
           <div class="grid justify-items-center gap-4 py-16 text-center">
@@ -499,7 +523,7 @@
           <Page data={page?.data as never} {connection} {say} {ask} {saved} />
         {/if}
       </div>
-    </main>
+    </div>
   {/if}
 </section>
 

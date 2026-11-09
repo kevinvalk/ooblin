@@ -1,3 +1,6 @@
+// Addresses only: `core` has no sockets, see tests/net_boundary.rs.
+use core::net::{Ipv4Addr, Ipv6Addr};
+use std::str::FromStr;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use instant_xml::ToXml;
@@ -5,7 +8,7 @@ use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
 use crate::status::Configuration;
-use crate::wsman::{Instance, Key, Method, Reference};
+use crate::wsman::{Instance, Key, Reference, method};
 use crate::{Alarm, Certificate, Client, Error, Ipv4, Recovery, RemoteAccess, Result, Tls};
 
 /// How the device is set up.
@@ -68,28 +71,6 @@ impl Availability {
     const POLICIES: [u8; 4] = [1, 14, 16, 224];
 }
 
-/// A change to the settings, each made by the `Client` method it's named after.
-#[derive(Debug, Deserialize, TS)]
-#[ts(export, export_to = "core.ts")]
-pub enum Change {
-    RemoteAccess(RemoteAccess),
-    General(General),
-    PowerPolicy(String),
-    Ipv4(Ipv4),
-    Ipv6(Ipv6Settings),
-    Availability(Availability),
-    Recovery(Recovery),
-    Clock,
-    AddAlarm(Alarm),
-    DeleteAlarm(String),
-    /// The certificate in the file at `path`, see `Client::add_certificate`.
-    AddCertificate {
-        path: std::path::PathBuf,
-        trusted_root: bool,
-    },
-    DeleteCertificate(String),
-}
-
 /// When AMT itself is powered, the device's maker offering one or more.
 #[derive(Debug, Serialize, TS)]
 #[ts(export, export_to = "core.ts")]
@@ -124,25 +105,6 @@ pub enum DnsUpdate {
 }
 
 impl Client {
-    pub async fn change(&mut self, change: &Change) -> Result<()> {
-        match change {
-            Change::RemoteAccess(access) => self.set_remote_access(access).await,
-            Change::General(general) => self.set_general(general).await,
-            Change::PowerPolicy(id) => self.set_power_policy(id).await,
-            Change::Ipv4(ipv4) => self.set_ipv4(ipv4).await,
-            Change::Ipv6(ipv6) => self.set_ipv6(ipv6).await,
-            Change::Availability(available) => self.set_availability(available).await,
-            Change::Recovery(recovery) => self.set_recovery(recovery).await,
-            Change::Clock => self.set_clock().await,
-            Change::AddAlarm(alarm) => self.add_alarm(alarm).await,
-            Change::DeleteAlarm(name) => self.delete_alarm(name).await,
-            Change::AddCertificate { path, trusted_root } => {
-                self.add_certificate(&std::fs::read(path)?, *trusted_root).await
-            }
-            Change::DeleteCertificate(id) => self.delete_certificate(id).await,
-        }
-    }
-
     pub async fn settings(&mut self) -> Result<Settings> {
         let general = self.get("AMT_GeneralSettings").await?;
         let schemes = self.enumerate("AMT_SystemPowerScheme").await?;
@@ -201,7 +163,15 @@ impl Client {
         ports.into_iter().next().ok_or_else(|| Error::Protocol("the device has no network port".into()))
     }
 
+    /// Only addresses: AMT takes whatever it's given, and one it can't use takes it off the network.
     pub async fn set_ipv4(&mut self, wanted: &Ipv4) -> Result<()> {
+        let addresses =
+            [&wanted.address, &wanted.subnet_mask, &wanted.gateway, &wanted.primary_dns, &wanted.secondary_dns];
+        addresses.iter().try_for_each(|address| valid::<Ipv4Addr>(address, "IPv4"))?;
+        if wanted.configuration == Configuration::Manual && (wanted.address.is_empty() || wanted.subnet_mask.is_empty())
+        {
+            return Err(Error::Invalid("A manual configuration needs an address and a subnet mask".into()));
+        }
         let mut port = self.wired_port().await?;
         let configuration = wanted.configuration;
         port.set("DHCPEnabled", configuration == Configuration::Dhcp);
@@ -210,8 +180,6 @@ impl Client {
             port.set("IpSyncEnabled", configuration == Configuration::Os);
             port.set("SharedStaticIp", configuration == Configuration::Os);
         }
-        let addresses =
-            [&wanted.address, &wanted.subnet_mask, &wanted.gateway, &wanted.primary_dns, &wanted.secondary_dns];
         for (name, value) in ADDRESSES.into_iter().zip(addresses) {
             port.set_all(name, (!value.is_empty()).then_some(value));
         }
@@ -235,13 +203,14 @@ impl Client {
     }
 
     /// Like MeshCommander: the addresses on the port's IPv6 settings, `::` for none, and IPv6 on or off on the link
-    /// between them.
+    /// between them. Only addresses, see `set_ipv4`.
     pub async fn set_ipv6(&mut self, wanted: &Ipv6Settings) -> Result<()> {
         let configuration = wanted.configuration;
+        let addresses = [&wanted.address, &wanted.gateway, &wanted.primary_dns, &wanted.secondary_dns];
+        addresses.iter().try_for_each(|address| valid::<Ipv6Addr>(address, "IPv6"))?;
         if configuration != Ipv6Configuration::Off {
             let mut settings = self.enumerate("IPS_IPv6PortSettings").await?.into_iter().next();
             let settings = settings.as_mut().ok_or_else(|| Error::Protocol("the device has no IPv6".into()))?;
-            let addresses = [&wanted.address, &wanted.gateway, &wanted.primary_dns, &wanted.secondary_dns];
             for (name, address) in IPV6_ADDRESSES.into_iter().zip(addresses) {
                 let manual = configuration == Ipv6Configuration::Manual && !address.is_empty();
                 settings.set(name, if manual { address.to_lowercase() } else { "::".into() });
@@ -322,6 +291,14 @@ impl Client {
     }
 }
 
+/// Whether `address` is empty or an address `kind` names.
+fn valid<T: FromStr>(address: &str, kind: &str) -> Result<()> {
+    match address.is_empty() || address.parse::<T>().is_ok() {
+        true => Ok(()),
+        false => Err(Error::Invalid(format!("{address} isn't an {kind} address"))),
+    }
+}
+
 /// The wired port's link to its IPv6 settings.
 fn ipv6_link(element_settings: &[Instance]) -> Option<&Instance> {
     element_settings.iter().find(|setting| setting.get("SettingData").is_some_and(|it| it.ends_with("IPv6 Settings 0")))
@@ -364,10 +341,7 @@ const POWER_SCHEME: &str = "http://intel.com/wbem/wscim/1/amt-schema/1/AMT_Syste
 #[xml(rename = "SetPowerScheme_INPUT", ns(POWER_SCHEME))]
 pub(crate) struct SetPowerScheme;
 
-impl Method for SetPowerScheme {
-    const URI: &'static str = POWER_SCHEME;
-    const NAME: &'static str = "SetPowerScheme";
-}
+method!(SetPowerScheme, POWER_SCHEME);
 
 const TIME_SYNCHRONIZATION: &str = "http://intel.com/wbem/wscim/1/amt-schema/1/AMT_TimeSynchronizationService";
 
@@ -375,10 +349,7 @@ const TIME_SYNCHRONIZATION: &str = "http://intel.com/wbem/wscim/1/amt-schema/1/A
 #[xml(rename = "GetLowAccuracyTimeSynch_INPUT", ns(TIME_SYNCHRONIZATION))]
 struct GetLowAccuracyTimeSynch;
 
-impl Method for GetLowAccuracyTimeSynch {
-    const URI: &'static str = TIME_SYNCHRONIZATION;
-    const NAME: &'static str = "GetLowAccuracyTimeSynch";
-}
+method!(GetLowAccuracyTimeSynch, TIME_SYNCHRONIZATION);
 
 #[derive(ToXml)]
 #[xml(rename = "SetHighAccuracyTimeSynch_INPUT", ns(TIME_SYNCHRONIZATION))]
@@ -388,10 +359,7 @@ struct SetHighAccuracyTimeSynch {
     Tm2: i64,
 }
 
-impl Method for SetHighAccuracyTimeSynch {
-    const URI: &'static str = TIME_SYNCHRONIZATION;
-    const NAME: &'static str = "SetHighAccuracyTimeSynch";
-}
+method!(SetHighAccuracyTimeSynch, TIME_SYNCHRONIZATION);
 
 #[cfg(test)]
 mod tests {

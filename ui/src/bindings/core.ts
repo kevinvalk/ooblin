@@ -50,11 +50,6 @@ read_only: boolean,
  */
 in_use: boolean, };
 
-/**
- * A change to the settings, each made by the `Client` method it's named after.
- */
-export type Change = { "RemoteAccess": RemoteAccess } | { "General": General } | { "PowerPolicy": string } | { "Ipv4": Ipv4 } | { "Ipv6": Ipv6Settings } | { "Availability": Availability } | { "Recovery": Recovery } | "Clock" | { "AddAlarm": Alarm } | { "DeleteAlarm": string } | { "AddCertificate": { path: string, trusted_root: boolean, } } | { "DeleteCertificate": string };
-
 export type Configuration = "Dhcp" | "Os" | "Manual";
 
 export type Consent = "None" | "Kvm" | "All";
@@ -125,7 +120,7 @@ remote_access: RemoteAccess, };
 /**
  * What the webview sends: keys by their DOM `code` (where they sit, not what they type), the mouse with the DOM
  * `buttons` it holds and a notch of `scroll` up (negative) or down (positive), text to type, and letting go of every
- * key still held, when the screen loses focus say.
+ * key and mouse button still held, when the screen loses focus say.
  */
 export type Input = { "kind": "Key", code: string, down: boolean, } | { "kind": "Pointer", x: number, y: number, buttons: number, scroll: number, } | { "kind": "Text", text: string, } | { "kind": "Release" };
 

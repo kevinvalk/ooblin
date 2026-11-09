@@ -5,7 +5,7 @@ use jiff::{SpanRelativeTo, Timestamp, Unit};
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
-use crate::wsman::Method;
+use crate::wsman::method;
 use crate::{Client, Error, Result};
 
 #[derive(Debug, Serialize, Deserialize, TS)]
@@ -69,10 +69,7 @@ struct AddAlarm<'a> {
     AlarmTemplate: AlarmTemplate<'a>,
 }
 
-impl Method for AddAlarm<'_> {
-    const URI: &'static str = ALARM_CLOCK;
-    const NAME: &'static str = "AddAlarm";
-}
+method!(AddAlarm<'_>, ALARM_CLOCK);
 
 /// An `IPS_AlarmClockOccurrence` in the alarm clock's namespace.
 #[derive(ToXml)]

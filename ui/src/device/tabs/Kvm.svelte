@@ -1,24 +1,31 @@
 <!-- The device's screen, keyboard and mouse. Rust decodes, we paint what changed and send what's pressed: keys by
      where they sit, the mouse in the screen's own pixels. Full screen fills the screen with this alone. A screen that
      goes away (AMT drops it while the device boots, say) keeps its last picture until it's back, the footer saying so
-     meanwhile. Hidden, it stays open and painted. Without consent it stops, until connected again. -->
+     meanwhile. Hidden, it stays open and painted, and lets go of what's held. Without consent it stops, until connected
+     again. -->
 <script lang="ts">
   import { ChevronDown, Maximize, Minimize, SendHorizontal } from "@lucide/svelte";
   import { invoke } from "@tauri-apps/api/core";
+  import { getCurrentWindow } from "@tauri-apps/api/window";
   import type { Input, Screens } from "../../bindings/core";
+  import { reason } from "../Device.svelte";
   import Redirection from "../Redirection.svelte";
 
   let {
+    id: panel,
     host,
     hidden,
     consent,
     status,
+    say,
     measured,
   }: {
+    id: string;
     host: string;
     hidden: boolean;
     consent: () => Promise<boolean>;
     status: (text: string) => void;
+    say: (text: string, failed?: boolean) => void;
     measured: (screen?: { width: number; height: number; fps: number }) => void;
   } = $props();
 
@@ -30,12 +37,17 @@
   /** The device's screens, to pick one of where there are several. */
   let screens = $state<Screens>();
 
-  /** The screen is painted while it's open, each change asked for once the one before is painted. */
-  async function read(open: () => boolean) {
+  /** The open session's id, which what's pressed goes to. */
+  let id: number | undefined;
+
+  /** The screen is painted while it's open, each change asked for once the one before is painted. What was pressed
+   * for the one before goes nowhere. */
+  async function read(opened: number, open: () => boolean) {
+    [id, waiting] = [opened, []];
     const context = canvas.getContext("2d")!;
-    canvas.focus();
+    if (!hidden) canvas.focus();
     invoke<Screens>("screens", { host }).then((found) => (screens = found), () => {});
-    while (open()) paint(context, await invoke<ArrayBuffer>("kvm_frame", { host }));
+    while (open()) paint(context, await invoke<ArrayBuffer>("kvm_frame", { host, id: opened }));
   }
 
   /** Updates painted this second, said each second with the screen's size, for the footer while it's shown: a screen
@@ -67,6 +79,7 @@
   let waiting: Input[] = [];
   let sending = false;
   async function send(...inputs: Input[]) {
+    if (id === undefined) return;
     for (const input of inputs) {
       const last = waiting.at(-1);
       const moved = input.kind === "Pointer" && last?.kind === "Pointer" && last.buttons === input.buttons;
@@ -76,9 +89,14 @@
     if (sending) return;
     sending = true;
     // A screen that's gone says so in its frames.
-    while (waiting.length) await invoke("kvm_input", { host, inputs: waiting.splice(0) }).catch(() => {});
+    while (waiting.length) await invoke("kvm_input", { host, id, inputs: waiting.splice(0) }).catch(() => {});
     sending = false;
   }
+
+  // Hidden, keys and buttons held go nowhere: we let go of them.
+  $effect(() => {
+    if (hidden) send({ kind: "Release" });
+  });
 
   const mac = navigator.userAgent.includes("Mac");
 
@@ -134,7 +152,16 @@
   });
 </script>
 
-<main class={["grid min-h-0 grid-rows-[auto_1fr]", fullscreen ? "fixed inset-0 z-50 bg-canvas" : "px-8 pb-8"]} {hidden}>
+<!-- The window may leave full screen without us, the OS's own way. -->
+<svelte:window onresize={() => fullscreen && getCurrentWindow().isFullscreen().then((on) => (fullscreen = on))} />
+
+<div
+  id={panel}
+  class={["grid min-h-0 grid-rows-[auto_1fr]", fullscreen ? "fixed inset-0 z-50 bg-canvas" : "px-8 pb-8"]}
+  role="tabpanel"
+  aria-label="KVM"
+  {hidden}
+>
   <div class={["flex items-center gap-3", fullscreen ? "px-3 py-2" : "pt-4 pb-3"]}>
     <!-- Text to type on the device, sent as keys on a US keyboard. -->
     <form
@@ -164,9 +191,15 @@
         class="field h-7 px-2"
         disabled={screens.active.length < 2}
         title="The device's screen to show"
-        onchange={(event) => {
-          const screen = Number(event.currentTarget.value);
-          invoke("show_screen", { host, screen }).then(() => screens && (screens.shown = screen));
+        onchange={async (event) => {
+          const select = event.currentTarget;
+          try {
+            await invoke("show_screen", { host, screen: Number(select.value) });
+            screens!.shown = Number(select.value);
+          } catch (error) {
+            say(reason(error), true);
+            select.value = String(screens!.shown);
+          }
         }}
       >
         {#each screens.active.length ? screens.active : [screens.shown] as screen (screen)}
@@ -203,21 +236,31 @@
   </div>
 
   <!-- The device's own screen, so its own pointer: ours stays visible on top, as it moves without delay. At its own
-       size on black, shrunk only to fit, and its pixels kept sharp (not smoothed onto a Retina display's) unless it is. -->
+       size on black, shrunk only to fit, and its pixels kept sharp (not smoothed onto a Retina display's) unless it is.
+       Ringed while it has the keys, every one of which goes to the device: a click outside takes them back. -->
   <Redirection kind="kvm" {host} {consent} {status} {read}>
-  <canvas
-    bind:this={canvas}
-    bind:clientWidth={shown}
-    class={["max-h-full max-w-full outline-none", shown >= width && "[image-rendering:pixelated]"]}
-    tabindex="0"
-    onkeydown={key}
-    onkeyup={key}
-    onblur={() => send({ kind: "Release" })}
-    onpointerdown={(event) => (canvas.setPointerCapture(event.pointerId), pointer(event))}
-    onpointermove={pointer}
-    onpointerup={pointer}
-    onwheel={wheel}
-    oncontextmenu={(event) => event.preventDefault()}
-  ></canvas>
+    <!-- An application to screen readers, which then leave its keys to it. -->
+    <!-- svelte-ignore a11y_no_interactive_element_to_noninteractive_role -->
+    <canvas
+      bind:this={canvas}
+      bind:clientWidth={shown}
+      class={[
+        "max-h-full max-w-full outline-none focus:outline-2 focus:-outline-offset-2 focus:outline-accent",
+        shown >= width && "[image-rendering:pixelated]",
+      ]}
+      role="application"
+      aria-label="The device's screen"
+      title="Every key goes to the device while it has focus, a click outside it takes them back."
+      tabindex="0"
+      onkeydown={key}
+      onkeyup={key}
+      onblur={() => send({ kind: "Release" })}
+      onpointerdown={(event) => (canvas.setPointerCapture(event.pointerId), pointer(event))}
+      onpointermove={pointer}
+      onpointerup={pointer}
+      onpointercancel={() => send({ kind: "Release" })}
+      onwheel={wheel}
+      oncontextmenu={(event) => event.preventDefault()}
+    ></canvas>
   </Redirection>
-</main>
+</div>

@@ -16,7 +16,7 @@ use crate::{Client, Error, Result};
 
 /// What the webview sends: keys by their DOM `code` (where they sit, not what they type), the mouse with the DOM
 /// `buttons` it holds and a notch of `scroll` up (negative) or down (positive), text to type, and letting go of every
-/// key still held, when the screen loses focus say.
+/// key and mouse button still held, when the screen loses focus say.
 #[derive(Debug, Deserialize, TS)]
 #[ts(export, export_to = "core.ts")]
 #[serde(tag = "kind")]
@@ -54,11 +54,14 @@ struct Screen {
 
 const QUIET: Duration = Duration::from_millis(500);
 const BUSY: Duration = Duration::from_secs(1);
+/// How long a session's goodbye may take, after which dropping it hangs up all the same.
+pub(crate) const GOODBYE: Duration = Duration::from_secs(2);
 
-/// Update requests, keys and the mouse, and the keysym each held key went down as.
+/// Update requests, keys and the mouse, the keysym each held key went down as, and the mouse as we last sent it.
 struct Keyboard {
     writer: WriteHalf<Stream>,
     held: HashMap<String, u32>,
+    pointer: [u8; 6],
 }
 
 /// 16-bit RGB565, little-endian: AMT's own pixel format, which MeshCommander and Intel's console keep.
@@ -136,7 +139,7 @@ impl Kvm {
             anew: Instant::now(),
             answer: false,
         };
-        let keyboard = Keyboard { writer, held: HashMap::new() };
+        let keyboard = Keyboard { writer, held: HashMap::new(), pointer: [5, 0, 0, 0, 0, 0] };
         Ok(Self { screen: Mutex::new(screen), keyboard: Mutex::new(keyboard) })
     }
 
@@ -245,11 +248,17 @@ impl Kvm {
         Ok(())
     }
 
-    /// Ends the session once a frame still on its way is in (a second at most), saying goodbye rather than just
-    /// going: AMT takes one KVM session at a time, and the next one may already be coming.
+    /// Ends the session once a frame still on its way is in (a second at most), letting go of what's held and saying
+    /// goodbye rather than just going: AMT takes one KVM session at a time, and the next one may already be coming. A
+    /// device gone silent mid-frame gets no goodbye, see `GOODBYE`.
     pub async fn close(&self) {
-        let _screen = self.screen.lock().await;
-        let _ = self.keyboard.lock().await.writer.shutdown().await;
+        let goodbye = async {
+            let _screen = self.screen.lock().await;
+            let mut keyboard = self.keyboard.lock().await;
+            keyboard.input(Input::Release).await?;
+            Ok::<_, Error>(keyboard.writer.shutdown().await?)
+        };
+        let _ = tokio::time::timeout(GOODBYE, goodbye).await;
     }
 
     pub async fn input(&self, inputs: Vec<Input>) -> Result<()> {
@@ -316,7 +325,9 @@ impl Keyboard {
                     let notch = buttons | if scroll < 0 { 8 } else { 16 };
                     self.send(&[5, notch, x[0], x[1], y[0], y[1]]).await?;
                 }
-                self.send(&[5, buttons, x[0], x[1], y[0], y[1]]).await?;
+                let pointer = [5, buttons, x[0], x[1], y[0], y[1]];
+                self.send(&pointer).await?;
+                self.pointer = pointer;
             }
             Input::Text { text } => {
                 // A US keyboard's Latin-1 keysyms are the characters, Shift held for the shifted ones. We type at a
@@ -338,6 +349,13 @@ impl Keyboard {
             Input::Release => {
                 for keysym in std::mem::take(&mut self.held).into_values() {
                     self.send(&key(keysym, false)).await?;
+                }
+                // The mouse where it was, its buttons up.
+                let mut released = self.pointer;
+                released[1] = 0;
+                if released != self.pointer {
+                    self.send(&released).await?;
+                    self.pointer = released;
                 }
             }
         }

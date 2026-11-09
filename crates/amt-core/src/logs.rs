@@ -7,7 +7,7 @@ use instant_xml::ToXml;
 use serde::Serialize;
 use ts_rs::TS;
 
-use crate::wsman::Method;
+use crate::wsman::method;
 use crate::{Client, Error, Result};
 
 #[derive(Debug, Serialize, TS)]
@@ -87,10 +87,7 @@ const AUDIT_LOG: &str = "http://intel.com/wbem/wscim/1/amt-schema/1/AMT_AuditLog
 #[xml(rename = "PositionToFirstRecord_INPUT", ns(MESSAGE_LOG))]
 struct PositionToFirstRecord;
 
-impl Method for PositionToFirstRecord {
-    const URI: &'static str = MESSAGE_LOG;
-    const NAME: &'static str = "PositionToFirstRecord";
-}
+method!(PositionToFirstRecord, MESSAGE_LOG);
 
 #[derive(ToXml)]
 #[xml(rename = "GetRecords_INPUT", ns(MESSAGE_LOG))]
@@ -99,10 +96,7 @@ struct GetRecords<'a> {
     MaxReadRecords: u16,
 }
 
-impl Method for GetRecords<'_> {
-    const URI: &'static str = MESSAGE_LOG;
-    const NAME: &'static str = "GetRecords";
-}
+method!(GetRecords<'_>, MESSAGE_LOG);
 
 #[derive(ToXml)]
 #[xml(rename = "ReadRecords_INPUT", ns(AUDIT_LOG))]
@@ -110,10 +104,7 @@ struct ReadRecords {
     StartIndex: usize,
 }
 
-impl Method for ReadRecords {
-    const URI: &'static str = AUDIT_LOG;
-    const NAME: &'static str = "ReadRecords";
-}
+method!(ReadRecords, AUDIT_LOG);
 
 fn base64(record: &str) -> Option<Vec<u8>> {
     BASE64_STANDARD.decode(record).ok()

@@ -5,7 +5,7 @@ use instant_xml::ToXml;
 use serde::Serialize;
 use ts_rs::TS;
 
-use crate::wsman::Method;
+use crate::wsman::method;
 use crate::{Client, Error, Result};
 
 #[derive(Debug, Serialize, TS)]
@@ -127,10 +127,7 @@ struct AddTrustedRootCertificate<'a> {
     CertificateBlob: &'a str,
 }
 
-impl Method for AddTrustedRootCertificate<'_> {
-    const URI: &'static str = PUBLIC_KEY_MANAGEMENT;
-    const NAME: &'static str = "AddTrustedRootCertificate";
-}
+method!(AddTrustedRootCertificate<'_>, PUBLIC_KEY_MANAGEMENT);
 
 #[derive(ToXml)]
 #[xml(rename = "AddCertificate_INPUT", ns(PUBLIC_KEY_MANAGEMENT))]
@@ -138,10 +135,7 @@ struct AddCertificate<'a> {
     CertificateBlob: &'a str,
 }
 
-impl Method for AddCertificate<'_> {
-    const URI: &'static str = PUBLIC_KEY_MANAGEMENT;
-    const NAME: &'static str = "AddCertificate";
-}
+method!(AddCertificate<'_>, PUBLIC_KEY_MANAGEMENT);
 
 #[cfg(test)]
 mod tests {

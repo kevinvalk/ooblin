@@ -6,6 +6,7 @@ use std::time::{Duration, Instant};
 use tokio::io::{AsyncReadExt, AsyncWriteExt, ReadHalf, WriteHalf};
 use tokio::sync::Mutex;
 
+use crate::kvm::GOODBYE;
 use crate::net::{Redirection, Session, Stream};
 use crate::{Client, Error, Result};
 
@@ -95,10 +96,14 @@ impl Sol {
         Ok(())
     }
 
-    /// Ends the session once a read still on its way is in (a second at most), saying goodbye rather than just going.
+    /// Ends the session once a read still on its way is in (a second at most), saying goodbye rather than just going,
+    /// as `Kvm::close` does.
     pub async fn close(&self) {
-        let _reader = self.reader.lock().await;
-        let _ = self.writer.lock().await.half.shutdown().await;
+        let goodbye = async {
+            let _reader = self.reader.lock().await;
+            self.writer.lock().await.half.shutdown().await
+        };
+        let _ = tokio::time::timeout(GOODBYE, goodbye).await;
     }
 }
 

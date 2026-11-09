@@ -28,10 +28,10 @@
     }
 }
 
-/* A stretch of a disk image the device just read, fading to merely read, see Device's footer. */
+/* A stretch of a disk image the device just read, fading back to the gray of one it didn't, see Device's footer. */
 @keyframes read {
-    to {
-        opacity: 0.35;
+    from {
+        background-color: var(--color-accent);
     }
 }
 

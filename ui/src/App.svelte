@@ -1,11 +1,12 @@
 <!-- The window: devices on the left, the connect form or a device on the right, a status line at the bottom. -->
 <script lang="ts">
-    import { PanelLeft } from "@lucide/svelte";
+    import { PanelLeft, ScrollText } from "@lucide/svelte";
     import { invoke } from "@tauri-apps/api/core";
-    import type { CommandError, Device as Saved } from "./bindings/ooblin";
-    import type { Info } from "./bindings/core";
+    import { listen } from "@tauri-apps/api/event";
+    import * as log from "@tauri-apps/plugin-log";
+    import type { CommandError, Connected, Device as Saved } from "./bindings/ooblin";
     import Connect from "./Connect.svelte";
-    import Device, { type Connection } from "./device/Device.svelte";
+    import Device, { reason, type Connection } from "./device/Device.svelte";
     import Sidebar from "./Sidebar.svelte";
 
     /** Every device we logged in to, the open ones by host, and the one on screen (none: the connect form). */
@@ -25,9 +26,10 @@
     let hide = 0;
 
     /** Says `text` in the footer for as long as it takes to read: five seconds, more for more words, fifteen at most.
-     * What `failed` stands out. */
+     * What `failed` stands out, and goes in the log. */
     function say(text: string, failed = false) {
         message = { text, failed };
+        if (failed) log.warn(text).catch(() => {});
         clearTimeout(hide);
         hide = setTimeout(() => (message.text = ""), Math.min(5000 + 50 * text.length, 15_000));
     }
@@ -63,8 +65,10 @@
         connecting = host;
         form.error = undefined;
         try {
-            connections[host] = { host, info: await invoke<Info>("connect", login) };
+            const { info, unremembered } = await invoke<Connected>("connect", login);
+            connections[host] = { host, info };
             show(host);
+            if (unremembered) say(`Connected, but the password couldn't be remembered: ${unremembered}`, true);
         } catch (error) {
             form.error = explain(error, `Couldn't reach ${host}`);
         } finally {
@@ -85,21 +89,22 @@
         listDevices();
     }
 
-    async function disconnect(host: string) {
-        await invoke("disconnect", { host });
+    /** Gone at once, while Rust closes what was open on it. */
+    function disconnect(host: string) {
         delete connections[host];
         if (host === current) showForm();
+        invoke("disconnect", { host });
     }
 
     async function forget(host: string) {
-        await invoke("forget", { host });
+        await invoke("forget", { host }).catch((error) => say(reason(error), true));
         listDevices();
     }
 
     /** The device stopped answering for good: we let go of it and say why, Connect tries again. */
     function lost(host: string, error: CommandError) {
-        invoke("disconnect", { host });
         delete connections[host];
+        invoke("disconnect", { host });
         const failure = explain(error, `Lost the connection to ${host}`);
         if (host === current)
             showForm(
@@ -123,11 +128,30 @@
         }
     }
 
-    // Started with a host on the command line? Open it as if it was picked from the sidebar.
+    /** What goes wrong unnoticed, an error thrown or a promise rejected, goes in the log. */
+    function unnoticed(event: Event) {
+        const error = event instanceof ErrorEvent ? event.error : (event as PromiseRejectionEvent).reason;
+        log.error(error instanceof Error ? (error.stack ?? error.message) : reason(error)).catch(() => {});
+    }
+
+    /** Saves the log where asked, see `save_log`. */
+    async function saveLog() {
+        const path = await invoke<string | null>("pick_save", { name: "Ooblin.log" });
+        if (!path) return;
+        try {
+            await invoke("save_log", { path });
+            say(`Log saved to ${path}.`);
+        } catch (error) {
+            say(reason(error), true);
+        }
+    }
+
+    // Started with a host on the command line, or started again with one? Open it as if it was picked from the sidebar.
     invoke<Saved | null>("launch").then((device) => (device ? select(device) : showForm()));
+    listen("launch", () => invoke<Saved | null>("launch").then((device) => device && select(device)));
 </script>
 
-<svelte:window onkeydown={keydown} />
+<svelte:window onkeydown={keydown} onerror={unnoticed} onunhandledrejection={unnoticed} />
 
 <div class={["grid h-screen grid-rows-[1fr_auto]", collapsed ? "grid-cols-[0_1fr]" : "grid-cols-[16rem_1fr]"]}>
     <Sidebar
@@ -187,7 +211,15 @@
                 {message.text}
             </output>
         {/if}
-        <!-- Then what the device on screen says. -->
+        <!-- Then what the device on screen says, on the right. -->
         {#if current}{@render connections[current].footer?.()}{/if}
+        <button
+            type="button"
+            class={["btn-icon size-7", !current && "ml-auto"]}
+            title="Save the log: what Ooblin did and what went wrong, with the devices' addresses and names, never a password"
+            onclick={saveLog}
+        >
+            <ScrollText class="size-4" />
+        </button>
     </footer>
 </div>

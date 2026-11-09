@@ -8,7 +8,6 @@
   import type {
     Availability,
     Certificate,
-    Change,
     Configuration,
     Consent,
     DnsUpdate,
@@ -18,6 +17,7 @@
     Ipv6Settings,
     Settings,
   } from "../../bindings/core";
+  import type { Change, Changed } from "../../bindings/ooblin";
   import { reason, type Connection } from "../Device.svelte";
   import { CONFIGURATIONS } from "./Status.svelte";
 
@@ -41,22 +41,28 @@
   /** The forms of fields that go together with changes of their own. */
   let changed = $state<Record<string, boolean>>({});
 
-  /** Makes a `change` and shows the settings after. */
+  /** Makes a `change` and shows the settings after, read again however it went: one that failed may have made some
+   * of it. Says whether it went through. */
   async function save(done: string, change: Change) {
     saving = true;
     try {
-      saved(await invoke<Settings>("change", { host: connection.host, change }));
-      say(done);
+      const { error, settings } = await invoke<Changed>("change", { host: connection.host, change });
+      if ("Ok" in settings) saved(settings.Ok);
+      const unread = "Err" in settings ? ` The settings couldn't be read again: ${reason(settings.Err)}` : "";
+      say((error ? reason(error) : done) + unread, !!(error || unread));
+      return !error;
     } catch (error) {
       say(reason(error), true);
+      return false;
     } finally {
       saving = false;
     }
   }
 
-  /** Saves a form, read from its fields, then shows what the device took: the settings are the fields' defaults. */
-  async function apply(form: HTMLFormElement, change: (fields: FormData) => Promise<unknown>) {
-    await change(new FormData(form));
+  /** Saves a form, read from its fields, then shows what the device took: the settings are the fields' defaults. One
+   * that `keep`s what was typed does unless it went through, to try again or cancel. */
+  async function apply(form: HTMLFormElement, change: (fields: FormData) => Promise<unknown>, keep = false) {
+    if (!(await change(new FormData(form))) && keep) return;
     await tick();
     form.reset();
   }
@@ -81,7 +87,7 @@
       ider: fields.has("ider"),
       consent: (fields.get("consent") as Consent | null) ?? was.consent,
     };
-    await save(done, { RemoteAccess: access });
+    return save(done, { RemoteAccess: access });
   }
 
   async function recovery(fields: FormData, done: string) {
@@ -91,13 +97,13 @@
       one_click: was.one_click === null ? null : fields.has("one_click"),
       platform_erase: was.platform_erase === null ? null : fields.has("platform_erase"),
     };
-    await save(done, { Recovery: recovery });
+    return save(done, { Recovery: recovery });
   }
 
   /** The name, ping and how long AMT stays awake are one setting in AMT, which `change` changes some of. */
   async function general(change: Partial<General>, done: string) {
     if (!data) return;
-    await save(done, { General: { ...data.general, ...change } });
+    return save(done, { General: { ...data.general, ...change } });
   }
 
   const WHEN = [
@@ -114,7 +120,7 @@
     const lost = WHEN.some(([when]) => was[when] && !available[when]);
     const question = "AMT goes off the network then, and can't be reached until it's back on.";
     if (lost && !(await ask(question, ["Turn off"]))) return;
-    await save("Reachability saved.", { Availability: available });
+    return save("Reachability saved.", { Availability: available });
   }
 
   /** The IP forms' configurations while they're edited: only a manual one takes addresses. */
@@ -134,13 +140,13 @@
     const addresses = Object.fromEntries(ADDRESSES.map(([name]) => [name, text(fields, `ipv4_${name}`)]));
     const ipv4 = { configuration: fields.get("ipv4") as Configuration, ...addresses } as Ipv4;
     const question = `AMT may get another address, which ${connection.host} doesn't reach.`;
-    if (await ask(question, ["Save"])) await save(done, { Ipv4: ipv4 });
+    if (await ask(question, ["Save"])) return save(done, { Ipv4: ipv4 });
   }
 
   async function ipv6(fields: FormData, done: string) {
     const addresses = Object.fromEntries(ADDRESSES.map(([name]) => [name, text(fields, `ipv6_${name}`)]));
     const ipv6 = { configuration: fields.get("ipv6") as Ipv6Configuration, ...addresses } as Ipv6Settings;
-    await save(done, { Ipv6: ipv6 });
+    return save(done, { Ipv6: ipv6 });
   }
 
   async function addCertificate() {
@@ -277,7 +283,7 @@
       onkeydown={(event) => event.key === "Escape" && event.currentTarget.reset()}
       onsubmit={(event) => {
         event.preventDefault();
-        apply(event.currentTarget, (fields) => change(fields, `${title} saved.`));
+        apply(event.currentTarget, (fields) => change(fields, `${title} saved.`), true);
       }}
     >
       {@render rows()}
