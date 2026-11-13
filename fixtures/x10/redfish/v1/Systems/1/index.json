@@ -1,0 +1,112 @@
+{
+  "@odata.context": "/redfish/v1/$metadata#ComputerSystem.ComputerSystem",
+  "@odata.id": "/redfish/v1/Systems/1",
+  "@odata.type": "#ComputerSystem.v1_3_0.ComputerSystem",
+  "Actions": {
+    "#ComputerSystem.Reset": {
+      "ResetType@Redfish.AllowableValues": [
+        "On",
+        "ForceOff",
+        "GracefulShutdown",
+        "GracefulRestart",
+        "ForceRestart",
+        "Nmi",
+        "ForceOn"
+      ],
+      "target": "/redfish/v1/Systems/1/Actions/ComputerSystem.Reset"
+    }
+  },
+  "BiosVersion": "2.6a",
+  "Boot": {
+    "BootSourceOverrideEnabled": "Disabled",
+    "BootSourceOverrideTarget": "None",
+    "BootSourceOverrideTarget@Redfish.AllowableValues": [
+      "None",
+      "Pxe",
+      "Hdd",
+      "Diags",
+      "CD/DVD",
+      "BiosSetup",
+      "FloppyRemovableMedia",
+      "UsbKey",
+      "UsbHdd",
+      "UsbFloppy",
+      "UsbCd",
+      "UefiUsbKey",
+      "UefiCd",
+      "UefiHdd",
+      "UefiUsbHdd",
+      "UefiUsbCd"
+    ]
+  },
+  "Description": "Description of server",
+  "EthernetInterfaces": {
+    "@odata.id": "/redfish/v1/Systems/1/EthernetInterfaces"
+  },
+  "Id": "1",
+  "IndicatorLED": "Off",
+  "Links": {
+    "Chassis": [
+      {
+        "@odata.id": "/redfish/v1/Chassis/1"
+      }
+    ],
+    "ManagedBy": [
+      {
+        "@odata.id": "/redfish/v1/Managers/1"
+      }
+    ],
+    "Oem": {}
+  },
+  "LogServices": {
+    "@odata.id": "/redfish/v1/Systems/1/LogServices"
+  },
+  "Manufacturer": "Supermicro",
+  "Memory": {
+    "@odata.id": "/redfish/v1/Systems/1/Memory"
+  },
+  "MemorySummary": {
+    "Status": {
+      "Health": "OK",
+      "State": "Enabled"
+    },
+    "TotalSystemMemoryGiB": 64
+  },
+  "Model": "Super Server",
+  "Name": "System",
+  "Oem": {
+    "Supermicro": {
+      "@odata.type": "#SmcSystemExtensions.v1_0_0.System",
+      "SmcNodeManager": {
+        "@odata.id": "/redfish/v1/Systems/1/SmcNodeManager"
+      }
+    }
+  },
+  "PartNumber": "",
+  "PowerState": "On",
+  "ProcessorSummary": {
+    "Count": 1,
+    "Model": "Intel(R) Xeon(R) processor",
+    "Status": {
+      "Health": "OK",
+      "State": "Enabled"
+    }
+  },
+  "Processors": {
+    "@odata.id": "/redfish/v1/Systems/1/Processors"
+  },
+  "SKU": "To be filled by O.E.M.",
+  "SerialNumber": "          ",
+  "SimpleStorage": {
+    "@odata.id": "/redfish/v1/Systems/1/SimpleStorage"
+  },
+  "Status": {
+    "Health": "OK",
+    "State": "Enabled"
+  },
+  "Storage": {
+    "@odata.id": "/redfish/v1/Systems/1/Storage"
+  },
+  "SystemType": "Physical",
+  "UUID": "47367692-4478-1947-6769-5CE78DD9CBB6"
+}

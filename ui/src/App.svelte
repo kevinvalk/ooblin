@@ -5,7 +5,7 @@
     import { listen } from "@tauri-apps/api/event";
     import * as log from "@tauri-apps/plugin-log";
     import type { CommandError, Connected, Device as Saved } from "./bindings/ooblin";
-    import Connect from "./Connect.svelte";
+    import Connect, { type Login } from "./Connect.svelte";
     import Device, { reason, type Connection } from "./device/Device.svelte";
     import Sidebar from "./Sidebar.svelte";
 
@@ -49,6 +49,7 @@
                 user: device.user,
                 password: null,
                 remember: false,
+                flavor: null,
             });
     }
 
@@ -60,7 +61,7 @@
     }
 
     /** Without a `password` with the one we have, see the `connect` command. */
-    async function connect(login: { host: string; user: string; password: string | null; remember: boolean }) {
+    async function connect(login: Omit<Login, "password"> & { password: string | null }) {
         const host = login.host;
         connecting = host;
         form.error = undefined;
@@ -117,7 +118,7 @@
     // The window is titled after the device on screen.
     $effect(() => {
         invoke("title", {
-            title: current ? `${connections[current].info.name} – Ooblin` : "Ooblin",
+            title: current ? `${connections[current].info.name || current} – Ooblin` : "Ooblin",
         });
     });
 

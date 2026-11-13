@@ -13,6 +13,9 @@
     --color-danger: #d70015;
     --color-on: #30d158;
     --color-asleep: #ff9f0a;
+    /* A kind of device, behind white text: Intel's blue, and a teal for a BMC. */
+    --color-amt: #0068b5;
+    --color-ipmi: #0f766e;
 }
 
 @media (prefers-color-scheme: dark) {
@@ -78,6 +81,20 @@
 
     dialog {
         @apply m-auto w-96 rounded-xl border border-line bg-canvas p-5 text-ink shadow-2xl backdrop:bg-black/30;
+    }
+
+    /* A reading between its bounds, the same everywhere (WebKit, WebKitGTK and WebView2 all take these) and in the
+       color of its text. */
+    meter {
+        @apply h-1.5 w-32 appearance-none;
+
+        &::-webkit-meter-bar {
+            @apply h-full rounded-full border-0 bg-line bg-none;
+        }
+
+        &::-webkit-meter-optimum-value {
+            @apply rounded-full bg-current bg-none;
+        }
     }
 }
 
@@ -152,7 +169,7 @@
     .field {
         @apply h-9 rounded-lg border border-line bg-field px-3 select-text outline-none focus-within:border-accent/60 disabled:bg-transparent disabled:text-muted;
 
-        & > input {
+        & > :is(input, textarea) {
             @apply min-w-0 flex-1 bg-transparent outline-none;
         }
     }

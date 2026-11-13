@@ -1,4 +1,4 @@
-//! A webview over `amt-core`. The webview never holds a socket or a stored password, it calls these commands.
+//! A webview over `ooblin-core`. The webview never holds a socket or a stored password, it calls these commands.
 
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
@@ -11,13 +11,15 @@ use std::ops::Range;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use amt_core::{
-    AuditRecord, Error, Event, Found, Hardware, Ider, Input, Power, PowerAction, RMCP_PORT, Screens, Settings, Status,
-    Target,
-};
 use clap::Parser;
 use connections::{Change, Changed, Connected, Connections, Task};
 use hosts::Device;
+use ooblin_core::amt::{AuditRecord, Ider, Screens, Settings};
+use ooblin_core::ipmi::{Change as IpmiChange, Fru, IpmiSettings, IpmiStatus};
+use ooblin_core::supermicro::{BmcSettings, BmcStatus, Change as BmcChange};
+use ooblin_core::{
+    Client, Error, Event, Flavor, Found, Hardware, Input, Panel, Power, PowerAction, RMCP_PORT, Sensor, Status, Target,
+};
 use serde::Serialize;
 use tauri::ipc::{Channel, Response};
 use tauri::{AppHandle, Emitter, Manager, State, WebviewWindow};
@@ -26,11 +28,12 @@ use tauri_plugin_opener::OpenerExt;
 use tauri_plugin_window_state::StateFlags;
 use ts_rs::TS;
 
-/// A desktop console for Intel AMT.
+/// A desktop console for Intel AMT and Supermicro BMCs.
 #[derive(Parser)]
 #[command(version)]
 struct Args {
-    /// Connect to this host on start, with its saved credentials unless --password is given.
+    /// Connect to this host on start, with its saved credentials unless --password is given. A BMC whose web port
+    /// isn't 443 takes it here, `host:port`.
     host: Option<String>,
     #[arg(long, default_value = "admin")]
     user: String,
@@ -58,7 +61,8 @@ fn launch(connections: State<'_, Connections>, launch: State<'_, Launch>) -> Res
     let Some(host) = args.host.clone() else { return Ok(None) };
     let saved = connections.hosts()?.device(&host).filter(|_| args.password.is_none());
     let (user, remembered) = (args.user.clone(), args.password.is_some());
-    Ok(Some(saved.unwrap_or(Device { host, name: String::new(), version: String::new(), user, remembered })))
+    let unsaved = Device { host, name: String::new(), version: String::new(), user, remembered, flavor: None };
+    Ok(Some(saved.unwrap_or(unsaved)))
 }
 
 #[tauri::command]
@@ -76,6 +80,7 @@ async fn connect(
     user: String,
     password: Option<String>,
     remember: bool,
+    flavor: Option<Flavor>,
 ) -> Result<Connected, CommandError> {
     let remember = remember && password.is_some();
     let target = match (password, launch.login(&host)) {
@@ -83,7 +88,7 @@ async fn connect(
         (None, Some(target)) => target,
         (None, None) => connections.hosts()?.target(&host)?,
     };
-    connections.connect(target, remember).await
+    connections.connect(target, flavor, remember).await
 }
 
 #[tauri::command]
@@ -107,18 +112,18 @@ fn verify(app: &AppHandle) -> bool {
     app.config().identifier.ends_with(".verify")
 }
 
-/// The network to look for devices on unless told otherwise, see `amt_core::nearby`. The verify build looks on this
+/// The network to look for devices on unless told otherwise, see `ooblin_core::nearby`. The verify build looks on this
 /// machine only, where the mock is, never at the user's devices.
 #[tauri::command]
 fn networks(app: AppHandle) -> String {
-    if verify(&app) { "127.0.0.1/32".into() } else { amt_core::nearby() }
+    if verify(&app) { "127.0.0.1/32".into() } else { ooblin_core::nearby() }
 }
 
 /// The search for devices underway, see `discover`.
 #[derive(Default)]
 struct Discovery(std::sync::Mutex<Option<Task>>);
 
-/// Looks for devices on `networks` and says each on `found` as it answers, see `amt_core::discover`. It ends the
+/// Looks for devices on `networks` and says each on `found` as it answers, see `ooblin_core::discover`. It ends the
 /// search before, as does `stop_discovery`.
 #[tauri::command]
 async fn discover(
@@ -128,7 +133,7 @@ async fn discover(
 ) -> Result<(), CommandError> {
     let (done, mut ended) = tauri::async_runtime::channel(1);
     let search = async move {
-        let result = amt_core::discover(&networks, RMCP_PORT, |device| found.send(device).unwrap_or_default()).await;
+        let result = ooblin_core::discover(&networks, RMCP_PORT, |device| found.send(device).unwrap_or_default()).await;
         done.send(result).await.unwrap_or_default();
     };
     *discovery.0.lock().unwrap() = Some(Task(tauri::async_runtime::spawn(search)));
@@ -151,22 +156,65 @@ async fn set_power(connections: State<'_, Connections>, host: &str, action: Powe
     Ok(connection.client.lock().await.set_power(action).await?)
 }
 
-/// What the UI reads from a device: a command per `Client` read, named after it.
+/// What the UI reads from a device: a command per `Client` read, named after it, and per read only one flavor makes,
+/// `= flavor.method` of that flavor's client.
 macro_rules! reads {
-    ($($name:ident: $type:ty),*) => {$(
+    ($($name:ident $(= $flavor:ident.$method:ident)?: $type:ty);* $(;)?) => {$(
         #[tauri::command]
         async fn $name(connections: State<'_, Connections>, host: &str) -> Result<$type, CommandError> {
-            Ok(connections.get(host)?.client.lock().await.$name().await?)
+            let connection = connections.get(host)?;
+            let mut client = connection.client.lock().await;
+            Ok(reads!(@call client $name $($flavor $method)?).await?)
         }
     )*};
+    (@call $client:ident $name:ident) => { $client.$name() };
+    (@call $client:ident $name:ident $flavor:ident $method:ident) => { $client.$flavor()?.$method() };
 }
 
-reads!(power: Power, status: Status, hardware: Hardware, settings: Settings, event_log: Vec<Event>, audit_log: Vec<AuditRecord>);
+reads!(power: Power; hardware: Hardware; event_log: Vec<Event>; sensors: Vec<Sensor>; panel: Panel;
+       status = amt.status: Status; settings = amt.settings: Settings; audit_log = amt.audit_log: Vec<AuditRecord>;
+       bmc_status = supermicro.status: BmcStatus; bmc_settings = supermicro.bmc_settings: BmcSettings;
+       ipmi_status = ipmi.status: IpmiStatus; fru = ipmi.fru: Fru; ipmi_settings = ipmi.settings: IpmiSettings);
+
+/// Lights a BMC's identify light, or turns it off.
+#[tauri::command]
+async fn identify(connections: State<'_, Connections>, host: &str, on: bool) -> Result<(), CommandError> {
+    log::info!("Identify {} on {host}", if on { "on" } else { "off" });
+    Ok(connections.get(host)?.client.lock().await.identify(on).await?)
+}
+
+/// Like `change`, for an IPMI BMC.
+#[tauri::command]
+async fn ipmi_change(
+    connections: State<'_, Connections>,
+    host: &str,
+    change: IpmiChange,
+) -> Result<Changed<IpmiSettings>, CommandError> {
+    let what = format!("{change:?}");
+    let make = async |client: &mut Client| client.ipmi()?.change(change).await;
+    connections.changed(host, what, make, async |client| client.ipmi()?.settings().await).await
+}
+
+/// Like `change`, for a BMC.
+#[tauri::command]
+async fn bmc_change(
+    connections: State<'_, Connections>,
+    host: &str,
+    change: BmcChange,
+) -> Result<Changed<BmcSettings>, CommandError> {
+    let what = format!("{change:?}");
+    let make = async |client: &mut Client| client.supermicro()?.change(change).await;
+    connections.changed(host, what, make, async |client| client.supermicro()?.bmc_settings().await).await
+}
 
 /// Changes a setting and says how it went, see `Connections::change`. The webview closes the screen and serial console
 /// once they're off.
 #[tauri::command]
-async fn change(connections: State<'_, Connections>, host: &str, change: Change) -> Result<Changed, CommandError> {
+async fn change(
+    connections: State<'_, Connections>,
+    host: &str,
+    change: Change,
+) -> Result<Changed<Settings>, CommandError> {
     connections.change(host, change).await
 }
 
@@ -178,31 +226,31 @@ async fn save_certificate(
     id: &str,
     path: PathBuf,
 ) -> Result<(), CommandError> {
-    let pem = connections.get(host)?.client.lock().await.certificate(id).await?;
+    let pem = connections.get(host)?.client.lock().await.amt()?.certificate(id).await?;
     Ok(std::fs::write(path, pem)?)
 }
 
-/// Opens AMT's own web pages in the browser.
+/// Opens the device's own web pages in the browser.
 #[tauri::command]
 async fn web_pages(app: AppHandle, connections: State<'_, Connections>, host: &str) -> Result<(), CommandError> {
     let url = connections.get(host)?.client.lock().await.web_pages();
     app.opener().open_url(url, None::<&str>).map_err(CommandError::failed)
 }
 
-/// Has the device show a code for someone at it to read out, see `Client::start_consent`.
+/// Has the device show a code for someone at it to read out, see `amt::Client::start_consent`.
 #[tauri::command]
 async fn consent_start(connections: State<'_, Connections>, host: &str) -> Result<(), CommandError> {
-    Ok(connections.get(host)?.client.lock().await.start_consent().await?)
+    Ok(connections.get(host)?.client.lock().await.amt()?.start_consent().await?)
 }
 
 #[tauri::command]
 async fn consent_send(connections: State<'_, Connections>, host: &str, code: u32) -> Result<(), CommandError> {
-    Ok(connections.get(host)?.client.lock().await.send_consent(code).await?)
+    Ok(connections.get(host)?.client.lock().await.amt()?.send_consent(code).await?)
 }
 
 #[tauri::command]
 async fn consent_cancel(connections: State<'_, Connections>, host: &str) -> Result<(), CommandError> {
-    Ok(connections.get(host)?.client.lock().await.cancel_consent().await?)
+    Ok(connections.get(host)?.client.lock().await.amt()?.cancel_consent().await?)
 }
 
 /// Opens the device's screen and says its id, which the other `kvm_` commands take. See `Connections::open`.
@@ -211,15 +259,15 @@ async fn kvm_open(connections: State<'_, Connections>, host: &str) -> Result<u64
     connections.open(host, |connection| &connection.kvm, async |client| client.kvm().await.map(Arc::new)).await
 }
 
-/// See `Client::screens`.
+/// See `amt::Client::screens`.
 #[tauri::command]
 async fn screens(connections: State<'_, Connections>, host: &str) -> Result<Screens, CommandError> {
-    Ok(connections.get(host)?.client.lock().await.screens().await?)
+    Ok(connections.get(host)?.client.lock().await.amt()?.screens().await?)
 }
 
 #[tauri::command]
 async fn show_screen(connections: State<'_, Connections>, host: &str, screen: u8) -> Result<(), CommandError> {
-    Ok(connections.get(host)?.client.lock().await.show_screen(screen).await?)
+    Ok(connections.get(host)?.client.lock().await.amt()?.show_screen(screen).await?)
 }
 
 /// The next change on screen, as bytes rather than JSON (see `Kvm::frame`).
@@ -311,8 +359,8 @@ enum Drive {
     Ended { error: Option<CommandError> },
 }
 
-/// Puts the image at `path` in the device's drive (see `Client::ider`), taking out the one in it, then says on `drive`
-/// what the device does with it.
+/// Puts the image at `path` in the device's drive (see `amt::Client::ider`), taking out the one in it, then says on
+/// `drive` what the device does with it.
 #[tauri::command]
 async fn ider_mount(
     connections: State<'_, Connections>,
@@ -328,7 +376,7 @@ async fn ider_mount(
         .open(
             host,
             |connection| &connection.image,
-            async |client| Ok(Task(tauri::async_runtime::spawn(serve(client.ider(file).await?, drive, image)))),
+            async |client| Ok(Task(tauri::async_runtime::spawn(serve(client.amt()?.ider(file).await?, drive, image)))),
         )
         .await?;
     Ok(Mounted { id, name, size })
@@ -365,6 +413,19 @@ fn fullscreen(window: WebviewWindow, on: bool) -> Result<(), CommandError> {
     window.set_fullscreen(on).map_err(CommandError::failed)
 }
 
+/// Grows or shrinks the window by `width` and `height` in points, for the KVM to show the device's screen at its own
+/// size: out of maximized first, which a size doesn't apply to.
+#[tauri::command]
+fn grow(window: WebviewWindow, width: f64, height: f64) -> Result<(), CommandError> {
+    window.unmaximize().map_err(CommandError::failed)?;
+    let size = window
+        .inner_size()
+        .map_err(CommandError::failed)?
+        .to_logical::<f64>(window.scale_factor().map_err(CommandError::failed)?);
+    let size = tauri::LogicalSize::new(size.width + width, size.height + height);
+    window.set_size(size).map_err(CommandError::failed)
+}
+
 /// Writes the log (see `main`) to `path`, the older file first.
 #[tauri::command]
 fn save_log(app: AppHandle, path: PathBuf) -> Result<(), CommandError> {
@@ -378,7 +439,7 @@ fn save_log(app: AppHandle, path: PathBuf) -> Result<(), CommandError> {
 
 /// What the webview gets when a command fails: always a message, and both fingerprints when the certificate changed.
 /// `Unreachable` means the device stopped answering, even to a second try, `Consent` that someone at it has to read out
-/// a code first (see `consent_start`).
+/// a code first (see `consent_start`), `Ended` that it ended a session on purpose, which we don't open again ourselves.
 #[derive(Debug, Serialize, TS)]
 #[ts(export_to = "ooblin.ts")]
 #[serde(tag = "kind")]
@@ -386,6 +447,7 @@ enum CommandError {
     PinMismatch { message: String, expected: String, actual: String },
     Unreachable { message: String },
     Consent { message: String },
+    Ended { message: String },
     Failed { message: String },
 }
 
@@ -400,6 +462,7 @@ impl Display for CommandError {
         let (Self::PinMismatch { message, .. }
         | Self::Unreachable { message }
         | Self::Consent { message }
+        | Self::Ended { message }
         | Self::Failed { message }) = self;
         formatter.write_str(message)
     }
@@ -412,6 +475,7 @@ impl From<Error> for CommandError {
             Error::PinMismatch { expected, actual } => Self::PinMismatch { message, expected, actual },
             Error::Transport(_) | Error::Timeout => Self::Unreachable { message },
             Error::Consent => Self::Consent { message },
+            Error::Ended(_) => Self::Ended { message },
             _ => Self::Failed { message },
         }
     }
@@ -429,13 +493,13 @@ impl From<keyring::Error> for CommandError {
     }
 }
 
-/// Writes our types the webview sees to ui/src/bindings/ooblin.ts (see .cargo/config.toml), without the amt-core types
-/// they hold: amt-core's tests write those, and ts-rs writes a file anew the first time a test run writes to it.
+/// Writes our types the webview sees to ui/src/bindings/ooblin.ts (see .cargo/config.toml), without the ooblin-core
+/// types they hold: ooblin-core's tests write those, and ts-rs writes a file anew on a test run's first write to it.
 #[test]
 fn bindings() -> Result<(), ts_rs::ExportError> {
     let config = ts_rs::Config::from_env();
     Change::export(&config)?;
-    Changed::export(&config)?;
+    Changed::<()>::export(&config)?;
     CommandError::export(&config)?;
     Connected::export(&config)?;
     Device::export(&config)?;
@@ -459,8 +523,8 @@ fn main() {
             window.set_focus().unwrap_or_default();
         }
     }));
-    // Debug builds let agents drive the app through a localhost WebSocket (mcp-server-tauri), release builds don't.
-    #[cfg(debug_assertions)]
+    // The verify build lets agents drive the app through a localhost WebSocket (mcp-server-tauri), others don't.
+    #[cfg(feature = "verify")]
     let builder = builder.plugin(tauri_plugin_mcp_bridge::Builder::new().bind_address("127.0.0.1").build());
 
     builder
@@ -476,7 +540,7 @@ fn main() {
         .setup(|app| {
             let hosts = app.path().app_config_dir()?.join("hosts.json");
             app.manage(Connections::new(hosts, app.config().identifier.clone()));
-            #[cfg(debug_assertions)]
+            #[cfg(feature = "verify")]
             app.add_capability(
                 tauri::ipc::CapabilityBuilder::new("mcp-bridge").window("main").permission("mcp-bridge:default"),
             )?;
@@ -515,6 +579,16 @@ fn main() {
             web_pages,
             event_log,
             audit_log,
+            bmc_status,
+            panel,
+            identify,
+            sensors,
+            bmc_settings,
+            bmc_change,
+            ipmi_status,
+            fru,
+            ipmi_settings,
+            ipmi_change,
             kvm_open,
             screens,
             show_screen,
@@ -531,6 +605,7 @@ fn main() {
             ider_eject,
             title,
             fullscreen,
+            grow,
             save_log
         ])
         .run(tauri::generate_context!())

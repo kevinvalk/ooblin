@@ -1,0 +1,28 @@
+[package]
+name = "mock"
+version = "0.1.0"
+edition = "2024"
+license = "Apache-2.0"
+publish = false
+
+[dependencies]
+anyhow = "1"
+clap = { version = "4", features = ["derive"] }
+form_urlencoded = "1"
+futures-util = { version = "0.3", default-features = false, features = ["sink", "std"] }
+http-body-util = "0.1"
+hyper = { version = "1", features = ["server", "http1"] }
+hyper-util = { version = "0.1", features = ["tokio"] }
+instant-xml = "0.7"
+md-5 = "0.10"
+ooblin-core = { path = "../ooblin-core" }
+rcgen = "0.14"
+roxmltree = "0.21"
+rpassword = "7"
+serde_json = "1"
+tokio = { version = "1", features = ["io-std", "macros", "rt-multi-thread", "net", "sync", "time"] }
+tokio-rustls = "0.26"
+tokio-tungstenite = { version = "0.28", default-features = false, features = ["handshake"] }
+
+[dev-dependencies]
+tempfile = "3"

@@ -1,0 +1,28 @@
+{
+  "@odata.context": "/redfish/v1/$metadata#Processor.Processor",
+  "@odata.id": "/redfish/v1/Systems/1/Processors/1",
+  "@odata.type": "#Processor.v1_0_0.Processor",
+  "Description": "Processor",
+  "Id": "1",
+  "InstructionSet": "x86-64",
+  "Manufacturer": "Intel",
+  "MaxSpeedMHz": 4000,
+  "Model": "Intel(R) Xeon(R) CPU D-1541 @ 2.10GHz",
+  "Name": "Processor1",
+  "ProcessorArchitecture": "x86",
+  "ProcessorId": {
+    "EffectiveFamily": "0x6",
+    "EffectiveModel": "0x56",
+    "IdentificationRegisters": "0xBFEBFBFF00050663",
+    "Step": "0x3",
+    "VendorId": "GenuineIntel"
+  },
+  "ProcessorType": "CPU",
+  "Socket": "CPU1",
+  "Status": {
+    "Health": "OK",
+    "State": "Enabled"
+  },
+  "TotalCores": 8,
+  "TotalThreads": 16
+}

@@ -1,14 +1,14 @@
-//! Every device we logged in to, in `hosts.json`: its pinned certificate, name and AMT version, the user that worked and
-//! whether we remember its password. Passwords only live in the OS credential store, Digest needs the real thing (or its
-//! HA1, which is just as good to an attacker). Both are keyed by the app's identifier, so the verify build never sees the
-//! real ones. Only `Connections` changes them, one change at a time.
+//! Every device we logged in to, in `hosts.json`: its pinned certificate, name, flavor and firmware version, the user
+//! that worked and whether we remember its password. Passwords only live in the OS credential store, Digest needs the
+//! real thing (or its HA1, which is just as good to an attacker). Both are keyed by the app's identifier, so the verify
+//! build never sees the real ones. Only `Connections` changes them, one change at a time.
 
 use std::collections::BTreeMap;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
-use amt_core::{Info, Target};
 use keyring::Entry;
+use ooblin_core::{Flavor, Info, Target};
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
@@ -29,6 +29,9 @@ struct Saved {
     version: String,
     user: String,
     remembered: bool,
+    /// Saves from before BMCs are AMT's.
+    #[serde(default)]
+    flavor: Flavor,
 }
 
 /// A device as the webview sees it. We keep reaching it at the address it was given as, as AMT's own `name` (with its
@@ -41,6 +44,8 @@ pub struct Device {
     pub version: String,
     pub user: String,
     pub remembered: bool,
+    /// Unknown until we logged in to it.
+    pub flavor: Option<Flavor>,
 }
 
 impl Hosts {
@@ -54,8 +59,13 @@ impl Hosts {
         Ok(Self { path: path.to_owned(), service: service.to_owned(), hosts })
     }
 
+    /// None for a device only ever logged in to over IPMI, which has no certificate.
     pub fn pin(&self, host: &str) -> Option<String> {
-        Some(self.hosts.get(host)?.pin.clone())
+        Some(self.hosts.get(host)?.pin.clone()).filter(|pin| !pin.is_empty())
+    }
+
+    pub fn flavor(&self, host: &str) -> Option<Flavor> {
+        Some(self.hosts.get(host)?.flavor)
     }
 
     pub fn devices(&self) -> Vec<Device> {
@@ -65,15 +75,21 @@ impl Hosts {
     pub fn device(&self, host: &str) -> Option<Device> {
         let saved = self.hosts.get(host)?;
         let (name, version, user) = (saved.name.clone(), saved.version.clone(), saved.user.clone());
-        Some(Device { host: host.to_owned(), name, version, user, remembered: saved.remembered })
+        let (remembered, flavor) = (saved.remembered, Some(saved.flavor));
+        Some(Device { host: host.to_owned(), name, version, user, remembered, flavor })
     }
 
-    /// After a successful login: we trust the certificate it used and remember its name, version, the user that worked
-    /// and whether we keep its password, which we still do if we did.
+    /// After a successful login: we trust the certificate it used and remember its name, flavor, version, the user that
+    /// worked and whether we keep its password, which we still do if we did.
     pub fn connected(&mut self, target: &Target, info: &Info, remembered: bool) -> io::Result<()> {
-        let remembered = remembered || self.hosts.get(&target.host).is_some_and(|saved| saved.remembered);
-        let (pin, name, version) = (info.fingerprint.clone(), info.name.clone(), info.version.clone());
-        self.hosts.insert(target.host.clone(), Saved { pin, name, version, user: target.user.clone(), remembered });
+        let before = self.hosts.get(&target.host);
+        let remembered = remembered || before.is_some_and(|saved| saved.remembered);
+        // An IPMI login has no certificate: the one pinned before stays, for when it's spoken to over TLS again.
+        let pin = Some(info.fingerprint.clone()).filter(|pin| !pin.is_empty());
+        let pin = pin.or_else(|| Some(before?.pin.clone())).unwrap_or_default();
+        let (name, version) = (info.name.clone(), info.version.clone());
+        let saved = Saved { pin, name, version, user: target.user.clone(), remembered, flavor: info.flavor };
+        self.hosts.insert(target.host.clone(), saved);
         self.save()
     }
 

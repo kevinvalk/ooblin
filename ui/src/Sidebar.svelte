@@ -6,6 +6,7 @@
   import type { Device as Saved } from "./bindings/ooblin";
   import type { Found } from "./bindings/core";
   import { reason, type Connection } from "./device/Device.svelte";
+  import { FLAVORS } from "./flavors";
 
   let {
     devices,
@@ -41,7 +42,10 @@
     ...Object.keys(found)
       .filter((host) => !devices.some((device) => device.host === host))
       .sort((a, b) => a.localeCompare(b, undefined, { numeric: true }))
-      .map((host) => ({ host, name: "", version: found[host].version, user: "admin", remembered: false })),
+      .map((host) => {
+        const user = found[host].flavor === "Amt" ? "admin" : "ADMIN";
+        return { host, name: "", version: found[host].version, user, remembered: false, flavor: found[host].flavor };
+      }),
   ]);
 
   async function forget(host: string) {
@@ -75,6 +79,9 @@
         {@const open = connections[device.host]}
         {@const answer = found[device.host]}
         {@const name = open?.info.name || device.name}
+        {@const version = device.version || answer?.version}
+        {@const kind = open?.info.flavor ?? device.flavor}
+        {@const flavor = kind && FLAVORS[kind]}
         <!-- One action per device, on hover: disconnect an open one, forget a closed one. -->
         <li
           class="group flex items-center rounded-md pr-0.5 text-muted hover:bg-hover data-open:text-ink aria-current:bg-accent aria-current:text-white"
@@ -103,12 +110,16 @@
                 <span class="truncate font-mono text-xs text-muted group-aria-current:text-white/80">{device.host}</span>
               {/if}
             </span>
-            {#if device.version || answer}
+            <!-- What kind of device it is, in its color, and its firmware version. -->
+            {#if flavor || version}
               <span
-                class="ml-auto flex-none rounded-full bg-hover px-1 text-[10px]/4 tabular-nums group-aria-current:bg-white/20"
-                title="AMT version"
+                class={[
+                  "ml-auto flex-none rounded-full px-1.5 text-[10px]/4 font-medium tabular-nums group-aria-current:bg-white/20",
+                  flavor ? `${flavor.color} text-white` : "bg-hover",
+                ]}
+                title={[flavor?.title, version && `firmware ${version}`].filter(Boolean).join(", ")}
               >
-                {device.version || answer?.version}
+                {[flavor?.label, version].filter(Boolean).join(" ")}
               </span>
             {/if}
           </button>

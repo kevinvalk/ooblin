@@ -44,29 +44,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "amt-core"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "base64 0.23.1",
- "digest_auth",
- "flate2",
- "instant-xml",
- "jiff",
- "mock-amt",
- "reqwest",
- "roxmltree",
- "rustls",
- "serde",
- "sha2 0.10.9",
- "tempfile",
- "thiserror 2.0.21",
- "tokio",
- "tokio-rustls",
- "ts-rs",
-]
-
-[[package]]
 name = "android_log-sys"
 version = "0.3.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -371,6 +348,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "faac5829c2b74c28f830747e7818ccfb684261b5f48a1118b1e2a13d36dfab13"
 dependencies = [
  "aws-lc-sys",
+ "untrusted 0.7.1",
  "zeroize",
 ]
 
@@ -2675,23 +2653,27 @@ dependencies = [
 ]
 
 [[package]]
-name = "mock-amt"
+name = "mock"
 version = "0.1.0"
 dependencies = [
- "amt-core",
  "anyhow",
  "clap",
+ "form_urlencoded",
+ "futures-util",
  "http-body-util",
  "hyper",
  "hyper-util",
  "instant-xml",
  "md-5",
+ "ooblin-core",
  "rcgen",
  "roxmltree",
  "rpassword",
+ "serde_json",
  "tempfile",
  "tokio",
  "tokio-rustls",
+ "tokio-tungstenite",
 ]
 
 [[package]]
@@ -3310,11 +3292,11 @@ checksum = "384b8ab6d37215f3c5301a95a4accb5d64aa607f1fcb26a11b5303878451b4fe"
 name = "ooblin"
 version = "0.1.0"
 dependencies = [
- "amt-core",
  "clap",
  "keyring",
  "log",
- "mock-amt",
+ "mock",
+ "ooblin-core",
  "rfd",
  "serde",
  "serde_json",
@@ -3327,6 +3309,34 @@ dependencies = [
  "tauri-plugin-window-state",
  "tempfile",
  "tokio",
+ "ts-rs",
+]
+
+[[package]]
+name = "ooblin-core"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "aws-lc-rs",
+ "base64 0.23.1",
+ "digest_auth",
+ "flate2",
+ "form_urlencoded",
+ "futures-util",
+ "instant-xml",
+ "jiff",
+ "log",
+ "mock",
+ "reqwest",
+ "roxmltree",
+ "rustls",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.21",
+ "tokio",
+ "tokio-rustls",
+ "tokio-tungstenite",
  "ts-rs",
 ]
 
@@ -4011,7 +4021,7 @@ dependencies = [
  "cfg-if",
  "getrandom 0.2.17",
  "libc",
- "untrusted",
+ "untrusted 0.9.0",
  "windows-sys 0.52.0",
 ]
 
@@ -4155,7 +4165,7 @@ dependencies = [
  "aws-lc-rs",
  "ring",
  "rustls-pki-types",
- "untrusted",
+ "untrusted 0.9.0",
 ]
 
 [[package]]
@@ -5600,6 +5610,12 @@ name = "unicode-segmentation"
 version = "1.13.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c6f5d3c3b1bf09027a88a6bc961fc00497d651009560b5463668dc81b0fa87a8"
+
+[[package]]
+name = "untrusted"
+version = "0.7.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a156c684c91ea7d62626509bce3cb4e1d9ed5c4d978f7b4352658f96a4c26b4a"
 
 [[package]]
 name = "untrusted"

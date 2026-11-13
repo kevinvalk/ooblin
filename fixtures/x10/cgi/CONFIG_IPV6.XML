@@ -1,0 +1,11 @@
+<?xml version="1.0"?>
+<IPMI>
+  <LAN_V6>
+    <BMC_IPV6 ADDR="2001:db8:0:0:5ea1:1fff:fea0:cbd5/64" SCOPE="0"/>
+    <BMC_IPV6 ADDR="fe80:0:0:0:5ea1:1fff:fea0:cbd5/64" SCOPE="32"/>
+    <ROUTE_SRC VALUE="2"/>
+    <DHCPV6 MODE="0"/>
+    <AUTOCONF VALUE="1"/>
+    <DNS_SERVER IP="fe80::1&#10;"/>
+  </LAN_V6>
+</IPMI>

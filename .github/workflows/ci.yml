@@ -1,4 +1,4 @@
-# The checks of AGENTS.md on every push, on each platform we ship for, against the mock AMT. And whether the TypeScript
+# The checks of AGENTS.md on every push, on each platform we ship for, against the mock devices. And whether the TypeScript
 # bindings `cargo test` writes are the ones committed.
 name: CI
 
@@ -27,7 +27,7 @@ jobs:
       - run: npm ci --prefix ui
       - run: npm run build --prefix ui
       - run: cargo fmt --all --check
-      - run: cargo clippy --workspace --all-targets -- -D warnings
+      - run: cargo clippy --workspace --all-targets --all-features -- -D warnings
       - run: cargo test --workspace
       - name: Check the bindings are committed as cargo test wrote them
         run: git diff --exit-code ui/src/bindings

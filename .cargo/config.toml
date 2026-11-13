@@ -1,14 +1,11 @@
 [alias]
-# The debug app for our verify loop (AGENTS.md): its own identifier, so it has its own devices and keychain entries,
-# hidden so it never steals focus, and without CSP because the MCP bridge injects inline scripts.
+# The debug app for our verify loop (AGENTS.md) with the MCP bridge (the `verify` feature): its own identifier, so it
+# has its own devices and keychain entries, hidden so it never steals focus, and Tauri's API on `window.__TAURI__` and
+# no CSP, which the bridge needs. Every other build leaves both out.
 verify = [
-  "tauri", "build", "--debug", "--no-bundle",
-  "--config", '{"identifier":"nl.kevinvalk.ooblin.verify","app":{"windows":[{"width":1180,"height":860,"visible":false}],"security":{"csp":null}}}',
+  "tauri", "build", "--debug", "--no-bundle", "--features", "verify",
+  "--config", '{"identifier":"nl.kevinvalk.ooblin.verify","app":{"withGlobalTauri":true,"windows":[{"width":1180,"height":860,"visible":false}],"security":{"csp":null}}}',
 ]
-
-# The app as we ship it: bundled, and without Tauri's API on `window.__TAURI__`, which only debug builds' MCP bridge uses
-# (the UI imports it), so no script in the window has it at hand. Tauri decides that at compile time.
-release = ["tauri", "build", "--config", '{"app":{"withGlobalTauri":false}}']
 
 # `cargo test` writes the types the UI sees to ui/src/bindings (ts-rs), a file per crate, numbers not bigints.
 [env]

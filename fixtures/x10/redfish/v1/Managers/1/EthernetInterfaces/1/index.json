@@ -1,0 +1,62 @@
+{
+  "@odata.context": "/redfish/v1/$metadata#EthernetInterface.EthernetInterface",
+  "@odata.id": "/redfish/v1/Managers/1/EthernetInterfaces/1",
+  "@odata.type": "#EthernetInterface.v1_0_0.EthernetInterface",
+  "AutoNeg": true,
+  "Description": "Management Network Interface",
+  "FullDuplex": true,
+  "HostName": "",
+  "IPv4Addresses": [
+    {
+      "Address": "192.0.2.224",
+      "AddressOrigin": "DHCP",
+      "Gateway": "192.0.2.241",
+      "SubnetMask": "255.255.255.0"
+    }
+  ],
+  "IPv6AddressPolicyTable": [
+    {
+      "Label": 0,
+      "Precedence": 50,
+      "Prefix": "::1/128"
+    }
+  ],
+  "IPv6Addresses": [
+    {
+      "Address": "5b6a:9f65:76d:7:bb6:4bfe:bda1:bcb3",
+      "AddressOrigin": "SLAAC",
+      "AddressState": "Preferred",
+      "PrefixLength": 64
+    },
+    {
+      "Address": "ef23::af2:6bcf:fef2:fba3",
+      "AddressOrigin": "SLAAC",
+      "AddressState": "Preferred",
+      "PrefixLength": 64
+    }
+  ],
+  "IPv6DefaultGateway": "ef23::af2:6bcf:fef2:fba3",
+  "IPv6StaticAddresses": [
+    {
+      "Address": "ef23::af2:6bcf:fef2:fba3",
+      "PrefixLength": 64
+    }
+  ],
+  "Id": "1",
+  "InterfaceEnabled": true,
+  "MACAddress": "5C:A1:1F:A0:CB:D5",
+  "MTUSize": 1500,
+  "Name": "EthernetInterface",
+  "NameServers": [
+    "192.0.2.241"
+  ],
+  "SpeedMbps": 1000,
+  "Status": {
+    "Health": "OK",
+    "State": "Enabled"
+  },
+  "VLAN": {
+    "VLANEnable": false,
+    "VLANId": 0
+  }
+}

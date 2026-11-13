@@ -1,0 +1,93 @@
+//! A Supermicro BMC's Redfish: JSON over HTTPS with Basic on every request, one at a time.
+
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering::Relaxed};
+use std::time::Duration;
+
+use reqwest::header::CONTENT_TYPE;
+use reqwest::{Method, Response, StatusCode};
+use serde::de::DeserializeOwned;
+use serde_json::Value;
+
+use super::{Pin, http, ok, transport};
+use crate::{Error, Result, Target};
+
+pub struct Connection {
+    pub(super) http: reqwest::Client,
+    /// `https://host[:port]`.
+    pub(super) url: String,
+    pub(super) user: String,
+    pub(super) password: String,
+    pub(super) pin: Arc<Pin>,
+    /// Set by a 401 or a refused web login: we send nothing more, a wrong password retried locks the account.
+    pub(super) refused: AtomicBool,
+}
+
+impl Connection {
+    /// Connects lazily and pins as `amt::Connection` does.
+    pub fn new(target: &Target, pin: Option<String>) -> Result<Self> {
+        let pin = Pin::new(pin);
+        Ok(Self {
+            http: http(&pin)?,
+            url: format!("https://{}", target.host),
+            user: target.user.clone(),
+            password: target.password.clone(),
+            pin,
+            refused: AtomicBool::new(false),
+        })
+    }
+
+    /// The pinned certificate, known once the first connection was made.
+    pub fn fingerprint(&self) -> Option<String> {
+        self.pin.pinned.get().cloned()
+    }
+
+    pub fn url(&self) -> &str {
+        &self.url
+    }
+
+    /// Reads the resource at `path` (`/redfish/v1/Systems/1`), tried twice if the connection broke, as AMT's reads.
+    pub async fn get<T: DeserializeOwned>(&self, path: &str) -> Result<T> {
+        let response = match self.send(Method::GET, path, None).await {
+            Err(Error::Transport(_)) => self.send(Method::GET, path, None).await,
+            response => response,
+        }?;
+        let body = response.bytes().await.map_err(transport)?;
+        serde_json::from_slice(&body).map_err(|error| Error::Protocol(format!("{path}: {error}")))
+    }
+
+    pub async fn post(&self, path: &str, body: &Value) -> Result<()> {
+        self.send(Method::POST, path, Some(body)).await.map(drop)
+    }
+
+    pub async fn patch(&self, path: &str, body: &Value) -> Result<()> {
+        self.send(Method::PATCH, path, Some(body)).await.map(drop)
+    }
+
+    async fn send(&self, method: Method, path: &str, body: Option<&Value>) -> Result<Response> {
+        if self.refused.load(Relaxed) {
+            return Err(Error::Unauthorized);
+        }
+        // The X10 answers a 401 without a challenge, so Basic goes up front.
+        let mut request =
+            self.http.request(method, format!("{}{path}", self.url)).basic_auth(&self.user, Some(&self.password));
+        if let Some(body) = body {
+            request = request.header(CONTENT_TYPE, "application/json").body(body.to_string());
+        }
+        let response = request.send().await.map_err(|error| self.pin.mismatch().unwrap_or_else(|| transport(error)))?;
+        if response.status() == StatusCode::UNAUTHORIZED {
+            self.refused.store(true, Relaxed);
+            return Err(Error::Unauthorized);
+        }
+        ok(response)
+    }
+}
+
+/// Whether `host` answers Redfish without a login, as its root must (DSP0266): one request, which carries no password.
+pub async fn probe(host: &str) -> bool {
+    let Ok(http) = http(&Pin::new(None)) else { return false };
+    let root =
+        async { http.get(format!("https://{host}/redfish/v1/")).send().await?.error_for_status()?.bytes().await };
+    let Ok(Ok(root)) = tokio::time::timeout(Duration::from_secs(3), root).await else { return false };
+    serde_json::from_slice::<Value>(&root).is_ok_and(|root| root.get("RedfishVersion").is_some())
+}

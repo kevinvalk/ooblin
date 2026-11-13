@@ -1,0 +1,119 @@
+{
+  "@odata.context": "/redfish/v1/$metadata#Manager.Manager",
+  "@odata.id": "/redfish/v1/Managers/1",
+  "@odata.type": "#Manager.v1_3_2.Manager",
+  "Actions": {
+    "#Manager.Reset": {
+      "target": "/redfish/v1/Managers/1/Actions/Manager.Reset"
+    },
+    "Oem": {
+      "#ManagerConfig.Reset": {
+        "target": "/redfish/v1/Managers/1/Actions/Oem/ManagerConfig.Reset"
+      }
+    }
+  },
+  "CommandShell": {
+    "ConnectTypesSupported": [
+      "SSH"
+    ],
+    "MaxConcurrentSessions": 0,
+    "ServiceEnabled": true
+  },
+  "DateTime": "2026-11-13T13:47:09+01:00",
+  "DateTimeLocalOffset": "+01:00",
+  "Description": "BMC",
+  "EthernetInterfaces": {
+    "@odata.id": "/redfish/v1/Managers/1/EthernetInterfaces"
+  },
+  "FirmwareVersion": "4.7",
+  "GraphicalConsole": {
+    "ConnectTypesSupported": [
+      "KVMIP"
+    ],
+    "MaxConcurrentSessions": 4,
+    "ServiceEnabled": true
+  },
+  "Id": "1",
+  "Links": {
+    "ManagerForChassis": [
+      {
+        "@odata.id": "/redfish/v1/Chassis/1"
+      }
+    ],
+    "ManagerForServers": [
+      {
+        "@odata.id": "/redfish/v1/Systems/1"
+      }
+    ],
+    "Oem": {}
+  },
+  "ManagerType": "BMC",
+  "Model": "ASPEED",
+  "Name": "Manager",
+  "NetworkProtocol": {
+    "@odata.id": "/redfish/v1/Managers/1/NetworkProtocol"
+  },
+  "Oem": {
+    "Supermicro": {
+      "@odata.type": "#SmcManagerExtensions.v1_0_0.Manager",
+      "ActiveDirectory": {
+        "@odata.id": "/redfish/v1/Managers/1/ActiveDirectory"
+      },
+      "FanMode": {
+        "@odata.id": "/redfish/v1/Managers/1/FanMode"
+      },
+      "IKVM": {
+        "@odata.id": "/redfish/v1/Managers/1/IKVM"
+      },
+      "IPAccessControl": {
+        "@odata.id": "/redfish/v1/Managers/1/IPAccessControl"
+      },
+      "LDAP": {
+        "@odata.id": "/redfish/v1/Managers/1/LDAP"
+      },
+      "MouseMode": {
+        "@odata.id": "/redfish/v1/Managers/1/MouseMode"
+      },
+      "NTP": {
+        "@odata.id": "/redfish/v1/Managers/1/NTP"
+      },
+      "RADIUS": {
+        "@odata.id": "/redfish/v1/Managers/1/RADIUS"
+      },
+      "SMCRAKP": {
+        "@odata.id": "/redfish/v1/Managers/1/SMCRAKP"
+      },
+      "SMTP": {
+        "@odata.id": "/redfish/v1/Managers/1/SMTP"
+      },
+      "SNMP": {
+        "@odata.id": "/redfish/v1/Managers/1/SNMP"
+      },
+      "Snooping": {
+        "@odata.id": "/redfish/v1/Managers/1/Snooping"
+      },
+      "Syslog": {
+        "@odata.id": "/redfish/v1/Managers/1/Syslog"
+      }
+    }
+  },
+  "SerialConsole": {
+    "ConnectTypesSupported": [
+      "SSH",
+      "IPMI"
+    ],
+    "MaxConcurrentSessions": 1,
+    "ServiceEnabled": true
+  },
+  "SerialInterfaces": {
+    "@odata.id": "/redfish/v1/Managers/1/SerialInterfaces"
+  },
+  "Status": {
+    "Health": "OK",
+    "State": "Enabled"
+  },
+  "UUID": "12925049-8932-2912-2504-8AD32DA9BAF2",
+  "VirtualMedia": {
+    "@odata.id": "/redfish/v1/Managers/1/VM1"
+  }
+}

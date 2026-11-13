@@ -4,7 +4,7 @@
 
 Continue the root Tauri and Svelte application as the maintained Ooblin implementation. Use the other three
 implementations as sources of specific improvements and regression scenarios. Keep one application and one
-`amt-core` implementation moving forward.
+`ooblin-core` implementation moving forward.
 
 The destination is a small, dependable desktop AMT console: a library with explicit protocol guarantees, a Rust
 application that owns sessions and resources, and a Svelte UI that owns presentation and editing. Preserve the
@@ -62,21 +62,21 @@ guard and reachability confirmation handling still need their own scrutiny.
 
 | Responsibility | Owner | Contract |
 | --- | --- | --- |
-| TLS, pin verification, authentication, WS-Man, redirection packets | `amt-core` | Typed outcomes; no UI or Tauri dependency |
-| Enumeration ordering and protocol read/write semantics | `amt-core`, with the existing application operation lock preserved | Callers cannot accidentally corrupt a live protocol transaction |
+| TLS, pin verification, authentication, WS-Man, redirection packets | `ooblin-core` | Typed outcomes; no UI or Tauri dependency |
+| Enumeration ordering and protocol read/write semantics | `ooblin-core`, with the existing application operation lock preserved | Callers cannot accidentally corrupt a live protocol transaction |
 | Device connection generation, active resource slots, shutdown | Rust application | Old work cannot publish into or close a replacement session |
 | Saved devices, credential-store access, local file selection and access | Rust application | One persistence owner; no secret returned to the webview |
 | Reconnect scheduling | Initially the existing Svelte loop; move into a small Rust application owner when its lifecycle is proven | One scheduler per resource, cancellation tied to explicit ownership |
 | Power polling | Initially Svelte | Preserve behavior; move only for a demonstrated lifetime requirement |
 | Page data and refresh indicators | Svelte | Latest request wins within the current session |
 | Settings drafts and confirmation dialogs | Svelte | Unsaved edits remain separate from observed device state |
-| Protocol capability and validation | `amt-core` | Meaningful unsupported, invalid, and consent outcomes |
+| Protocol capability and validation | `ooblin-core` | Meaningful unsupported, invalid, and consent outcomes |
 | Wording, units, locale formatting, layout, focus | Svelte | Follow `ui/DESIGN.md` |
-| KVM decoding and remote key encoding | `amt-core` | Ordered input, changed rectangles, bounded work |
+| KVM decoding and remote key encoding | `ooblin-core` | Ordered input, changed rectangles, bounded work |
 | KVM canvas and screen scaling | Svelte | Paint deltas without reconstructing the entire application model |
-| SOL transport | `amt-core` and Rust session owner | Ordered bytes, independent receive and transmit, explicit termination |
+| SOL transport | `ooblin-core` and Rust session owner | Ordered bytes, independent receive and transmit, explicit termination |
 | Terminal emulation, selection, scrollback and clipboard interaction | xterm and Svelte | Preserve terminal behavior already supplied by xterm |
-| IDER protocol and image reads | `amt-core` | Serving failure remains observable |
+| IDER protocol and image reads | `ooblin-core` | Serving failure remains observable |
 | IDER task and selected image lifetime | Rust application | Explicit mount identity and cancellation |
 | IDER progress visualization | Svelte | Display byte ranges or a small bounded progress summary |
 
@@ -96,7 +96,7 @@ removes repeated, demonstrably unsafe command argument declarations; it should n
 
 ### 1. Preserve complete-operation exclusivity
 
-**Observed:** root [client.rs](crates/amt-core/src/client.rs) uses `&mut self`. The application wraps each client
+**Observed:** root [client.rs](crates/ooblin-core/src/amt/client.rs) uses `&mut self`. The application wraps each client
 in `Arc<Mutex<Client>>` and holds that lock across page reads and settings mutations plus successful readback.
 This gives a simple ordering guarantee across all WS-Man requests in each operation.
 
@@ -127,7 +127,7 @@ The exact firmware concurrency restrictions still require evidence according to 
 
 ### 2. Make operation outcomes explicit
 
-Keep the useful distinctions in [Error](crates/amt-core/src/lib.rs): authentication, pin mismatch, timeout,
+Keep the useful distinctions in [Error](crates/ooblin-core/src/lib.rs): authentication, pin mismatch, timeout,
 transport, WS-Man fault, method return code, unsupported capability, disabled feature, consent and wrong code.
 Do not flatten errors into strings before the application has made its policy decision.
 
@@ -151,7 +151,7 @@ older firmware compatibility must remain covered by fixtures.
 
 ### 3. Keep explicit settings intent
 
-Root [settings.rs](crates/amt-core/src/settings.rs) exposes specific setters and a `Change` enum.
+Root [settings.rs](crates/ooblin-core/src/amt/settings.rs) exposes specific setters and a `Change` enum.
 Preserve the explicit intent: changing IPv4 sends an IPv4 change, adding an alarm sends an alarm operation.
 
 New Tauri's `set_settings(were, wanted)` compares whole snapshots, while its UI builds a snapshot by walking
@@ -225,7 +225,7 @@ Those details earn their complexity through protocol behavior.
 The existing typed XML input and parsed output approach earns its place. Prefer small, named domain structures
 to raw string maps at the application boundary. Keep low-level XML handling where protocol work actually needs it.
 
-Review public exports in [lib.rs](crates/amt-core/src/lib.rs): `Connection`, raw redirection and encoding helpers
+Review public exports in [lib.rs](crates/ooblin-core/src/lib.rs): `Connection`, raw redirection and encoding helpers
 are exposed alongside the high-level client. Determine which are needed by the mock or integration tests before
 reducing visibility. Do not create a new “public SDK” compatibility project solely for this desktop app.
 
@@ -464,7 +464,7 @@ would duplicate work xterm already does.
 
 ### KVM and serial input
 
-Review [Kvm.svelte](ui/src/device/tabs/Kvm.svelte) and [Sol.svelte](ui/src/device/tabs/Sol.svelte) with these rules:
+Review [Kvm.svelte](ui/src/device/Kvm.svelte) and [Sol.svelte](ui/src/device/amt/Sol.svelte) with these rules:
 
 - Input goes only to the active, intentionally focused resource.
 - Opening a dialog, switching device, hiding a view, losing window focus, pointer cancellation and disconnect
@@ -542,7 +542,7 @@ control “request received,” “allow response,” and “close transport,”
 Use independent test ports and isolated storage and credentials.
 
 The network-boundary source test remains useful, but it is not a proof of network isolation or runtime security.
-Keep real sockets under `crates/amt-core/src/net/` as required by AGENTS.md.
+Keep real sockets under `crates/ooblin-core/src/net/` as required by AGENTS.md.
 
 ### Verification for each implementation change
 

@@ -15,9 +15,8 @@ use std::io;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use amt_core::{
-    Alarm, Availability, Client, General, Info, Ipv4, Ipv6Settings, Kvm, Recovery, RemoteAccess, Settings, Sol, Target,
-};
+use ooblin_core::amt::{self, Alarm, Availability, General, Ipv6Settings, Recovery, Settings};
+use ooblin_core::{Client, Flavor, Info, Ipv4, Kvm, RemoteAccess, Sol, Target};
 use serde::{Deserialize, Serialize};
 use tauri::async_runtime::{JoinHandle, Mutex};
 use ts_rs::TS;
@@ -128,7 +127,7 @@ pub enum Change {
     Clock,
     AddAlarm(Alarm),
     DeleteAlarm(String),
-    /// The certificate in the file at `path`, see `Client::add_certificate`.
+    /// The certificate in the file at `path`, see `amt::Client::add_certificate`.
     AddCertificate {
         path: PathBuf,
         trusted_root: bool,
@@ -137,7 +136,7 @@ pub enum Change {
 }
 
 impl Change {
-    async fn make(self, client: &mut Client) -> Result<(), CommandError> {
+    async fn make(self, client: &mut amt::Client) -> Result<(), CommandError> {
         match self {
             Change::RemoteAccess(access) => client.set_remote_access(&access).await,
             Change::General(general) => client.set_general(&general).await,
@@ -159,12 +158,12 @@ impl Change {
 }
 
 /// How a change went: why it failed, if it did, and the settings read after it either way, as a change that failed may
-/// have made some of it, or why they couldn't be read.
+/// have made some of it, or why they couldn't be read. AMT's settings or a BMC's.
 #[derive(Serialize, TS)]
 #[ts(export_to = "ooblin.ts")]
-pub struct Changed {
+pub struct Changed<T> {
     pub error: Option<CommandError>,
-    pub settings: Result<Settings, CommandError>,
+    pub settings: Result<T, CommandError>,
 }
 
 impl Connections {
@@ -185,7 +184,12 @@ impl Connections {
 
     /// Logs in to `target`'s device and saves it, with its password if we `remember` it and the credential store takes
     /// it. A login cancelled before it's in leaves neither a connection, nor the device saved, nor its password.
-    pub async fn connect(&self, target: Target, remember: bool) -> Result<Connected, CommandError> {
+    pub async fn connect(
+        &self,
+        target: Target,
+        flavor: Option<Flavor>,
+        remember: bool,
+    ) -> Result<Connected, CommandError> {
         let login = {
             let mut state = self.state.lock().unwrap();
             let id = state.next();
@@ -193,16 +197,20 @@ impl Connections {
             id
         };
         let hosts = self.hosts()?;
-        let mut client = Client::new(&target, hosts.pin(&target.host))?;
-        let info = client.info().await?;
+        let flavor = flavor.or(hosts.flavor(&target.host));
+        let (client, info) = Client::login(&target, hosts.pin(&target.host), flavor).await?;
         let unremembered = if remember { hosts.remember(&target).err() } else { None };
         let remembered = remember && unremembered.is_none();
         let accepted = self.accept(login, &target, &info, client, remembered);
-        if accepted.is_err() && remembered {
+        // A device remembered all along keeps the password, which just worked, as the saved devices say now: one
+        // forgotten meanwhile doesn't.
+        let kept =
+            || self.hosts().ok().and_then(|hosts| hosts.device(&target.host)).is_some_and(|saved| saved.remembered);
+        if accepted.is_err() && remembered && !kept() {
             hosts.forget_password(&target.host).unwrap_or_default();
         }
         accepted?;
-        log::info!("Connected to {} (AMT {}), connection {login}", target.host, info.version);
+        log::info!("Connected to {} ({:?} {}), connection {login}", target.host, info.flavor, info.version);
         Ok(Connected { info, unremembered: unremembered.map(|error| error.to_string()) })
     }
 
@@ -273,7 +281,7 @@ impl Connections {
         &self,
         host: &str,
         slot: impl FnOnce(&Connection) -> &Slot<T>,
-        open: impl AsyncFnOnce(&mut Client) -> amt_core::Result<T>,
+        open: impl AsyncFnOnce(&mut Client) -> ooblin_core::Result<T>,
     ) -> Result<u64, CommandError> {
         let connection = self.get(host)?;
         let mut slot = slot(&connection).0.lock().await;
@@ -296,12 +304,13 @@ impl Connections {
 
     /// Makes `change` to `host`'s settings, then reads them again: the name goes in the saved devices, and a disk
     /// image comes out of a drive that's off.
-    pub async fn change(&self, host: &str, change: Change) -> Result<Changed, CommandError> {
+    pub async fn change(&self, host: &str, change: Change) -> Result<Changed<Settings>, CommandError> {
         let connection = self.get(host)?;
         log::info!("Changing {host}'s settings: {change:?}");
         let (error, settings) = {
             let mut client = connection.client.lock().await;
-            (change.make(&mut client).await.err(), client.settings().await.map_err(CommandError::from))
+            let client = client.amt()?;
+            (change.make(client).await.err(), client.settings().await.map_err(CommandError::from))
         };
         if let Some(error) = &error {
             log::warn!("Changing {host}'s settings failed: {error}");
@@ -319,6 +328,24 @@ impl Connections {
             Err(error) => log::warn!("Reading {host}'s settings after a change failed: {error}"),
         }
         Ok(Changed { error, settings })
+    }
+
+    /// Like `change`, for a BMC: `make` makes the change `what`, `read` reads the settings after.
+    pub async fn changed<T>(
+        &self,
+        host: &str,
+        what: impl std::fmt::Debug,
+        make: impl AsyncFnOnce(&mut Client) -> ooblin_core::Result<()>,
+        read: impl AsyncFnOnce(&mut Client) -> ooblin_core::Result<T>,
+    ) -> Result<Changed<T>, CommandError> {
+        let connection = self.get(host)?;
+        log::info!("Changing {host}'s settings: {what:?}");
+        let mut client = connection.client.lock().await;
+        let error = make(&mut client).await.err().map(CommandError::from);
+        if let Some(error) = &error {
+            log::warn!("Changing {host}'s settings failed: {error}");
+        }
+        Ok(Changed { error, settings: read(&mut client).await.map_err(CommandError::from) })
     }
 }
 

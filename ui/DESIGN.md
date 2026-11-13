@@ -28,11 +28,18 @@ sidebar's device names and the footer included. MAC addresses are written `12:07
   dividers, rows `px-4 py-2.5`. Headings, cards, table cells and dialogs are styled once in `src/style.css`, what's
   used once or twice is styled where it's used.
 - Tables span the page, their header stays in view.
+- Each flavor's pages show only what that flavor can say, they don't copy another's (a BMC's hardware isn't AMT's).
+- A device's kind is a pill in its color with its firmware version, white on the color: `AMT` in `amt`, `SMC` (a
+  Supermicro) and `IPMI` in `ipmi` (`src/flavors.ts`).
+- A reading with bounds (a sensor between its critical thresholds) has a native `<meter>` beside it, styled once in
+  `src/style.css` in the color of its text.
 
 ## States
 
 - Values come from Rust as data, the page says them in words right where it shows them: `{mhz && `${mhz} MHz`}`,
   Yes or No, times with `toLocaleString()` in the reader's own zone.
+- A page that changes by the second (sensors) reads itself again a second after each read lands while it's shown,
+  in place, without the gray bars.
 - Loading: the page itself, `aria-busy`, with gray bars where values go. Left out by the device: a dash. Both are CSS on
   empty `dt`, `dd`, `td` and `h3`, so markup just writes `{value}`. Not there at all (no battery): say so in words.
 - Waiting on the device after a click: a spinning `LoaderCircle` where the click was (button, sidebar entry).
@@ -46,11 +53,12 @@ sidebar's device names and the footer included. MAC addresses are written `12:07
 ## Controls
 
 - Buttons are `btn` with `btn-primary` (the one main action), `btn-secondary`, or `bg-danger text-white` for what can't
-  be undone, 32px high.
+  be undone, 32px high, 28px (`h-7`) in a card title or a toolbar. A card title with buttons is as tall as they are, so
+  they don't reach into the section title stuck above it, which would cover them.
 - Icons are 16px Lucide icons, icon-only buttons are `btn-icon` and have a `title`.
 - Explanations go in a native `title` tooltip, not in the layout.
-- Settings that can change are a `<form class="card">` of `label` and field rows (checkboxes, `.field` inputs and
-  selects), the settings being the fields' defaults. A switch or choice of its own saves as it changes. Fields that go
+- Settings that can change are a `Form` (`src/device/Form.svelte`, both flavors') of `label` and field rows
+  (checkboxes, `.field` inputs and selects), the settings being the fields' defaults. A switch or choice of its own saves as it changes. Fields that go
   together (a name, an address) save together, from a ✓ and ✕ at the right of their card title, there all along so
   it's clear what saves this way and enabled once something changed. Enter saves and Escape cancels. Either way the
   footer says how it went, and the form then shows what the device took.

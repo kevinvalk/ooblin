@@ -1,0 +1,404 @@
+//! Intel AMT, Supermicro BMCs and any BMC over IPMI, without a webview. Each flavor has its own protocols (`amt`,
+//! `supermicro`, `ipmi`), `Client` speaks to any, and all hand over what's here. Every socket lives in `net`.
+
+pub mod amt;
+mod client;
+pub mod ipmi;
+mod net;
+pub mod supermicro;
+
+pub use client::{Client, Kvm, Sol};
+pub use net::{Found, RMCP_PORT, discover, fingerprint, nearby};
+
+use std::time::Duration;
+
+use serde::{Deserialize, Serialize};
+use ts_rs::TS;
+
+/// A device and how to log in to it. `host` may name a port (`host:port`, `[v6]:port`): a BMC's web port behind a
+/// tunnel or our mock. AMT's ports and IPMI's are fields of their own, which only tests change.
+#[derive(Clone)]
+pub struct Target {
+    pub host: String,
+    pub wsman_port: u16,
+    pub redirection_port: u16,
+    /// IPMI's UDP port, a BMC's.
+    pub ipmi_port: u16,
+    pub user: String,
+    pub password: String,
+}
+
+impl Target {
+    pub fn new(host: impl Into<String>, user: impl Into<String>, password: impl Into<String>) -> Self {
+        Self {
+            host: host.into(),
+            wsman_port: net::WSMAN_PORT,
+            redirection_port: net::REDIRECTION_PORT,
+            ipmi_port: RMCP_PORT,
+            user: user.into(),
+            password: password.into(),
+        }
+    }
+}
+
+pub type Result<T, E = Error> = std::result::Result<T, E>;
+
+/// A MAC address as we write them, `12:07:14:5F:37:F1`.
+fn mac(mac: &str) -> String {
+    mac.to_uppercase().replace('-', ":")
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum Error {
+    #[error("the device presented certificate {actual}, but {expected} is pinned")]
+    PinMismatch { expected: String, actual: String },
+    #[error("authentication failed, check the user name and password")]
+    Unauthorized,
+    #[error("{0}")]
+    Transport(String),
+    #[error("it didn't answer in time")]
+    Timeout,
+    #[error("HTTP {0}")]
+    Http(u16),
+    #[error("{method} failed with return value {code}")]
+    Method { method: String, code: String },
+    #[error("WS-Man fault: {0}")]
+    Fault(String),
+    /// This device doesn't do that: AMT's `UnsupportedFeature` fault (a class or a setting), or another flavor's call.
+    #[error("this device doesn't support that")]
+    Unsupported,
+    #[error("unexpected response: {0}")]
+    Protocol(String),
+    #[error("that's turned off in the device's remote access settings")]
+    Off,
+    /// See `amt::Client::start_consent`.
+    #[error("someone at the device has to give consent first")]
+    Consent,
+    #[error("that's not the code the device shows")]
+    WrongCode,
+    /// The device ended a session on purpose, which we don't open again by ourselves: see `supermicro::Kvm::frame` and
+    /// `ipmi::Sol::read`.
+    #[error("the BMC ended the session: {0}")]
+    Ended(&'static str),
+    /// An IPMI command's completion code, or a session setup's status, that isn't 0: see `net::ipmi`.
+    #[error("the BMC refused that (IPMI code {0:#04X})")]
+    Refused(u8),
+    #[error("{0}")]
+    Invalid(String),
+}
+
+impl From<std::io::Error> for Error {
+    fn from(error: std::io::Error) -> Self {
+        match error.kind() {
+            // TLS says so in more words, with a link.
+            std::io::ErrorKind::UnexpectedEof => Self::Transport("the device closed the connection".into()),
+            _ => Self::Transport(error.to_string()),
+        }
+    }
+}
+
+/// What a device is, which says how we speak to it.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "core.ts")]
+pub enum Flavor {
+    #[default]
+    Amt,
+    Supermicro,
+    /// A BMC we know only over IPMI: any vendor's, or a Supermicro without Redfish.
+    Ipmi,
+}
+
+/// What a login says about the device. A BMC leaves AMT's own facts (`build`, `control_mode`) out.
+#[derive(Debug, Serialize, TS)]
+#[ts(export, export_to = "core.ts")]
+pub struct Info {
+    pub flavor: Flavor,
+    /// The host name, with its domain if it has one.
+    pub name: String,
+    pub version: String,
+    pub build: Option<String>,
+    /// "Admin" or "Client", only admin control mode redirects without asking someone at the device for consent.
+    pub control_mode: String,
+    /// The pinned certificate's, see `fingerprint`.
+    pub fingerprint: String,
+    /// What it lets us redirect, KVM being `None` where it has none (AMT's standard manageability).
+    pub remote_access: RemoteAccess,
+}
+
+/// What may be redirected, each only while the listener is on too, and when someone at the device has to read out a
+/// code first.
+#[derive(Clone, Debug, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "core.ts")]
+pub struct RemoteAccess {
+    /// `None` on a device without KVM.
+    pub kvm: Option<bool>,
+    pub sol: bool,
+    pub ider: bool,
+    pub consent: Consent,
+    /// Only read: whether `consent` may change, which in client control mode it can't.
+    pub consent_fixed: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "core.ts")]
+pub enum Consent {
+    None,
+    Kvm,
+    All,
+}
+
+/// The power state, and what the device offers to do about it right now.
+#[derive(Debug, Serialize, TS)]
+#[ts(export, export_to = "core.ts")]
+pub struct Power {
+    pub state: PowerState,
+    pub actions: Vec<PowerAction>,
+}
+
+/// The CIM `PowerState`s AMT reports, folded into what a person cares about and named the way they'd say it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, TS)]
+#[ts(export, export_to = "core.ts")]
+pub enum PowerState {
+    On,
+    Asleep,
+    Hibernating,
+    Off,
+    Unknown,
+}
+
+/// The power changes AMT can make. The `Soft` ones, `Sleep` and `Hibernate` ask the OS, the `To` ones power on or reset
+/// into the BIOS setup, a network boot or the disk image in the IDER drive, once, or with the BIOS's screen on the serial
+/// console (`UseSOL`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "core.ts")]
+pub enum PowerAction {
+    On,
+    SoftOff,
+    Off,
+    SoftReset,
+    Reset,
+    Cycle,
+    Sleep,
+    Hibernate,
+    Nmi,
+    OnToBios,
+    OnToPxe,
+    OnToImage,
+    OnToSerial,
+    ResetToBios,
+    ResetToPxe,
+    ResetToImage,
+    ResetToSerial,
+}
+
+/// Everything the device knows about its hardware, gathered by the BIOS at boot. Only what's installed: empty memory
+/// slots and drive bays never make it into WS-Man. Text the device left out is empty, numbers it left out are `None`.
+#[derive(Debug, Serialize, TS)]
+#[ts(export, export_to = "core.ts")]
+pub struct Hardware {
+    pub system: System,
+    pub motherboard: Motherboard,
+    pub bios: Bios,
+    pub processors: Vec<Processor>,
+    pub memory: Vec<Module>,
+    pub disks: Vec<Disk>,
+    pub batteries: Vec<Battery>,
+}
+
+#[derive(Debug, Serialize, TS)]
+#[ts(export, export_to = "core.ts")]
+pub struct System {
+    pub model: String,
+    pub manufacturer: String,
+    pub version: String,
+    pub serial_number: String,
+    pub id: String,
+}
+
+#[derive(Debug, Serialize, TS)]
+#[ts(export, export_to = "core.ts")]
+pub struct Motherboard {
+    pub product: String,
+    pub manufacturer: String,
+    pub version: String,
+    pub serial_number: String,
+    pub asset_tag: String,
+    pub replaceable: bool,
+}
+
+/// `released` is a date, SMBIOS keeps no time.
+#[derive(Debug, Serialize, TS)]
+#[ts(export, export_to = "core.ts")]
+pub struct Bios {
+    pub vendor: String,
+    pub version: String,
+    pub released: String,
+    pub features: Vec<String>,
+}
+
+#[derive(Debug, Serialize, TS)]
+#[ts(export, export_to = "core.ts")]
+pub struct Processor {
+    pub model: String,
+    pub manufacturer: String,
+    pub family: String,
+    pub socket: String,
+    pub mhz: Option<u32>,
+    pub max_mhz: Option<u32>,
+    pub status: String,
+    pub upgrade_method: String,
+}
+
+#[derive(Debug, Serialize, TS)]
+#[ts(export, export_to = "core.ts")]
+pub struct Module {
+    pub slot: String,
+    pub bytes: Option<u64>,
+    pub mhz: Option<u32>,
+    pub kind: String,
+    pub form_factor: String,
+    pub manufacturer: String,
+    pub part_number: String,
+    pub serial_number: String,
+    pub asset_tag: String,
+}
+
+#[derive(Debug, Serialize, TS)]
+#[ts(export, export_to = "core.ts")]
+pub struct Disk {
+    pub model: String,
+    pub serial_number: String,
+    pub bytes: Option<u64>,
+}
+
+#[derive(Debug, Serialize, TS)]
+#[ts(export, export_to = "core.ts")]
+pub struct Battery {
+    pub name: String,
+    pub charge_percent: Option<u8>,
+    pub design_capacity_mwh: Option<u32>,
+}
+
+/// What the device's own status page shows: the device, its AMT and its network.
+#[derive(Debug, Serialize, TS)]
+#[ts(export, export_to = "core.ts")]
+pub struct Status {
+    pub info: Info,
+    pub power: PowerState,
+    pub system_id: String,
+    pub ports: Vec<Port>,
+}
+
+/// AMT has one wired port and maybe a wireless one.
+#[derive(Debug, Serialize, TS)]
+#[ts(export, export_to = "core.ts")]
+pub struct Port {
+    pub wireless: bool,
+    pub mac: String,
+    pub link_up: bool,
+    pub mbps: Option<u64>,
+    pub ipv4: Ipv4,
+    /// `None` when IPv6 is off.
+    pub ipv6: Option<Ipv6>,
+}
+
+/// The addresses are what AMT uses, which it gets from DHCP, the OS or what was set (`Manual`).
+#[derive(Debug, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "core.ts")]
+pub struct Ipv4 {
+    pub configuration: Configuration,
+    pub address: String,
+    pub subnet_mask: String,
+    pub gateway: String,
+    pub primary_dns: String,
+    pub secondary_dns: String,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "core.ts")]
+pub enum Configuration {
+    Dhcp,
+    /// A static address shared with the OS, which AMT takes from it.
+    Os,
+    Manual,
+}
+
+#[derive(Debug, Serialize, TS)]
+#[ts(export, export_to = "core.ts")]
+pub struct Ipv6 {
+    pub addresses: Vec<String>,
+    pub gateway: String,
+    pub primary_dns: String,
+    pub secondary_dns: String,
+}
+
+#[derive(Debug, Serialize, TS)]
+#[ts(export, export_to = "core.ts")]
+pub struct Event {
+    /// Unix seconds.
+    pub time: u32,
+    pub source: String,
+    pub description: String,
+    pub severity: Severity,
+}
+
+/// A sensor's reading in its `unit` ("°C", "RPM", "V", "A", "W", "%" or the unit's name), `None` where it's absent or
+/// unreadable, or a discrete sensor's asserted `state` in words; `low` and `high` are its critical thresholds.
+#[derive(Debug, Clone, PartialEq, Serialize, TS)]
+#[ts(export, export_to = "core.ts")]
+pub struct Sensor {
+    pub name: String,
+    pub kind: SensorKind,
+    pub reading: Option<f64>,
+    pub unit: String,
+    pub state: String,
+    pub severity: Severity,
+    pub low: Option<f64>,
+    pub high: Option<f64>,
+}
+
+/// What a sensor measures, which says where it shows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, TS)]
+#[ts(export, export_to = "core.ts")]
+pub enum SensorKind {
+    Temperature,
+    Fan,
+    Voltage,
+    Current,
+    Power,
+    Other,
+}
+
+/// What can be seen of a server's front panel from here: whether its identify light (UID) is lit, and the last POST
+/// code its BIOS wrote, each `None` where the BMC doesn't say.
+#[derive(Debug, Serialize, TS)]
+#[ts(export, export_to = "core.ts")]
+pub struct Panel {
+    pub identify: Option<bool>,
+    pub post_code: Option<u8>,
+}
+
+/// How bad an event or a reading is, least first.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, TS)]
+#[ts(export, export_to = "core.ts")]
+pub enum Severity {
+    Info,
+    Warning,
+    Critical,
+}
+
+/// What the webview sends: keys by their DOM `code` (where they sit, not what they type), the mouse with the DOM
+/// `buttons` it holds and a notch of `scroll` up (negative) or down (positive), text to type, and letting go of every
+/// key and mouse button still held, when the screen loses focus say.
+#[derive(Debug, Deserialize, TS)]
+#[ts(export, export_to = "core.ts")]
+#[serde(tag = "kind")]
+pub enum Input {
+    Key { code: String, down: bool },
+    Pointer { x: u16, y: u16, buttons: u8, scroll: i8 },
+    Text { text: String },
+    Release,
+}
+
+/// How long a session's goodbye may take, after which dropping it hangs up all the same.
+pub(crate) const GOODBYE: Duration = Duration::from_secs(2);

@@ -1,0 +1,113 @@
+# The app as `cargo tauri build` builds it, for every platform, into a GitHub release: on main the rolling prerelease
+# "Unstable" (tag `unstable`, made anew at the pushed commit with its assets), on a `v*` tag that tag's release.
+# One job sets up the release as a draft, the builds upload into it by id, the last job publishes it: no two jobs race
+# for it, and nobody downloads a release that's half there.
+name: Release
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+
+# A newer push to main makes the unstable build in flight moot, a tag's build always finishes.
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref == 'refs/heads/main' }}
+
+permissions: {}
+
+env:
+  GH_REPO: ${{ github.repository }}
+  TAG: ${{ github.ref_type == 'tag' && github.ref_name || 'unstable' }}
+
+jobs:
+  draft:
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    outputs:
+      id: ${{ steps.draft.outputs.id }}
+    steps:
+      - uses: actions/checkout@v7
+      # Tauri names the bundles after the crate's version, so v0.2.0 must not ship ooblin_0.1.0.
+      - name: Check the tag is the app's version
+        if: github.ref_type == 'tag'
+        run: |
+          version=$(sed -n 's/^version = "\(.*\)"/\1/p' crates/ooblin/Cargo.toml | head -1)
+          [ "$TAG" = "v$version" ] || { echo "::error::$TAG, but crates/ooblin/Cargo.toml says $version"; exit 1; }
+      # Deleting the release takes its assets and tag along, a cancelled run's draft too. Publishing creates the tag
+      # anew, at this commit: the API does, as a token without the `workflows` permission can't push one.
+      - name: Delete the Unstable before
+        if: github.ref_type != 'tag'
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: if gh release view unstable > /dev/null 2>&1; then gh release delete unstable --cleanup-tag --yes; fi
+      - name: Create the release as a draft
+        id: draft
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          NAME: ${{ github.ref_type == 'tag' && github.ref_name || 'Unstable' }}
+          BODY: ${{ github.ref_type != 'tag' && format('The latest build of main, {0}. Untested.', github.sha) || '' }}
+          TAGGED: ${{ github.ref_type == 'tag' }}
+          UNSTABLE: ${{ github.ref_type != 'tag' }}
+        run: |
+          id=$(gh api "repos/$GH_REPO/releases" -f tag_name="$TAG" -f target_commitish="$GITHUB_SHA" -f name="$NAME" \
+            -f body="$BODY" -F draft=true -F prerelease="$UNSTABLE" -F generate_release_notes="$TAGGED" --jq .id)
+          echo "id=$id" >> "$GITHUB_OUTPUT"
+
+  build:
+    needs: draft
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # One universal app rather than one per architecture: a single download that runs on every Mac, for one
+          # runner building both. Unsigned, so ad-hoc signed (`-`): Apple silicon runs no code without a signature,
+          # and users allow the app once in Privacy & Security.
+          - os: macos-latest
+            targets: aarch64-apple-darwin x86_64-apple-darwin
+            args: --target universal-apple-darwin --config '{"bundle":{"macOS":{"signingIdentity":"-"}}}'
+          - os: windows-latest
+          - os: ubuntu-24.04
+          # Linux on arm64 has no x64 emulation to fall back on, so it gets its own build. Windows on arm64 does, and
+          # runs the x64 app, so we leave windows-11-arm until someone asks.
+          - os: ubuntu-24.04-arm
+    runs-on: ${{ matrix.os }}
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v7
+      - name: Install Tauri's Linux libraries
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libwebkit2gtk-4.1-dev libxdo-dev librsvg2-dev
+      - uses: actions/setup-node@v7
+        with:
+          node-version-file: .node-version
+          cache: npm
+          cache-dependency-path: ui/package-lock.json
+      - name: Install the Rust of rust-toolchain.toml
+        run: rustup toolchain install
+      - name: Add the Mac architectures
+        if: matrix.targets
+        run: rustup target add ${{ matrix.targets }}
+      - uses: Swatinem/rust-cache@v2
+      - run: npm ci --prefix ui
+      # No certificates yet, so unsigned. Signing goes here: Apple's APPLE_* secrets in env, Windows' in a --config.
+      - uses: tauri-apps/tauri-action@v1
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        with:
+          releaseId: ${{ needs.draft.outputs.id }}
+          args: ${{ matrix.args }}
+          uploadUpdaterJson: false
+
+  publish:
+    needs: [draft, build]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - env:
+          GITHUB_TOKEN: ${{ github.token }}
+          ID: ${{ needs.draft.outputs.id }}
+        run: gh api -X PATCH "repos/$GH_REPO/releases/$ID" -F draft=false --silent

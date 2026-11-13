@@ -1,0 +1,1043 @@
+{
+  "@odata.context": "/redfish/v1/$metadata#LogEntryCollection.LogEntryCollection",
+  "@odata.id": "/redfish/v1/Systems/1/LogServices/Log1/Entries",
+  "@odata.type": "#LogEntryCollection.LogEntryCollection",
+  "Description": "Collection of Health Event Logs",
+  "Members": [
+    {
+      "@odata.id": "/redfish/v1/Systems/1/LogServices/Log1/Entries/1",
+      "@odata.type": "#LogEntry.v1_3_0.LogEntry",
+      "Created": "2016-10-03T20:35:58+01:00",
+      "EntryCode": "Assert",
+      "EntryType": "Event",
+      "Id": "1",
+      "Links": {
+        "Oem": {}
+      },
+      "Message": "[ OEM ] First AC Power on",
+      "MessageArgs": [
+        "ArrayOfMessageArgs"
+      ],
+      "Name": "Log Entry 1",
+      "Oem": {
+        "Supermicro": {
+          "@odata.type": "#SmcLogEntryExtensions.v1_0_0.LogEntry",
+          "RawEventData": {
+            "EventData1": "0xA0",
+            "EventData2": "0xFF",
+            "EventData3": "0xFF",
+            "EventDirAndType": "0x6F",
+            "SensorName": "OEM",
+            "SensorType": "0xC8"
+          }
+        }
+      },
+      "OemSensorType": "ACPowerOn",
+      "SensorNumber": 255
+    },
+    {
+      "@odata.id": "/redfish/v1/Systems/1/LogServices/Log1/Entries/2",
+      "@odata.type": "#LogEntry.v1_3_0.LogEntry",
+      "Created": "2016-10-03T20:38:26+01:00",
+      "EntryCode": "Assert",
+      "EntryType": "Event",
+      "Id": "2",
+      "Links": {
+        "Oem": {}
+      },
+      "Message": "[ OEM ] Activate Node Product Key",
+      "MessageArgs": [
+        "ArrayOfMessageArgs"
+      ],
+      "Name": "Log Entry 2",
+      "Oem": {
+        "Supermicro": {
+          "@odata.type": "#SmcLogEntryExtensions.v1_0_0.LogEntry",
+          "RawEventData": {
+            "EventData1": "0x18",
+            "EventData2": "0x00",
+            "EventData3": "0xFF",
+            "EventDirAndType": "0x6F",
+            "SensorName": "OEM",
+            "SensorType": "0xCA"
+          }
+        }
+      },
+      "OemSensorType": "OOB",
+      "SensorNumber": 255
+    },
+    {
+      "@odata.id": "/redfish/v1/Systems/1/LogServices/Log1/Entries/3",
+      "@odata.type": "#LogEntry.v1_3_0.LogEntry",
+      "Created": "2026-10-31T23:12:11+01:00",
+      "EntryCode": "Assert",
+      "EntryType": "Event",
+      "Id": "3",
+      "Links": {
+        "Oem": {}
+      },
+      "Message": "[ OEM ] First AC Power on",
+      "MessageArgs": [
+        "ArrayOfMessageArgs"
+      ],
+      "Name": "Log Entry 3",
+      "Oem": {
+        "Supermicro": {
+          "@odata.type": "#SmcLogEntryExtensions.v1_0_0.LogEntry",
+          "RawEventData": {
+            "EventData1": "0xA0",
+            "EventData2": "0xFF",
+            "EventData3": "0xFF",
+            "EventDirAndType": "0x6F",
+            "SensorName": "OEM",
+            "SensorType": "0xC8"
+          }
+        }
+      },
+      "OemSensorType": "ACPowerOn",
+      "SensorNumber": 255
+    },
+    {
+      "@odata.id": "/redfish/v1/Systems/1/LogServices/Log1/Entries/4",
+      "@odata.type": "#LogEntry.v1_3_0.LogEntry",
+      "Created": "2026-11-01T15:09:51+01:00",
+      "EntryCode": "Assert",
+      "EntryType": "Event",
+      "Id": "4",
+      "Links": {
+        "Oem": {}
+      },
+      "Message": "[ OEM ] First AC Power on",
+      "MessageArgs": [
+        "ArrayOfMessageArgs"
+      ],
+      "Name": "Log Entry 4",
+      "Oem": {
+        "Supermicro": {
+          "@odata.type": "#SmcLogEntryExtensions.v1_0_0.LogEntry",
+          "RawEventData": {
+            "EventData1": "0xA0",
+            "EventData2": "0xFF",
+            "EventData3": "0xFF",
+            "EventDirAndType": "0x6F",
+            "SensorName": "OEM",
+            "SensorType": "0xC8"
+          }
+        }
+      },
+      "OemSensorType": "ACPowerOn",
+      "SensorNumber": 255
+    },
+    {
+      "@odata.id": "/redfish/v1/Systems/1/LogServices/Log1/Entries/5",
+      "@odata.type": "#LogEntry.v1_3_0.LogEntry",
+      "Created": "2026-11-01T15:23:27+01:00",
+      "EntryCode": "Assert",
+      "EntryType": "Event",
+      "Id": "5",
+      "Links": {
+        "Oem": {}
+      },
+      "Message": "[ OEM ] First AC Power on",
+      "MessageArgs": [
+        "ArrayOfMessageArgs"
+      ],
+      "Name": "Log Entry 5",
+      "Oem": {
+        "Supermicro": {
+          "@odata.type": "#SmcLogEntryExtensions.v1_0_0.LogEntry",
+          "RawEventData": {
+            "EventData1": "0xA0",
+            "EventData2": "0xFF",
+            "EventData3": "0xFF",
+            "EventDirAndType": "0x6F",
+            "SensorName": "OEM",
+            "SensorType": "0xC8"
+          }
+        }
+      },
+      "OemSensorType": "ACPowerOn",
+      "SensorNumber": 255
+    },
+    {
+      "@odata.id": "/redfish/v1/Systems/1/LogServices/Log1/Entries/6",
+      "@odata.type": "#LogEntry.v1_3_0.LogEntry",
+      "Created": "2026-11-02T12:37:36+01:00",
+      "EntryCode": "Assert",
+      "EntryType": "Event",
+      "Id": "6",
+      "Links": {
+        "Oem": {}
+      },
+      "Message": "[ OEM ] First AC Power on",
+      "MessageArgs": [
+        "ArrayOfMessageArgs"
+      ],
+      "Name": "Log Entry 6",
+      "Oem": {
+        "Supermicro": {
+          "@odata.type": "#SmcLogEntryExtensions.v1_0_0.LogEntry",
+          "RawEventData": {
+            "EventData1": "0xA0",
+            "EventData2": "0xFF",
+            "EventData3": "0xFF",
+            "EventDirAndType": "0x6F",
+            "SensorName": "OEM",
+            "SensorType": "0xC8"
+          }
+        }
+      },
+      "OemSensorType": "ACPowerOn",
+      "SensorNumber": 255
+    },
+    {
+      "@odata.id": "/redfish/v1/Systems/1/LogServices/Log1/Entries/7",
+      "@odata.type": "#LogEntry.v1_3_0.LogEntry",
+      "Created": "2026-11-02T13:53:20+01:00",
+      "EntryCode": "Assert",
+      "EntryType": "Event",
+      "Id": "7",
+      "Links": {
+        "Oem": {}
+      },
+      "Message": "[ OEM ] First AC Power on",
+      "MessageArgs": [
+        "ArrayOfMessageArgs"
+      ],
+      "Name": "Log Entry 7",
+      "Oem": {
+        "Supermicro": {
+          "@odata.type": "#SmcLogEntryExtensions.v1_0_0.LogEntry",
+          "RawEventData": {
+            "EventData1": "0xA0",
+            "EventData2": "0xFF",
+            "EventData3": "0xFF",
+            "EventDirAndType": "0x6F",
+            "SensorName": "OEM",
+            "SensorType": "0xC8"
+          }
+        }
+      },
+      "OemSensorType": "ACPowerOn",
+      "SensorNumber": 255
+    },
+    {
+      "@odata.id": "/redfish/v1/Systems/1/LogServices/Log1/Entries/8",
+      "@odata.type": "#LogEntry.v1_3_0.LogEntry",
+      "Created": "2026-11-02T14:22:12+01:00",
+      "EntryCode": "Assert",
+      "EntryType": "Event",
+      "Id": "8",
+      "Links": {
+        "Oem": {},
+        "OriginOfCondition": {
+          "@odata.id": "/redfish/v1/Chassis/1/Thermal"
+        }
+      },
+      "Message": "[ FAN1 ] Lower Critical going low",
+      "MessageArgs": [
+        "ArrayOfMessageArgs"
+      ],
+      "Name": "Log Entry 8",
+      "Oem": {
+        "Supermicro": {
+          "@odata.type": "#SmcLogEntryExtensions.v1_0_0.LogEntry",
+          "RawEventData": {
+            "EventData1": "0x52",
+            "EventData2": "0x04",
+            "EventData3": "0x05",
+            "EventDirAndType": "0x01",
+            "SensorName": "FAN1",
+            "SensorType": "0x04"
+          }
+        }
+      },
+      "SensorNumber": 65,
+      "SensorType": "Fan"
+    },
+    {
+      "@odata.id": "/redfish/v1/Systems/1/LogServices/Log1/Entries/9",
+      "@odata.type": "#LogEntry.v1_3_0.LogEntry",
+      "Created": "2026-11-02T14:22:12+01:00",
+      "EntryCode": "Assert",
+      "EntryType": "Event",
+      "Id": "9",
+      "Links": {
+        "Oem": {},
+        "OriginOfCondition": {
+          "@odata.id": "/redfish/v1/Chassis/1/Thermal"
+        }
+      },
+      "Message": "[ FAN3 ] Lower Critical going low",
+      "MessageArgs": [
+        "ArrayOfMessageArgs"
+      ],
+      "Name": "Log Entry 9",
+      "Oem": {
+        "Supermicro": {
+          "@odata.type": "#SmcLogEntryExtensions.v1_0_0.LogEntry",
+          "RawEventData": {
+            "EventData1": "0x52",
+            "EventData2": "0x04",
+            "EventData3": "0x05",
+            "EventDirAndType": "0x01",
+            "SensorName": "FAN3",
+            "SensorType": "0x04"
+          }
+        }
+      },
+      "SensorNumber": 67,
+      "SensorType": "Fan"
+    },
+    {
+      "@odata.id": "/redfish/v1/Systems/1/LogServices/Log1/Entries/10",
+      "@odata.type": "#LogEntry.v1_3_0.LogEntry",
+      "Created": "2026-11-02T14:22:16+01:00",
+      "EntryCode": "Deassert",
+      "EntryType": "Event",
+      "Id": "10",
+      "Links": {
+        "Oem": {},
+        "OriginOfCondition": {
+          "@odata.id": "/redfish/v1/Chassis/1/Thermal"
+        }
+      },
+      "Message": "[ FAN1 ] Lower Critical going low",
+      "MessageArgs": [
+        "ArrayOfMessageArgs"
+      ],
+      "Name": "Log Entry 10",
+      "Oem": {
+        "Supermicro": {
+          "@odata.type": "#SmcLogEntryExtensions.v1_0_0.LogEntry",
+          "RawEventData": {
+            "EventData1": "0x52",
+            "EventData2": "0x0D",
+            "EventData3": "0x05",
+            "EventDirAndType": "0x81",
+            "SensorName": "FAN1",
+            "SensorType": "0x04"
+          }
+        }
+      },
+      "SensorNumber": 65,
+      "SensorType": "Fan"
+    },
+    {
+      "@odata.id": "/redfish/v1/Systems/1/LogServices/Log1/Entries/11",
+      "@odata.type": "#LogEntry.v1_3_0.LogEntry",
+      "Created": "2026-11-02T14:22:16+01:00",
+      "EntryCode": "Deassert",
+      "EntryType": "Event",
+      "Id": "11",
+      "Links": {
+        "Oem": {},
+        "OriginOfCondition": {
+          "@odata.id": "/redfish/v1/Chassis/1/Thermal"
+        }
+      },
+      "Message": "[ FAN3 ] Lower Critical going low",
+      "MessageArgs": [
+        "ArrayOfMessageArgs"
+      ],
+      "Name": "Log Entry 11",
+      "Oem": {
+        "Supermicro": {
+          "@odata.type": "#SmcLogEntryExtensions.v1_0_0.LogEntry",
+          "RawEventData": {
+            "EventData1": "0x52",
+            "EventData2": "0x0D",
+            "EventData3": "0x05",
+            "EventDirAndType": "0x81",
+            "SensorName": "FAN3",
+            "SensorType": "0x04"
+          }
+        }
+      },
+      "SensorNumber": 67,
+      "SensorType": "Fan"
+    },
+    {
+      "@odata.id": "/redfish/v1/Systems/1/LogServices/Log1/Entries/12",
+      "@odata.type": "#LogEntry.v1_3_0.LogEntry",
+      "Created": "2026-11-02T16:44:04+01:00",
+      "EntryCode": "Assert",
+      "EntryType": "Event",
+      "Id": "12",
+      "Links": {
+        "Oem": {},
+        "OriginOfCondition": {
+          "@odata.id": "/redfish/v1/Chassis/1/Thermal"
+        }
+      },
+      "Message": "[ CPU Temp ] Upper Critical going high",
+      "MessageArgs": [
+        "ArrayOfMessageArgs"
+      ],
+      "Name": "Log Entry 12",
+      "Oem": {
+        "Supermicro": {
+          "@odata.type": "#SmcLogEntryExtensions.v1_0_0.LogEntry",
+          "RawEventData": {
+            "EventData1": "0x59",
+            "EventData2": "0x60",
+            "EventData3": "0x60",
+            "EventDirAndType": "0x01",
+            "SensorName": "CPU Temp",
+            "SensorType": "0x01"
+          }
+        }
+      },
+      "SensorNumber": 1,
+      "SensorType": "Temperature"
+    },
+    {
+      "@odata.id": "/redfish/v1/Systems/1/LogServices/Log1/Entries/13",
+      "@odata.type": "#LogEntry.v1_3_0.LogEntry",
+      "Created": "2026-11-02T16:44:08+01:00",
+      "EntryCode": "Deassert",
+      "EntryType": "Event",
+      "Id": "13",
+      "Links": {
+        "Oem": {},
+        "OriginOfCondition": {
+          "@odata.id": "/redfish/v1/Chassis/1/Thermal"
+        }
+      },
+      "Message": "[ CPU Temp ] Upper Critical going high",
+      "MessageArgs": [
+        "ArrayOfMessageArgs"
+      ],
+      "Name": "Log Entry 13",
+      "Oem": {
+        "Supermicro": {
+          "@odata.type": "#SmcLogEntryExtensions.v1_0_0.LogEntry",
+          "RawEventData": {
+            "EventData1": "0x59",
+            "EventData2": "0x56",
+            "EventData3": "0x60",
+            "EventDirAndType": "0x81",
+            "SensorName": "CPU Temp",
+            "SensorType": "0x01"
+          }
+        }
+      },
+      "SensorNumber": 1,
+      "SensorType": "Temperature"
+    },
+    {
+      "@odata.id": "/redfish/v1/Systems/1/LogServices/Log1/Entries/14",
+      "@odata.type": "#LogEntry.v1_3_0.LogEntry",
+      "Created": "2026-11-02T16:57:12+01:00",
+      "EntryCode": "Assert",
+      "EntryType": "Event",
+      "Id": "14",
+      "Links": {
+        "Oem": {},
+        "OriginOfCondition": {
+          "@odata.id": "/redfish/v1/Chassis/1/Thermal"
+        }
+      },
+      "Message": "[ CPU Temp ] Upper Critical going high",
+      "MessageArgs": [
+        "ArrayOfMessageArgs"
+      ],
+      "Name": "Log Entry 14",
+      "Oem": {
+        "Supermicro": {
+          "@odata.type": "#SmcLogEntryExtensions.v1_0_0.LogEntry",
+          "RawEventData": {
+            "EventData1": "0x59",
+            "EventData2": "0x60",
+            "EventData3": "0x60",
+            "EventDirAndType": "0x01",
+            "SensorName": "CPU Temp",
+            "SensorType": "0x01"
+          }
+        }
+      },
+      "SensorNumber": 1,
+      "SensorType": "Temperature"
+    },
+    {
+      "@odata.id": "/redfish/v1/Systems/1/LogServices/Log1/Entries/15",
+      "@odata.type": "#LogEntry.v1_3_0.LogEntry",
+      "Created": "2026-11-02T16:57:28+01:00",
+      "EntryCode": "Deassert",
+      "EntryType": "Event",
+      "Id": "15",
+      "Links": {
+        "Oem": {},
+        "OriginOfCondition": {
+          "@odata.id": "/redfish/v1/Chassis/1/Thermal"
+        }
+      },
+      "Message": "[ CPU Temp ] Upper Critical going high",
+      "MessageArgs": [
+        "ArrayOfMessageArgs"
+      ],
+      "Name": "Log Entry 15",
+      "Oem": {
+        "Supermicro": {
+          "@odata.type": "#SmcLogEntryExtensions.v1_0_0.LogEntry",
+          "RawEventData": {
+            "EventData1": "0x59",
+            "EventData2": "0x57",
+            "EventData3": "0x60",
+            "EventDirAndType": "0x81",
+            "SensorName": "CPU Temp",
+            "SensorType": "0x01"
+          }
+        }
+      },
+      "SensorNumber": 1,
+      "SensorType": "Temperature"
+    },
+    {
+      "@odata.id": "/redfish/v1/Systems/1/LogServices/Log1/Entries/16",
+      "@odata.type": "#LogEntry.v1_3_0.LogEntry",
+      "Created": "2026-11-02T21:19:05+01:00",
+      "EntryCode": "Assert",
+      "EntryType": "Event",
+      "Id": "16",
+      "Links": {
+        "Oem": {},
+        "OriginOfCondition": {
+          "@odata.id": "/redfish/v1/Chassis/1/Thermal"
+        }
+      },
+      "Message": "[ CPU Temp ] Upper Critical going high",
+      "MessageArgs": [
+        "ArrayOfMessageArgs"
+      ],
+      "Name": "Log Entry 16",
+      "Oem": {
+        "Supermicro": {
+          "@odata.type": "#SmcLogEntryExtensions.v1_0_0.LogEntry",
+          "RawEventData": {
+            "EventData1": "0x59",
+            "EventData2": "0x60",
+            "EventData3": "0x60",
+            "EventDirAndType": "0x01",
+            "SensorName": "CPU Temp",
+            "SensorType": "0x01"
+          }
+        }
+      },
+      "SensorNumber": 1,
+      "SensorType": "Temperature"
+    },
+    {
+      "@odata.id": "/redfish/v1/Systems/1/LogServices/Log1/Entries/17",
+      "@odata.type": "#LogEntry.v1_3_0.LogEntry",
+      "Created": "2026-11-02T21:20:14+01:00",
+      "EntryCode": "Deassert",
+      "EntryType": "Event",
+      "Id": "17",
+      "Links": {
+        "Oem": {},
+        "OriginOfCondition": {
+          "@odata.id": "/redfish/v1/Chassis/1/Thermal"
+        }
+      },
+      "Message": "[ CPU Temp ] Upper Critical going high",
+      "MessageArgs": [
+        "ArrayOfMessageArgs"
+      ],
+      "Name": "Log Entry 17",
+      "Oem": {
+        "Supermicro": {
+          "@odata.type": "#SmcLogEntryExtensions.v1_0_0.LogEntry",
+          "RawEventData": {
+            "EventData1": "0x59",
+            "EventData2": "0x58",
+            "EventData3": "0x60",
+            "EventDirAndType": "0x81",
+            "SensorName": "CPU Temp",
+            "SensorType": "0x01"
+          }
+        }
+      },
+      "SensorNumber": 1,
+      "SensorType": "Temperature"
+    },
+    {
+      "@odata.id": "/redfish/v1/Systems/1/LogServices/Log1/Entries/18",
+      "@odata.type": "#LogEntry.v1_3_0.LogEntry",
+      "Created": "2026-11-02T21:43:37+01:00",
+      "EntryCode": "Assert",
+      "EntryType": "Event",
+      "Id": "18",
+      "Links": {
+        "Oem": {},
+        "OriginOfCondition": {
+          "@odata.id": "/redfish/v1/Chassis/1/Thermal"
+        }
+      },
+      "Message": "[ CPU Temp ] Upper Critical going high",
+      "MessageArgs": [
+        "ArrayOfMessageArgs"
+      ],
+      "Name": "Log Entry 18",
+      "Oem": {
+        "Supermicro": {
+          "@odata.type": "#SmcLogEntryExtensions.v1_0_0.LogEntry",
+          "RawEventData": {
+            "EventData1": "0x59",
+            "EventData2": "0x60",
+            "EventData3": "0x60",
+            "EventDirAndType": "0x01",
+            "SensorName": "CPU Temp",
+            "SensorType": "0x01"
+          }
+        }
+      },
+      "SensorNumber": 1,
+      "SensorType": "Temperature"
+    },
+    {
+      "@odata.id": "/redfish/v1/Systems/1/LogServices/Log1/Entries/19",
+      "@odata.type": "#LogEntry.v1_3_0.LogEntry",
+      "Created": "2026-11-02T21:44:11+01:00",
+      "EntryCode": "Deassert",
+      "EntryType": "Event",
+      "Id": "19",
+      "Links": {
+        "Oem": {},
+        "OriginOfCondition": {
+          "@odata.id": "/redfish/v1/Chassis/1/Thermal"
+        }
+      },
+      "Message": "[ CPU Temp ] Upper Critical going high",
+      "MessageArgs": [
+        "ArrayOfMessageArgs"
+      ],
+      "Name": "Log Entry 19",
+      "Oem": {
+        "Supermicro": {
+          "@odata.type": "#SmcLogEntryExtensions.v1_0_0.LogEntry",
+          "RawEventData": {
+            "EventData1": "0x59",
+            "EventData2": "0x58",
+            "EventData3": "0x60",
+            "EventDirAndType": "0x81",
+            "SensorName": "CPU Temp",
+            "SensorType": "0x01"
+          }
+        }
+      },
+      "SensorNumber": 1,
+      "SensorType": "Temperature"
+    },
+    {
+      "@odata.id": "/redfish/v1/Systems/1/LogServices/Log1/Entries/20",
+      "@odata.type": "#LogEntry.v1_3_0.LogEntry",
+      "Created": "2026-11-09T14:37:38+01:00",
+      "EntryCode": "Assert",
+      "EntryType": "Event",
+      "Id": "20",
+      "Links": {
+        "Oem": {},
+        "OriginOfCondition": {
+          "@odata.id": "/redfish/v1/Chassis/1/Thermal"
+        }
+      },
+      "Message": "[ FAN3 ] Lower Critical going low",
+      "MessageArgs": [
+        "ArrayOfMessageArgs"
+      ],
+      "Name": "Log Entry 20",
+      "Oem": {
+        "Supermicro": {
+          "@odata.type": "#SmcLogEntryExtensions.v1_0_0.LogEntry",
+          "RawEventData": {
+            "EventData1": "0x52",
+            "EventData2": "0x00",
+            "EventData3": "0x05",
+            "EventDirAndType": "0x01",
+            "SensorName": "FAN3",
+            "SensorType": "0x04"
+          }
+        }
+      },
+      "SensorNumber": 67,
+      "SensorType": "Fan"
+    },
+    {
+      "@odata.id": "/redfish/v1/Systems/1/LogServices/Log1/Entries/21",
+      "@odata.type": "#LogEntry.v1_3_0.LogEntry",
+      "Created": "2026-11-09T14:37:38+01:00",
+      "EntryCode": "Assert",
+      "EntryType": "Event",
+      "Id": "21",
+      "Links": {
+        "Oem": {},
+        "OriginOfCondition": {
+          "@odata.id": "/redfish/v1/Chassis/1/Thermal"
+        }
+      },
+      "Message": "[ FAN3 ] Lower Non-Recoverable going low",
+      "MessageArgs": [
+        "ArrayOfMessageArgs"
+      ],
+      "Name": "Log Entry 21",
+      "Oem": {
+        "Supermicro": {
+          "@odata.type": "#SmcLogEntryExtensions.v1_0_0.LogEntry",
+          "RawEventData": {
+            "EventData1": "0x54",
+            "EventData2": "0x00",
+            "EventData3": "0x03",
+            "EventDirAndType": "0x01",
+            "SensorName": "FAN3",
+            "SensorType": "0x04"
+          }
+        }
+      },
+      "SensorNumber": 67,
+      "SensorType": "Fan"
+    },
+    {
+      "@odata.id": "/redfish/v1/Systems/1/LogServices/Log1/Entries/22",
+      "@odata.type": "#LogEntry.v1_3_0.LogEntry",
+      "Created": "2026-11-09T15:12:06+01:00",
+      "EntryCode": "Assert",
+      "EntryType": "Event",
+      "Id": "22",
+      "Links": {
+        "Oem": {},
+        "OriginOfCondition": {
+          "@odata.id": "/redfish/v1/Chassis/1/Thermal"
+        }
+      },
+      "Message": "[ FAN1 ] Lower Critical going low",
+      "MessageArgs": [
+        "ArrayOfMessageArgs"
+      ],
+      "Name": "Log Entry 22",
+      "Oem": {
+        "Supermicro": {
+          "@odata.type": "#SmcLogEntryExtensions.v1_0_0.LogEntry",
+          "RawEventData": {
+            "EventData1": "0x52",
+            "EventData2": "0x05",
+            "EventData3": "0x05",
+            "EventDirAndType": "0x01",
+            "SensorName": "FAN1",
+            "SensorType": "0x04"
+          }
+        }
+      },
+      "SensorNumber": 65,
+      "SensorType": "Fan"
+    },
+    {
+      "@odata.id": "/redfish/v1/Systems/1/LogServices/Log1/Entries/23",
+      "@odata.type": "#LogEntry.v1_3_0.LogEntry",
+      "Created": "2026-11-09T15:12:10+01:00",
+      "EntryCode": "Deassert",
+      "EntryType": "Event",
+      "Id": "23",
+      "Links": {
+        "Oem": {},
+        "OriginOfCondition": {
+          "@odata.id": "/redfish/v1/Chassis/1/Thermal"
+        }
+      },
+      "Message": "[ FAN1 ] Lower Critical going low",
+      "MessageArgs": [
+        "ArrayOfMessageArgs"
+      ],
+      "Name": "Log Entry 23",
+      "Oem": {
+        "Supermicro": {
+          "@odata.type": "#SmcLogEntryExtensions.v1_0_0.LogEntry",
+          "RawEventData": {
+            "EventData1": "0x52",
+            "EventData2": "0x0D",
+            "EventData3": "0x05",
+            "EventDirAndType": "0x81",
+            "SensorName": "FAN1",
+            "SensorType": "0x04"
+          }
+        }
+      },
+      "SensorNumber": 65,
+      "SensorType": "Fan"
+    },
+    {
+      "@odata.id": "/redfish/v1/Systems/1/LogServices/Log1/Entries/24",
+      "@odata.type": "#LogEntry.v1_3_0.LogEntry",
+      "Created": "2026-11-09T15:22:21+01:00",
+      "EntryCode": "Assert",
+      "EntryType": "Event",
+      "Id": "24",
+      "Links": {
+        "Oem": {},
+        "OriginOfCondition": {
+          "@odata.id": "/redfish/v1/Chassis/1/Thermal"
+        }
+      },
+      "Message": "[ FAN4 ] Lower Critical going low",
+      "MessageArgs": [
+        "ArrayOfMessageArgs"
+      ],
+      "Name": "Log Entry 24",
+      "Oem": {
+        "Supermicro": {
+          "@odata.type": "#SmcLogEntryExtensions.v1_0_0.LogEntry",
+          "RawEventData": {
+            "EventData1": "0x52",
+            "EventData2": "0x00",
+            "EventData3": "0x05",
+            "EventDirAndType": "0x01",
+            "SensorName": "FAN4",
+            "SensorType": "0x04"
+          }
+        }
+      },
+      "SensorNumber": 68,
+      "SensorType": "Fan"
+    },
+    {
+      "@odata.id": "/redfish/v1/Systems/1/LogServices/Log1/Entries/25",
+      "@odata.type": "#LogEntry.v1_3_0.LogEntry",
+      "Created": "2026-11-09T15:22:21+01:00",
+      "EntryCode": "Assert",
+      "EntryType": "Event",
+      "Id": "25",
+      "Links": {
+        "Oem": {},
+        "OriginOfCondition": {
+          "@odata.id": "/redfish/v1/Chassis/1/Thermal"
+        }
+      },
+      "Message": "[ FAN4 ] Lower Non-Recoverable going low",
+      "MessageArgs": [
+        "ArrayOfMessageArgs"
+      ],
+      "Name": "Log Entry 25",
+      "Oem": {
+        "Supermicro": {
+          "@odata.type": "#SmcLogEntryExtensions.v1_0_0.LogEntry",
+          "RawEventData": {
+            "EventData1": "0x54",
+            "EventData2": "0x00",
+            "EventData3": "0x03",
+            "EventDirAndType": "0x01",
+            "SensorName": "FAN4",
+            "SensorType": "0x04"
+          }
+        }
+      },
+      "SensorNumber": 68,
+      "SensorType": "Fan"
+    },
+    {
+      "@odata.id": "/redfish/v1/Systems/1/LogServices/Log1/Entries/26",
+      "@odata.type": "#LogEntry.v1_3_0.LogEntry",
+      "Created": "2026-11-09T15:22:26+01:00",
+      "EntryCode": "Deassert",
+      "EntryType": "Event",
+      "Id": "26",
+      "Links": {
+        "Oem": {},
+        "OriginOfCondition": {
+          "@odata.id": "/redfish/v1/Chassis/1/Thermal"
+        }
+      },
+      "Message": "[ FAN4 ] Lower Non-Recoverable going low",
+      "MessageArgs": [
+        "ArrayOfMessageArgs"
+      ],
+      "Name": "Log Entry 26",
+      "Oem": {
+        "Supermicro": {
+          "@odata.type": "#SmcLogEntryExtensions.v1_0_0.LogEntry",
+          "RawEventData": {
+            "EventData1": "0x54",
+            "EventData2": "0x0D",
+            "EventData3": "0x03",
+            "EventDirAndType": "0x81",
+            "SensorName": "FAN4",
+            "SensorType": "0x04"
+          }
+        }
+      },
+      "SensorNumber": 68,
+      "SensorType": "Fan"
+    },
+    {
+      "@odata.id": "/redfish/v1/Systems/1/LogServices/Log1/Entries/27",
+      "@odata.type": "#LogEntry.v1_3_0.LogEntry",
+      "Created": "2026-11-09T15:22:26+01:00",
+      "EntryCode": "Deassert",
+      "EntryType": "Event",
+      "Id": "27",
+      "Links": {
+        "Oem": {},
+        "OriginOfCondition": {
+          "@odata.id": "/redfish/v1/Chassis/1/Thermal"
+        }
+      },
+      "Message": "[ FAN4 ] Lower Critical going low",
+      "MessageArgs": [
+        "ArrayOfMessageArgs"
+      ],
+      "Name": "Log Entry 27",
+      "Oem": {
+        "Supermicro": {
+          "@odata.type": "#SmcLogEntryExtensions.v1_0_0.LogEntry",
+          "RawEventData": {
+            "EventData1": "0x52",
+            "EventData2": "0x0D",
+            "EventData3": "0x05",
+            "EventDirAndType": "0x81",
+            "SensorName": "FAN4",
+            "SensorType": "0x04"
+          }
+        }
+      },
+      "SensorNumber": 68,
+      "SensorType": "Fan"
+    },
+    {
+      "@odata.id": "/redfish/v1/Systems/1/LogServices/Log1/Entries/28",
+      "@odata.type": "#LogEntry.v1_3_0.LogEntry",
+      "Created": "2026-11-09T15:22:58+01:00",
+      "EntryCode": "Assert",
+      "EntryType": "Event",
+      "Id": "28",
+      "Links": {
+        "Oem": {},
+        "OriginOfCondition": {
+          "@odata.id": "/redfish/v1/Chassis/1/Thermal"
+        }
+      },
+      "Message": "[ FAN4 ] Lower Critical going low",
+      "MessageArgs": [
+        "ArrayOfMessageArgs"
+      ],
+      "Name": "Log Entry 28",
+      "Oem": {
+        "Supermicro": {
+          "@odata.type": "#SmcLogEntryExtensions.v1_0_0.LogEntry",
+          "RawEventData": {
+            "EventData1": "0x52",
+            "EventData2": "0x04",
+            "EventData3": "0x05",
+            "EventDirAndType": "0x01",
+            "SensorName": "FAN4",
+            "SensorType": "0x04"
+          }
+        }
+      },
+      "SensorNumber": 68,
+      "SensorType": "Fan"
+    },
+    {
+      "@odata.id": "/redfish/v1/Systems/1/LogServices/Log1/Entries/29",
+      "@odata.type": "#LogEntry.v1_3_0.LogEntry",
+      "Created": "2026-11-09T15:23:02+01:00",
+      "EntryCode": "Deassert",
+      "EntryType": "Event",
+      "Id": "29",
+      "Links": {
+        "Oem": {},
+        "OriginOfCondition": {
+          "@odata.id": "/redfish/v1/Chassis/1/Thermal"
+        }
+      },
+      "Message": "[ FAN4 ] Lower Critical going low",
+      "MessageArgs": [
+        "ArrayOfMessageArgs"
+      ],
+      "Name": "Log Entry 29",
+      "Oem": {
+        "Supermicro": {
+          "@odata.type": "#SmcLogEntryExtensions.v1_0_0.LogEntry",
+          "RawEventData": {
+            "EventData1": "0x52",
+            "EventData2": "0x0D",
+            "EventData3": "0x05",
+            "EventDirAndType": "0x81",
+            "SensorName": "FAN4",
+            "SensorType": "0x04"
+          }
+        }
+      },
+      "SensorNumber": 68,
+      "SensorType": "Fan"
+    },
+    {
+      "@odata.id": "/redfish/v1/Systems/1/LogServices/Log1/Entries/30",
+      "@odata.type": "#LogEntry.v1_3_0.LogEntry",
+      "Created": "2026-11-09T15:23:23+01:00",
+      "EntryCode": "Assert",
+      "EntryType": "Event",
+      "Id": "30",
+      "Links": {
+        "Oem": {},
+        "OriginOfCondition": {
+          "@odata.id": "/redfish/v1/Chassis/1/Thermal"
+        }
+      },
+      "Message": "[ FAN4 ] Lower Critical going low",
+      "MessageArgs": [
+        "ArrayOfMessageArgs"
+      ],
+      "Name": "Log Entry 30",
+      "Oem": {
+        "Supermicro": {
+          "@odata.type": "#SmcLogEntryExtensions.v1_0_0.LogEntry",
+          "RawEventData": {
+            "EventData1": "0x52",
+            "EventData2": "0x04",
+            "EventData3": "0x05",
+            "EventDirAndType": "0x01",
+            "SensorName": "FAN4",
+            "SensorType": "0x04"
+          }
+        }
+      },
+      "SensorNumber": 68,
+      "SensorType": "Fan"
+    },
+    {
+      "@odata.id": "/redfish/v1/Systems/1/LogServices/Log1/Entries/31",
+      "@odata.type": "#LogEntry.v1_3_0.LogEntry",
+      "Created": "2026-11-09T15:23:27+01:00",
+      "EntryCode": "Deassert",
+      "EntryType": "Event",
+      "Id": "31",
+      "Links": {
+        "Oem": {},
+        "OriginOfCondition": {
+          "@odata.id": "/redfish/v1/Chassis/1/Thermal"
+        }
+      },
+      "Message": "[ FAN4 ] Lower Critical going low",
+      "MessageArgs": [
+        "ArrayOfMessageArgs"
+      ],
+      "Name": "Log Entry 31",
+      "Oem": {
+        "Supermicro": {
+          "@odata.type": "#SmcLogEntryExtensions.v1_0_0.LogEntry",
+          "RawEventData": {
+            "EventData1": "0x52",
+            "EventData2": "0x0D",
+            "EventData3": "0x05",
+            "EventDirAndType": "0x81",
+            "SensorName": "FAN4",
+            "SensorType": "0x04"
+          }
+        }
+      },
+      "SensorNumber": 68,
+      "SensorType": "Fan"
+    }
+  ],
+  "Members@odata.count": 31,
+  "Name": "Health Event Log Service Collection"
+}

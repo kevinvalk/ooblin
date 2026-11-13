@@ -1,0 +1,35 @@
+{
+  "@odata.context": "/redfish/v1/$metadata#Memory.Memory",
+  "@odata.id": "/redfish/v1/Systems/1/Memory/2",
+  "@odata.type": "#Memory.v1_1_0.Memory",
+  "AllowedSpeedsMHz": [
+    2400
+  ],
+  "BusWidthBits": 72,
+  "CapacityMiB": 16384,
+  "DataWidthBits": 64,
+  "Description": "Memory",
+  "DeviceLocator": "DIMMA2",
+  "Id": "2",
+  "Manufacturer": "Samsung",
+  "MemoryDeviceType": "DDR4",
+  "MemoryLocation": {
+    "Channel": 0,
+    "MemoryController": 0,
+    "Slot": 1,
+    "Socket": 0
+  },
+  "MemoryMedia": [
+    "DRAM"
+  ],
+  "MemoryType": "DRAM",
+  "Name": "DIMMA2",
+  "OperatingSpeedMhz": 2400,
+  "PartNumber": "M393A2K40CB1-CRC",
+  "RankCount": 2,
+  "SerialNumber": "18E28097",
+  "Status": {
+    "Health": "OK",
+    "State": "Enabled"
+  }
+}

@@ -1,0 +1,36 @@
+[package]
+name = "ooblin-core"
+version = "0.1.0"
+edition = "2024"
+license = "Apache-2.0"
+description = "Intel AMT and Supermicro BMCs: power, hardware, settings, logs, sensors, screen (KVM), serial console, disk images"
+keywords = ["intel-amt", "supermicro", "ipmi", "redfish", "kvm"]
+categories = ["network-programming", "hardware-support"]
+
+[dependencies]
+# Already rustls' crypto, and IPMI's: HMAC, AES and randomness.
+aws-lc-rs = "1"
+base64 = "0.23"
+digest_auth = "0.3"
+flate2 = "1"
+form_urlencoded = "1"
+futures-util = { version = "0.3", default-features = false, features = ["sink", "std"] }
+instant-xml = "0.7"
+jiff = "0.2"
+log = "0.4"
+reqwest = { version = "0.13", default-features = false, features = ["rustls"] }
+roxmltree = "0.21"
+rustls = "0.23"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+tokio = { version = "1", features = ["fs", "net", "io-util", "macros", "sync", "time"] }
+tokio-rustls = "0.26"
+tokio-tungstenite = { version = "0.28", default-features = false, features = ["handshake"] }
+ts-rs = "12"
+
+[dev-dependencies]
+anyhow = "1"
+mock = { path = "../mock" }
+tempfile = "3"
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }

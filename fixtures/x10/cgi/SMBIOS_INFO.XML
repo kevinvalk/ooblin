@@ -1,0 +1,5 @@
+<?xml version="1.0"?>
+<IPMI>
+  <BIOS VENDOR="American Megatrends Inc." VER="2.6a" REL_DATE="10/01/2025"/>
+  <SYSTEM MANUFACTURER="Supermicro" PN="Super Server" SN="0123456789" SKUN="To be filled by O.E.M."/>
+</IPMI>

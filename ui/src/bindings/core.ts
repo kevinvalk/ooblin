@@ -32,6 +32,36 @@ export type Battery = { name: string, charge_percent: number | null, design_capa
  */
 export type Bios = { vendor: string, version: string, released: string, features: Array<string>, };
 
+/**
+ * A change to the BMC's settings, see `Client::change`. The serial console's bit rate is one of 9600, 19200, 38400,
+ * 57600 or 115200.
+ */
+export type BmcChange = { "FanMode": string } | { "MouseMode": string } | { "Ntp": Ntp } | { "Syslog": Syslog } | { "PowerRestore": PowerRestore } | { "SolBitRate": number } | { "Services": Array<Service> } | { "Network": BmcNetwork } | { "Fru": Fru };
+
+/**
+ * A BMC's own network settings: its host name and DNS server where its flavor sets them (`None` over IPMI alone),
+ * DHCP or these IPv4 addresses, and its VLAN, `None` for none.
+ */
+export type BmcNetwork = { hostname: string | null, dhcp: boolean, address: string, subnet_mask: string, gateway: string, dns: string | null, vlan: number | null, };
+
+/**
+ * How the BMC is set up: its network, what it serves on which port, how it runs the fans and our mouse, where it gets the time and
+ * sends its log, and the server's power restore policy, serial console and FRU, `None` where the BMC doesn't say. An
+ * empty mode is one this BMC doesn't have.
+ */
+export type BmcSettings = { network: BmcNetwork, services: Array<Service>, fan_mode: Mode, mouse_mode: Mode, ntp: Ntp, syslog: Syslog, power_restore: PowerRestore | null, sol: SolSettings | null, fru: Fru | null, };
+
+/**
+ * What the server and its BMC are: the day its firmware (in `info`) was built, Redfish's version, the BIOS's and the
+ * day it was released, and the server's own network ports. Dates are `2026-05-29`, empty where the BMC's pages don't
+ * say.
+ */
+export type BmcStatus = { info: Info, power: PowerState, system_id: string, firmware_built: string, redfish: string, bios: string, bios_released: string, lans: Array<Lan>, 
+/**
+ * The BMC's own port, the one we speak to, as AMT's are its management ports.
+ */
+ports: Array<Port>, };
+
 export type Certificate = { id: string, 
 /**
  * The common names of its subject and issuer.
@@ -68,13 +98,39 @@ export type Event = {
 time: number, source: string, description: string, severity: Severity, };
 
 /**
- * What a device says about itself before we log in: neither its name nor anything else that would need one.
+ * What a device is, which says how we speak to it.
  */
-export type Found = { host: string, version: string, 
+export type Flavor = "Amt" | "Supermicro" | "Ipmi";
+
+/**
+ * What a device says about itself before we log in: neither its name nor anything else that would need one. A BMC
+ * says no version.
+ */
+export type Found = { host: string, flavor: Flavor, version: string, 
 /**
  * Whether it was set up to be managed, rather than not yet or not completely: only then can we log in.
  */
 provisioned: boolean, };
+
+/**
+ * A FRU's information, by area; an area the FRU doesn't have is None and can't be set. Strings as decoded (any
+ * encoding), trimmed.
+ */
+export type Fru = { chassis: FruChassis | null, board: FruBoard | null, product: FruProduct | null, };
+
+export type FruBoard = { 
+/**
+ * Unix seconds, None = unspecified.
+ */
+manufactured: number | null, manufacturer: string, product: string, serial_number: string, part_number: string, };
+
+export type FruChassis = { 
+/**
+ * SMBIOS chassis type.
+ */
+kind: number, part_number: string, serial_number: string, };
+
+export type FruProduct = { manufacturer: string, name: string, part_number: string, version: string, serial_number: string, asset_tag: string, };
 
 /**
  * AMT's name on the network, and whether it answers pings.
@@ -99,7 +155,10 @@ awake_minutes: number, dns_update: DnsUpdate, };
  */
 export type Hardware = { system: System, motherboard: Motherboard, bios: Bios, processors: Array<Processor>, memory: Array<Module>, disks: Array<Disk>, batteries: Array<Battery>, };
 
-export type Info = { 
+/**
+ * What a login says about the device. A BMC leaves AMT's own facts (`build`, `control_mode`) out.
+ */
+export type Info = { flavor: Flavor, 
 /**
  * The host name, with its domain if it has one.
  */
@@ -125,6 +184,23 @@ remote_access: RemoteAccess, };
 export type Input = { "kind": "Key", code: string, down: boolean, } | { "kind": "Pointer", x: number, y: number, buttons: number, scroll: number, } | { "kind": "Text", text: string, } | { "kind": "Release" };
 
 /**
+ * A change to what IPMI sets, see `Client::change`.
+ */
+export type IpmiChange = { "Network": BmcNetwork } | { "PowerRestore": PowerRestore } | { "SolBitRate": number } | { "Fru": Fru };
+
+/**
+ * What can be set over IPMI: the BMC's network, the server's power restore policy, its serial console and its FRU, and
+ * the BMC's users to read. `None` where the BMC doesn't say.
+ */
+export type IpmiSettings = { network: BmcNetwork | null, power_restore: PowerRestore | null, sol: SolSettings | null, fru: Fru | null, users: Array<User>, };
+
+/**
+ * What the BMC says it is, and its own network port. `manufacturer` by name where we know the vendor, else its IANA
+ * number; `system_id` is the system GUID as SMBIOS and the OS write it.
+ */
+export type IpmiStatus = { info: Info, power: PowerState, manufacturer: string, product_id: number, ipmi_version: string, system_id: string, ports: Array<Port>, };
+
+/**
  * The addresses are what AMT uses, which it gets from DHCP, the OS or what was set (`Manual`).
  */
 export type Ipv4 = { configuration: Configuration, address: string, subnet_mask: string, gateway: string, primary_dns: string, secondary_dns: string, };
@@ -138,6 +214,16 @@ export type Ipv6Configuration = "Off" | "Automatic" | "Manual";
  */
 export type Ipv6Settings = { configuration: Ipv6Configuration, address: string, gateway: string, primary_dns: string, secondary_dns: string, };
 
+/**
+ * One of the server's network ports: its name (`OnBoard LAN 1`) and MAC address.
+ */
+export type Lan = { name: string, mac: string, };
+
+/**
+ * One of the BMC's own modes, in Redfish's words (`FullSpeed`), and those it can be set to.
+ */
+export type Mode = { mode: string, modes: Array<string>, };
+
 export type Module = { slot: string, bytes: number | null, mhz: number | null, kind: string, form_factor: string, manufacturer: string, part_number: string, serial_number: string, asset_tag: string, };
 
 export type Motherboard = { product: string, manufacturer: string, version: string, serial_number: string, asset_tag: string, replaceable: boolean, };
@@ -146,6 +232,14 @@ export type Motherboard = { product: string, manufacturer: string, version: stri
  * The wired port's: its IPv4 addresses, and when AMT is on the network at all.
  */
 export type Network = { ipv4: Ipv4, ipv6: Ipv6Settings, available: Availability, };
+
+export type Ntp = { enabled: boolean, primary: string, secondary: string, };
+
+/**
+ * What can be seen of a server's front panel from here: whether its identify light (UID) is lit, and the last POST
+ * code its BIOS wrote, each `None` where the BMC doesn't say.
+ */
+export type Panel = { identify: boolean | null, post_code: number | null, };
 
 /**
  * AMT has one wired port and maybe a wireless one.
@@ -176,6 +270,11 @@ export type PowerPolicy = { id: string,
  * As AMT has it but for its kind ("Mobile: …", "Desktop: …"), which the device's maker set.
  */
 description: string, active: boolean, };
+
+/**
+ * What a server does when its power comes back after it was cut.
+ */
+export type PowerRestore = "StayOff" | "Previous" | "PowerOn";
 
 /**
  * The CIM `PowerState`s AMT reports, folded into what a person cares about and named the way they'd say it.
@@ -211,6 +310,23 @@ consent_fixed: boolean, };
 export type Screens = { active: Array<number>, shown: number, };
 
 /**
+ * A sensor's reading in its `unit` ("°C", "RPM", "V", "A", "W", "%" or the unit's name), `None` where it's absent or
+ * unreadable, or a discrete sensor's asserted `state` in words; `low` and `high` are its critical thresholds.
+ */
+export type Sensor = { name: string, kind: SensorKind, reading: number | null, unit: string, state: string, severity: Severity, low: number | null, high: number | null, };
+
+/**
+ * What a sensor measures, which says where it shows.
+ */
+export type SensorKind = "Temperature" | "Fan" | "Voltage" | "Current" | "Power" | "Other";
+
+/**
+ * A service by Redfish's name (`HTTPS`, `KVMIP`), on or off and on which port. IPMI and HTTPS, which we speak, don't
+ * change here.
+ */
+export type Service = { name: string, enabled: boolean, port: number | null, };
+
+/**
  * How the device is set up.
  */
 export type Settings = { remote_access: RemoteAccess, general: General, 
@@ -224,14 +340,25 @@ clock_offset: number | null, power_policies: Array<PowerPolicy>, alarms: Array<A
 tls: Array<Tls>, certificates: Array<Certificate>, };
 
 /**
- * MeshCommander's three icons for the PET event severity.
+ * How bad an event or a reading is, least first.
  */
 export type Severity = "Info" | "Warning" | "Critical";
+
+/**
+ * Its serial console's settings: whether SOL may be used, and how fast the server's serial port runs (bits a
+ * second, `None` for the BMC's own setting).
+ */
+export type SolSettings = { enabled: boolean, bit_rate: number | null, };
 
 /**
  * What the device's own status page shows: the device, its AMT and its network.
  */
 export type Status = { info: Info, power: PowerState, system_id: string, ports: Array<Port>, };
+
+/**
+ * Where the BMC sends its log, `port` 0 for the usual (514).
+ */
+export type Syslog = { enabled: boolean, server: string, port: number, };
 
 export type System = { model: string, manufacturer: string, version: string, serial_number: string, id: string, };
 
@@ -240,3 +367,9 @@ export type System = { model: string, manufacturer: string, version: string, ser
  * show a certificate too, and whether it takes connections without TLS, where AMT supports that.
  */
 export type Tls = { local: boolean, enabled: boolean, mutual: boolean, plain_too: boolean, plain_supported: boolean, };
+
+/**
+ * A user slot with a name: its privilege ("Administrator", "Operator", "User", "Callback", "No access") and whether
+ * it's enabled, where the BMC says.
+ */
+export type User = { id: number, name: string, privilege: string, enabled: boolean | null, };

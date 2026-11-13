@@ -2,21 +2,23 @@
 
 # Ooblin
 
-Ooblin, the out-of-band (OOB) goblin, is a desktop console for Intel AMT: power control, hardware inventory, the
-device's screen, keyboard and mouse (KVM), its serial console and booting it from a disk image on your machine (IDER).
-No server, no cloud: the app talks to your devices directly, over TLS only, with pinned certificates and passwords kept
-in your OS keychain.
+Ooblin, the out-of-band (OOB) goblin, is a desktop console for Intel AMT, Supermicro BMCs and any BMC over IPMI: power
+control, hardware inventory, the device's screen, keyboard and mouse (KVM), its serial console, and on AMT booting it from
+a disk image on your machine (IDER). No server, no cloud: the app talks to your devices directly, over TLS with pinned certificates (and
+a BMC's IPMI, encrypted with keys from its password), with passwords kept in your OS keychain.
 
 Built with [Tauri](https://tauri.app) for Linux, macOS and Windows.
 
 ## Run
 
-`cargo release` bundles the app (`cargo tauri build`, set up for shipping). Start it with a host to connect straight
+`cargo tauri build` bundles the app. Start it with a host to connect straight
 away, using its saved credentials or the ones you pass, in the Ooblin that's already running if there is one:
 
 ```sh
 ooblin [host] [--user admin] [--password <password>]
 ```
+
+A BMC whose web port isn't 443 takes it in the host, `host:port`.
 
 Ooblin logs what it does and what goes wrong, a megabyte and the one before, in your OS's log folder. The button at the
 right of the status bar saves it for a bug report: it has your devices' addresses and names, never a password.
@@ -34,19 +36,25 @@ cargo tauri dev            # or cargo tauri dev -- -- <host>
 cargo test
 ```
 
-### Mock AMT
+### Mock devices
 
 AMT lives in the management engine of a real vPro machine, and nobody makes an emulator for it. So we record real
-devices once and replay them from then on: `mock-amt record <fixture> <host>` asks for the password and reads everything
+devices once and replay them from then on: `mock record <fixture> <host>` asks for the password and reads everything
 the device offers, without changing anything: every WS-Man class it knows, the read-only methods the app uses (clock,
 accounts, event and audit log) and a short serial console, KVM and IDER session, all into `fixtures/<fixture>`.
-`mock-amt run <fixture>` then serves it on 127.0.0.1 as `admin` / `P@ssw0rd`, filling in by the spec what a recording
+`mock run <fixture>` then serves it on 127.0.0.1 as `admin` / `P@ssw0rd`, filling in by the spec what a recording
 can't hold: handshakes, authentication, method results, enumeration pages (AMT keeps one context for all of them), a
 KVM screen that waits for the viewer to ask for each update and a serial console that waits for you to type. It hangs
 up on a client that says anything else than was recorded, so every transcript checks our bytes. `cargo test` replays
-every fixture, so whatever a device once told us keeps parsing. `mock-amt run` also takes a path, for a fixture of
-your own, and `mock-amt record <fixture> <host> --sol` records only the serial console, for as long as you like: make
+every fixture, so whatever a device once told us keeps parsing. `mock run` also takes a path, for a fixture of
+your own, and `mock record <fixture> <host> --sol` records only the serial console, for as long as you like: make
 the device write to it (mount a disk image, say), then press Enter.
+
+A Supermicro BMC is recorded the same way: its Redfish (scrubbed, in DMTF's mockup layout under `redfish/`) and a short
+KVM session. `mock run x10` serves it on 127.0.0.1:16443, beside an AMT fixture: Redfish, the web login the KVM's
+token comes from and the KVM's WebSocket, where the recorded screen waits for the viewer to ask for each update, and
+its dashboard's CGI (`cgi/`). On UDP 623 it answers IPMI as a BMC does: logins, the chassis commands, and a serial
+console that greets with a login prompt and echoes what's typed.
 
 Fixtures are committed, so record a device that has nothing to hide. Serials, addresses and names are scrubbed, but the
 audit log keeps its user names and client addresses, and the KVM session keeps a screenshot of whatever is on screen.
@@ -89,9 +97,36 @@ against the MS-02 (AMT 19). Partly: some of it, see the notes.
 | Power packages (power policy)                | Yes    | Choosing which of the maker's the device uses, and how long AMT stays awake after.                                                                                 |
 | Third-party storage, web application hosting | No     | Not planned: deprecated.                                                                                                                                           |
 
+### Supermicro BMCs
+
+Through Redfish, the BMC's own web pages and HTML5 KVM, and IPMI 2.0 (RMCP+, which every BMC speaks), as checked
+against an X10 (BMC firmware 4.07): status with the firmware's and BIOS's dates and the server's LAN ports, power with
+booting once to BIOS or PXE, the identify light (UID) and POST code, hardware, the event log, sensors (temperatures,
+fans, voltages, power supplies, read every second), the KVM with keyboard, mouse and typing text, the serial console
+(SOL), and settings: fan and mouse mode, NTP, syslog, what the server does when power comes back, and the serial
+console's speed. Not: disk images and users (left to the BMC's own web pages, which we link to), or anything that needs
+a Supermicro license.
+
+Plus what IPMI gives any BMC (below), its sensors read over IPMI, which is five times as fast as the X10's Redfish, and
+its services: each on or off and on which port, as its own port page sets them, IPMI and HTTPS (which we speak) aside;
+and its network: host name, DHCP or its addresses, DNS server and VLAN, as its own network page sets them.
+
+### Any BMC, over IPMI 2.0
+
+Whoever made it (Dell, HPE, Lenovo, ASRock Rack, Gigabyte, OpenBMC, a Supermicro without Redfish), over IPMI alone
+(RMCP+ on UDP 623, SHA-256 or SHA-1 with AES): the BMC's maker, firmware and network port, power with booting once to
+BIOS or PXE, the identify light, sensors from its SDR (every second), the event log in words, its FRU as hardware, the
+serial console (SOL), and settings: its network (DHCP or its addresses, and VLAN), what the server does when power comes
+back, the serial console's speed, the FRU's
+chassis, board and product fields (rewritten in place, checked by reading them back), and its users to read. Not: a
+screen (IPMI has none, and every vendor's KVM is its own) nor virtual media (likewise).
+
+Connecting tries Intel AMT, then a Supermicro's Redfish (asked without the password), then IPMI, whose login never
+sends it; the connect form's Kind picks one instead.
+
 ## TODO
 
 - [ ] Have an optional built in PXE boot system where our tool hosts the PXE server directly.
 - [ ] The features above, starting with: the other boot options (One-Click Recovery's boots among them), exporting and clearing the logs, TLS's certificate, platform erase itself. Wi-Fi last.
-- [ ] CI: tests, clippy, the UI build, and releases with tauri-action (as `cargo release` builds them), SHA-256 sums and a provenance attestation.
+- [ ] Releases: SHA-256 sums and a provenance attestation, and signing.
 - [ ] Build from a fresh clone on macOS, Linux and Windows.

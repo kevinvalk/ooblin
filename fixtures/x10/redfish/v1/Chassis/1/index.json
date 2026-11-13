@@ -1,0 +1,51 @@
+{
+  "@odata.context": "/redfish/v1/$metadata#Chassis.Chassis",
+  "@odata.id": "/redfish/v1/Chassis/1",
+  "@odata.type": "#Chassis.v1_4_0.Chassis",
+  "AssetTag": "",
+  "ChassisType": "RackMount",
+  "Id": "1",
+  "IndicatorLED": "Off",
+  "Links": {
+    "ComputerSystems": [
+      {
+        "@odata.id": "/redfish/v1/Systems/1"
+      }
+    ],
+    "ManagedBy": [
+      {
+        "@odata.id": "/redfish/v1/Managers/1"
+      }
+    ]
+  },
+  "Manufacturer": "Supermicro",
+  "Model": "",
+  "Name": "Computer System Chassis",
+  "Oem": {
+    "Supermicro": {
+      "@odata.type": "#SmcChassisExtensions.v1_0_0.Chassis",
+      "BoardID": "0x86d",
+      "BoardSerialNumber": "          ",
+      "GUID": "63110834-7B22-3BA3-1CC3-CBB221336311"
+    }
+  },
+  "PartNumber": "",
+  "PhysicalSecurity": {
+    "IntrusionSensor": "Normal",
+    "IntrusionSensorNumber": 170,
+    "IntrusionSensorReArm": "Manual"
+  },
+  "Power": {
+    "@odata.id": "/redfish/v1/Chassis/1/Power"
+  },
+  "SKU": "",
+  "SerialNumber": "",
+  "Status": {
+    "Health": "OK",
+    "HealthRollup": "OK",
+    "State": "Enabled"
+  },
+  "Thermal": {
+    "@odata.id": "/redfish/v1/Chassis/1/Thermal"
+  }
+}

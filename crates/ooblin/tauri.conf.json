@@ -5,11 +5,10 @@
   "build": {
     "beforeDevCommand": "npm run dev",
     "beforeBuildCommand": "npm run build",
-    "devUrl": "http://localhost:5173",
+    "devUrl": "http://localhost:16420",
     "frontendDist": "../../ui/dist"
   },
   "app": {
-    "withGlobalTauri": true,
     "windows": [
       {
         "title": "Ooblin",
@@ -21,7 +20,7 @@
     ],
     "security": {
       "csp": "default-src 'self'; connect-src ipc: http://ipc.localhost; style-src 'self' 'unsafe-inline'",
-      "devCsp": "default-src 'self'; connect-src ipc: http://ipc.localhost ws://localhost:5173; style-src 'self' 'unsafe-inline'"
+      "devCsp": "default-src 'self'; connect-src ipc: http://ipc.localhost ws://localhost:16420; style-src 'self' 'unsafe-inline'"
     }
   },
   "bundle": {

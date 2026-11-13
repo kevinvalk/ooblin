@@ -5,27 +5,31 @@ edition = "2024"
 license = "Apache-2.0"
 publish = false
 
+# The verify build's (`cargo verify`): agents drive it through a WebSocket on localhost (mcp-server-tauri).
+[features]
+verify = ["dep:tauri-plugin-mcp-bridge"]
+
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
-amt-core = { path = "../amt-core" }
 clap = { version = "4", features = ["derive"] }
 keyring = "4"
 log = "0.4"
+ooblin-core = { path = "../ooblin-core" }
 # Native file dialogs, GTK on Linux as Tauri is.
 rfd = { version = "0.17", default-features = false, features = ["gtk3"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tauri = { version = "2.12", features = [] }
 tauri-plugin-log = "2"
-tauri-plugin-mcp-bridge = "0.13"
+tauri-plugin-mcp-bridge = { version = "0.13", optional = true }
 tauri-plugin-opener = "2"
 tauri-plugin-single-instance = "2"
 tauri-plugin-window-state = "2"
 ts-rs = "12"
 
 [dev-dependencies]
-mock-amt = { path = "../mock-amt" }
+mock = { path = "../mock" }
 tempfile = "3"
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }

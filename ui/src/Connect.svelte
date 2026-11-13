@@ -1,11 +1,18 @@
 <!-- The connect form, for `device` if given: a device with a saved password needs none typed. A failed attempt leaves
      everything in place to fix and retry, a pin mismatch shows both fingerprints and a way to trust the new one. -->
+<script module lang="ts">
+  import type { Flavor } from "./bindings/core";
+
+  /** `flavor` null is Automatic: the device's saved one, else what it turns out to be. */
+  export type Login = { host: string; user: string; password: string; remember: boolean; flavor: Flavor | null };
+</script>
+
 <script lang="ts">
   import { LoaderCircle } from "@lucide/svelte";
   import { untrack } from "svelte";
   import type { CommandError, Device } from "./bindings/ooblin";
+  import { FLAVORS } from "./flavors";
 
-  type Login = { host: string; user: string; password: string; remember: boolean };
   let {
     device,
     connecting,
@@ -21,7 +28,9 @@
   } = $props();
 
   // The form starts from the device and goes its own way, App gives us a fresh one for another device.
-  let login: Login = $state(untrack(() => ({ host: device?.host ?? "", user: device?.user ?? "admin", password: "", remember: false })));
+  let login: Login = $state(
+    untrack(() => ({ host: device?.host ?? "", user: device?.user ?? "admin", password: "", remember: false, flavor: null })),
+  );
   let saved = $derived(device?.remembered && login.host === device.host);
 </script>
 
@@ -39,6 +48,13 @@
   <!-- svelte-ignore a11y_autofocus -->
   <label class="grid gap-1.5 font-medium">
     Host <input bind:value={login.host} class="field font-mono font-normal" autocapitalize="off" spellcheck="false" placeholder="192.168.1.50" required autofocus={!device} />
+  </label>
+  <label class="grid gap-1.5 font-medium" title="How we speak to it. Automatic tries Intel AMT, then a Supermicro's Redfish, then IPMI, sending the password only to what answers as one.">
+    Kind
+    <select bind:value={login.flavor} class="field font-normal">
+      <option value={null}>Automatic</option>
+      {#each Object.entries(FLAVORS) as [flavor, { title }] (flavor)}<option value={flavor}>{title}</option>{/each}
+    </select>
   </label>
   <label class="grid gap-1.5 font-medium">
     User <input bind:value={login.user} class="field font-normal" autocapitalize="off" spellcheck="false" required />
@@ -63,8 +79,8 @@
   {#if error?.kind === "PinMismatch"}
     <div class="grid gap-3">
       <p>
-        <strong class="text-danger">The certificate has changed.</strong> That's expected after reprovisioning or
-        reflashing the ME, anything else may be someone in the middle.
+        <strong class="text-danger">The certificate has changed.</strong> That's expected after the device was
+        reprovisioned or its firmware reflashed, anything else may be someone in the middle.
       </p>
       <!-- 16 bytes a line, so fingerprints can be compared at a glance. -->
       <dl class="grid gap-1 [&_dd]:mb-2 [&_dd]:w-[48ch] [&_dd]:font-mono [&_dd]:text-xs [&_dd]:break-all [&_dd]:select-text">
