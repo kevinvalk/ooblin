@@ -525,7 +525,7 @@ async fn serves_a_disk_image_over_ider() -> Result<()> {
     let amt = start(fixture.path()).await;
     let ider = client(&amt, PASSWORD, None)?.ider(std::fs::File::open(file.path())?).await?;
     let mut reads = Vec::new();
-    ider.serve(|served| reads.push(served)).await?;
+    ider.serve(|served| reads.push(served), std::future::pending()).await?;
     assert_eq!(reads, [2048..6 * 2048, 0..2048]);
     Ok(())
 }

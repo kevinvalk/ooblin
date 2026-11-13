@@ -6,11 +6,13 @@
 
 mod ast2100;
 mod kvm;
+mod media;
 
 pub use crate::net::ikvm::Ikvm;
 pub use crate::net::redfish::{Connection, probe};
 pub use crate::net::web::Web;
 pub use kvm::Kvm;
+pub use media::Media;
 
 use core::net::{Ipv4Addr, Ipv6Addr};
 
@@ -190,8 +192,8 @@ impl Client {
         let system: ComputerSystem = self.get("/redfish/v1/Systems/1").await?;
         let state = system.state();
         let offered: &[_] = match state {
-            PowerState::Off => &[On, OnToBios, OnToPxe],
-            _ => &[SoftOff, Off, SoftReset, Reset, Nmi, ResetToBios, ResetToPxe],
+            PowerState::Off => &[On, OnToBios, OnToPxe, OnToImage],
+            _ => &[SoftOff, Off, SoftReset, Reset, Nmi, ResetToBios, ResetToPxe, ResetToImage],
         };
         let (resets, targets) = (&system.Actions.reset.types, &system.Boot.targets);
         let offers = |(reset, target): (&str, Option<&str>)| {
@@ -398,8 +400,9 @@ impl Client {
             return Err(Error::Protocol("a Redfish service that isn't a Supermicro BMC".into()));
         }
         let interface = self.get::<EthernetInterface>("/redfish/v1/Managers/1/EthernetInterfaces/1");
-        let (interface, firmware) = tokio::join!(interface, self.ipmi.firmware());
-        let interface = interface?;
+        let protocols = self.get::<Value>("/redfish/v1/Managers/1/NetworkProtocol");
+        let (interface, protocols, firmware) = tokio::join!(interface, protocols, self.ipmi.firmware());
+        let (interface, protocols) = (interface?, protocols?);
         let info = Info {
             flavor: Flavor::Supermicro,
             name: if interface.FQDN.is_empty() { interface.HostName.clone() } else { interface.FQDN.clone() },
@@ -410,7 +413,7 @@ impl Client {
             remote_access: RemoteAccess {
                 kvm: Some(manager.GraphicalConsole.ServiceEnabled),
                 sol: manager.SerialConsole.ServiceEnabled,
-                ider: false,
+                ider: protocols.pointer("/VirtualMedia/ProtocolEnabled") == Some(&Value::Bool(true)),
                 consent: Consent::None,
                 consent_fixed: true,
             },
@@ -579,12 +582,14 @@ fn reset(action: PowerAction) -> Option<(&'static str, Option<&'static str>)> {
         On => ("On", None),
         OnToBios => ("On", Some("BiosSetup")),
         OnToPxe => ("On", Some("Pxe")),
+        OnToImage => ("On", Some("UsbCd")),
         SoftOff => ("GracefulShutdown", None),
         Off => ("ForceOff", None),
         SoftReset => ("GracefulRestart", None),
         Reset => ("ForceRestart", None),
         ResetToBios => ("ForceRestart", Some("BiosSetup")),
         ResetToPxe => ("ForceRestart", Some("Pxe")),
+        ResetToImage => ("ForceRestart", Some("UsbCd")),
         Nmi => ("Nmi", None),
         _ => return None,
     })

@@ -150,13 +150,15 @@
   }
 
   /** What the settings saved, which they then show. The hardware, its FRU among it, reads afresh. AMT's say its name,
-   * and what's turned off goes (Rust ejects the image itself), a BMC's whether its KVM serves. */
+   * and what's turned off goes (Rust ejects the image itself), a BMC's whether its KVM and virtual media serve. */
   function saved(data: unknown) {
     pages.set(names.at(-1)!, { data, read: new Date() });
     names.filter((name) => tabs[name].fixed).forEach((name) => pages.delete(name));
     if ("services" in (data as object)) {
-      const kvm = (data as BmcSettingsData).services.find((service) => service.name === "KVMIP");
+      const service = (name: string) => (data as BmcSettingsData).services.find((service) => service.name === name);
+      const [kvm, media] = [service("KVMIP"), service("VirtualMedia")];
       if (kvm) opened.kvm &&= connection.info.remote_access.kvm = kvm.enabled;
+      if (media) connection.info.remote_access.ider = media.enabled;
     }
     if (!amt) return;
     const { general, remote_access } = data as SettingsData;
@@ -171,7 +173,9 @@
     if (kind === "kvm" && access.kvm === null) return "This device has no KVM.";
     if (access[kind]) return;
     const what = { kvm: "KVM is", sol: "The serial console is", ider: "Disk images are" }[kind];
-    return `${what} turned off, in ${amt ? "Settings under Remote access" : "the BMC's own web pages"}.`;
+    const where =
+      amt ? "Settings under Remote access" : kind === "sol" ? "the BMC's own web pages" : "Settings under Services";
+    return `${what} turned off, in ${where}.`;
   }
 
   /** Reads the tab afresh. It starts blank, so a refresh shows it happened, unless `quietly` (the next of a tab read
@@ -344,9 +348,10 @@
       }, 1000);
     });
     try {
-      Object.assign(mounted, await invoke<Mounted>("ider_mount", { host: connection.host, path, drive }));
+      Object.assign(mounted, await invoke<Mounted>("mount", { host: connection.host, path, drive }));
       image = mounted;
-      say(`${mounted.name} is in the drive, the device sees it from its next boot on.`);
+      const seen = amt ? "the device sees it from its next boot on" : "a USB CD-ROM drive on the device";
+      say(`${mounted.name} is in the drive, ${seen}.`);
     } catch (error) {
       if ((error as CommandError).kind === "Consent" && (await consent("ider"))) return await mount(path);
       say(reason(error), true);
@@ -356,7 +361,7 @@
   }
 
   function eject() {
-    invoke("ider_eject", { host: connection.host, id: image!.id });
+    invoke("eject", { host: connection.host, id: image!.id });
     image = undefined;
   }
 
@@ -488,7 +493,7 @@
       title={connection.power && connection.power.state + (connection.changing ? ", changing…" : "")}
     ></span>
     <h1 class="mr-auto truncate text-xl font-semibold">{title}</h1>
-    <!-- The disk image in the device's drive, for booting from (IDER). -->
+    <!-- The disk image in the device's drive, for booting from: AMT's IDER, a BMC's virtual media. -->
     {#if image}
       <!-- Lit while the device reads, like a drive's light. -->
       <span class="flex min-w-0 items-center gap-2 text-muted" title="In the device's drive">
@@ -496,7 +501,7 @@
         <span class="truncate">{image.name}</span>
         <button type="button" class="btn-icon size-7 flex-none" title="Eject" onclick={eject}><X class="size-4" /></button>
       </span>
-    {:else if amt}
+    {:else if connection.info.flavor !== "Ipmi"}
       <button
         type="button"
         class="btn btn-secondary"

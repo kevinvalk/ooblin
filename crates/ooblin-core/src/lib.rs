@@ -2,12 +2,13 @@
 //! `supermicro`, `ipmi`), `Client` speaks to any, and all hand over what's here. Every socket lives in `net`.
 
 pub mod amt;
+mod cdrom;
 mod client;
 pub mod ipmi;
 mod net;
 pub mod supermicro;
 
-pub use client::{Client, Kvm, Sol};
+pub use client::{Client, Kvm, Media, Sol};
 pub use net::{Found, RMCP_PORT, discover, fingerprint, nearby};
 
 use std::time::Duration;

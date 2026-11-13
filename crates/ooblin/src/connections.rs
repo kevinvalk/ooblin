@@ -18,7 +18,7 @@ use std::sync::Arc;
 use ooblin_core::amt::{self, Alarm, Availability, General, Ipv6Settings, Recovery, Settings};
 use ooblin_core::{Client, Flavor, Info, Ipv4, Kvm, RemoteAccess, Sol, Target};
 use serde::{Deserialize, Serialize};
-use tauri::async_runtime::{JoinHandle, Mutex};
+use tauri::async_runtime::{JoinHandle, Mutex, Sender};
 use ts_rs::TS;
 
 use crate::CommandError;
@@ -60,13 +60,13 @@ pub struct Connection {
     pub client: Mutex<Client>,
     pub kvm: Slot<Arc<Kvm>>,
     pub sol: Slot<Arc<Sol>>,
-    pub image: Slot<Task>,
+    pub image: Slot<Serving>,
 }
 
 /// A redirection session while it's open, by the id its commands name.
 pub struct Slot<T>(Mutex<Option<(u64, T)>>);
 
-/// What's open in a `Slot`, which ends with a goodbye: a screen or serial console, or the task serving a disk image.
+/// What's open in a `Slot`, which ends with a goodbye: a screen or serial console, or a disk image.
 pub trait Redirection {
     /// What it is, in the log.
     const NAME: &str;
@@ -87,13 +87,19 @@ impl Redirection for Arc<Sol> {
     }
 }
 
-impl Redirection for Task {
+impl Redirection for Serving {
     const NAME: &str = "disk image";
-    /// Stops it, and waits until it has: the device's drive is free then.
+    /// Takes the disc out, and waits until it's out: the device's drive is free then.
     async fn close(mut self) {
-        self.0.abort();
-        let _ = (&mut self.0).await;
+        drop(self.eject);
+        let _ = (&mut self.task.0).await;
     }
+}
+
+/// The task serving a disk image, and what takes the disc out when dropped (see `ooblin_core::Media::serve`).
+pub struct Serving {
+    pub task: Task,
+    pub eject: Sender<()>,
 }
 
 /// A task that stops with the last copy of it: one serving a disk image, or looking for devices.
@@ -380,10 +386,10 @@ async fn close<T: Redirection>((id, open): (u64, T)) {
     log::info!("Closed {} {id}", T::NAME);
 }
 
-impl Slot<Task> {
+impl Slot<Serving> {
     /// Whether the device can read a disk image: one is in the drive, and still served.
     pub async fn serving(&self) -> bool {
-        self.0.lock().await.as_ref().is_some_and(|(_, task)| !task.0.inner().is_finished())
+        self.0.lock().await.as_ref().is_some_and(|(_, serving)| !serving.task.0.inner().is_finished())
     }
 }
 

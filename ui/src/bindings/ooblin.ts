@@ -41,6 +41,6 @@ flavor: Flavor | null, };
 export type Drive = { "kind": "Read" } & { start: number, end: number, } | { "kind": "Ended", error: CommandError | null, };
 
 /**
- * A disk image in a device's drive: the id `ider_eject` takes, its file's name and its size.
+ * A disk image in a device's drive: the id `eject` takes, its file's name and its size.
  */
 export type Mounted = { id: number, name: string, size: number, };

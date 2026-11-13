@@ -3,8 +3,8 @@
 # Ooblin
 
 Ooblin, the out-of-band (OOB) goblin, is a desktop console for Intel AMT, Supermicro BMCs and any BMC over IPMI: power
-control, hardware inventory, the device's screen, keyboard and mouse (KVM), its serial console, and on AMT booting it from
-a disk image on your machine (IDER). No server, no cloud: the app talks to your devices directly, over TLS with pinned certificates (and
+control, hardware inventory, the device's screen, keyboard and mouse (KVM), its serial console, and booting it from a
+disk image on your machine (AMT's IDER, a Supermicro's virtual media). No server, no cloud: the app talks to your devices directly, over TLS with pinned certificates (and
 a BMC's IPMI, encrypted with keys from its password), with passwords kept in your OS keychain.
 
 Built with [Tauri](https://tauri.app) for Linux, macOS and Windows.
@@ -101,11 +101,11 @@ against the MS-02 (AMT 19). Partly: some of it, see the notes.
 
 Through Redfish, the BMC's own web pages and HTML5 KVM, and IPMI 2.0 (RMCP+, which every BMC speaks), as checked
 against an X10 (BMC firmware 4.07): status with the firmware's and BIOS's dates and the server's LAN ports, power with
-booting once to BIOS or PXE, the identify light (UID) and POST code, hardware, the event log, sensors (temperatures,
-fans, voltages, power supplies, read every second), the KVM with keyboard, mouse and typing text, the serial console
-(SOL), and settings: fan and mouse mode, NTP, syslog, what the server does when power comes back, and the serial
-console's speed. Not: disk images and users (left to the BMC's own web pages, which we link to), or anything that needs
-a Supermicro license.
+booting once to BIOS, PXE or a disk image, the identify light (UID) and POST code, hardware, the event log, sensors
+(temperatures, fans, voltages, power supplies, read every second), the KVM with keyboard, mouse and typing text, the
+serial console (SOL), a disk image on your machine as a USB CD-ROM drive (the HTML5 viewer's virtual media), and
+settings: fan and mouse mode, NTP, syslog, what the server does when power comes back, and the serial console's speed.
+Not: users (left to the BMC's own web pages, which we link to), or anything that needs a Supermicro license.
 
 Plus what IPMI gives any BMC (below), its sensors read over IPMI, which is five times as fast as the X10's Redfish, and
 its services: each on or off and on which port, as its own port page sets them, IPMI and HTTPS (which we speak) aside;

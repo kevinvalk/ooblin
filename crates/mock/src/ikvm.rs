@@ -51,13 +51,16 @@ pub(crate) async fn serve(bmc: &Arc<Bmc>, request: Request<Incoming>) -> Respons
     let response = Response::builder();
     let response = match (request.method(), path.as_str()) {
         // The X10 takes the upgrade without its cookie: the token in the handshake is what counts.
-        (&Method::GET, "/") if websocket => {
+        (&Method::GET, "/" | "/vm") if websocket => {
             let accept = derive_accept_key(request.headers()[SEC_WEBSOCKET_KEY].as_bytes());
             let bmc = bmc.clone();
             tokio::spawn(async move {
                 let Ok(upgraded) = hyper::upgrade::on(request).await else { return };
                 let mut socket = WebSocketStream::from_raw_socket(TokioIo::new(upgraded), Role::Server, None).await;
-                let _ = screen(&bmc, &mut socket).await;
+                let _ = match path.as_str() {
+                    "/" => screen(&bmc, &mut socket).await,
+                    _ => media(&bmc, &mut socket).await,
+                };
                 // Before it's closed, so it's logged before what the client does next.
                 log(&bmc, "WS closed".into());
                 let _ = socket.close(None).await;
@@ -246,6 +249,52 @@ async fn screen(bmc: &Bmc, socket: &mut Socket) -> anyhow::Result<()> {
         send(socket, &[&header[..], &[4, 7, 1, 0xA6, 0, 0, 0, 0x90], &[0; 8]].concat()).await?;
         last = Instant::now();
     }
+}
+
+/// Virtual media, as the X10's: its slots, all free, on a socket of their own, or a CD-ROM drive plugged in with a live
+/// session's token. In that one we ask what a host first does (INQUIRY, READ CAPACITY) and read the second block,
+/// logging what came back with success (`vm 28 0101…`, the first 8 bytes), then wait for it to be plugged out. Anything
+/// else hangs up.
+async fn media(bmc: &Bmc, socket: &mut Socket) -> anyhow::Result<()> {
+    let pdu = |class: [u8; 4], body: &[u8]| [&class[..], &(body.len() as u32).to_le_bytes(), body].concat();
+    let plug_in = receive(socket).await?;
+    if plug_in == pdu([0, 0, 0, 8], &[]) {
+        return send(socket, &pdu([0, 0, 0, 8], &[0, 255, 255, 255])).await;
+    }
+    ensure!(plug_in.len() > 52 && plug_in[..8] == [0, 0, 0, 1, 44, 0, 0, 0], "not a plug-in");
+    let token = String::from_utf8_lossy(&[&plug_in[8..23], &plug_in[24..33]].concat()).into_owned();
+    let session = token.parse().ok().filter(|&session| bmc.ikvm.live(session));
+    ensure!(session.is_some() && plug_in[48..50] == [0xC3, 3], "not a CD-ROM in the first slot by a live session");
+    send(socket, &pdu([0, 0, 0, 2], &[0])).await?;
+    ensure!(receive(socket).await? == pdu([0, 0, 0, 7], &[6, 3, 1, 16, 2, 32, 3, 48]), "not the endpoints");
+    send(socket, &pdu([0, 0, 0, 4], &[])).await?;
+    ensure!(receive(socket).await? == pdu([0, 0, 0, 3], &[255; 4]), "not alive");
+
+    let commands: [(&[u8], u32); 3] = [
+        (&[0x12, 0, 0, 0, 36, 0], 36),
+        (&[0x25, 0, 0, 0, 0, 0, 0, 0, 0, 0], 8),
+        (&[0x28, 0, 0, 0, 0, 1, 0, 0, 1, 0], 2048),
+    ];
+    for (tag, (command, length)) in (1u32..).zip(commands) {
+        let mut wrapper =
+            [&b"USBC"[..], &tag.to_le_bytes(), &length.to_le_bytes(), &[0x80, 0, command.len() as u8]].concat();
+        wrapper.extend(command);
+        wrapper.resize(31, 0);
+        send(socket, &pdu([0x11, 0, 2, 0], &wrapper)).await?;
+        let answer = receive(socket).await?;
+        let data = &answer[8..answer.len() - 21];
+        let status = [&b"USBS"[..], &tag.to_le_bytes(), &(length - data.len() as u32).to_le_bytes(), &[0]].concat();
+        ensure!(
+            answer[..8] == pdu([0x22, 0, 2, 0], data)[..8]
+                && answer[answer.len() - 21..] == pdu([0x22, 0, 2, 0xFF], &status),
+            "not a success"
+        );
+        let hex: String = data.iter().take(8).map(|byte| format!("{byte:02x}")).collect();
+        log(bmc, format!("vm {:02x} {hex}", command[0]));
+    }
+    ensure!(receive(socket).await? == pdu([0, 0, 0, 5], &[]), "not a plug-out");
+    log(bmc, "vm out".into());
+    send(socket, &pdu([0, 0, 0, 6], &[])).await
 }
 
 /// The client's next update request, what it sends meanwhile logged.

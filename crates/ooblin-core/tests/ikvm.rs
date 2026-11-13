@@ -390,3 +390,31 @@ async fn records_a_session_that_replays_alike() -> Result<()> {
     assert!(x10 == recorded, "the frames differ");
     Ok(())
 }
+
+/// Virtual media plugs a CD-ROM drive in with the KVM token, in the first free slot, answers what the host asks from
+/// the image, and when ejected plugs it out and logs out of its web session.
+#[tokio::test]
+async fn virtual_media_serves_the_image_until_ejected() -> Result<()> {
+    let bmc = start(&mock::fixture("x10")).await;
+    let image = tempfile::NamedTempFile::new()?;
+    std::fs::write(image.path(), [[0; 2048], [1; 2048], [2; 2048]].concat())?;
+    let media = client(&bmc, PASSWORD).media(std::fs::File::open(image.path())?).await?;
+    let (reads, read) = (std::sync::Mutex::new(vec![]), tokio::sync::Notify::new());
+    let serve = media.serve(
+        |range| {
+            reads.lock().unwrap().push(range);
+            read.notify_one();
+        },
+        read.notified(),
+    );
+    tokio::time::timeout(Duration::from_secs(5), serve).await??;
+    assert_eq!(reads.into_inner()?, vec![2048..4096]);
+
+    let requests = requests(&bmc);
+    let media: Vec<_> = requests.iter().filter(|line| line.starts_with("vm ") || line.contains("/vm")).collect();
+    let expected =
+        ["WS /vm", "WS /vm", "vm 12 058004021f000000", "vm 25 0000000200000800", "vm 28 0101010101010101", "vm out"];
+    assert_eq!(media, expected);
+    assert_eq!(requests.last().unwrap(), "GET /cgi/logout.cgi");
+    Ok(())
+}

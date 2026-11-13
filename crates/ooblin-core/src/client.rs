@@ -1,5 +1,7 @@
 //! A device of any flavor, for what they do alike.
 
+use std::ops::Range;
+
 use crate::{
     Error, Event, Flavor, Hardware, Info, Input, Panel, Power, PowerAction, Result, Sensor, Target, amt, ipmi,
     supermicro,
@@ -22,6 +24,13 @@ pub enum Kvm {
 pub enum Sol {
     Amt(amt::Sol),
     Ipmi(ipmi::Sol),
+}
+
+/// A disc in the device's drive: AMT's IDER, or a BMC's virtual media.
+#[expect(clippy::large_enum_variant, reason = "there's one at a time")]
+pub enum Media {
+    Amt(amt::Ider),
+    Supermicro(supermicro::Media),
 }
 
 /// `$call` on whichever of `$variants` `$value` holds, named `$it`; any other is `Unsupported`.
@@ -153,6 +162,15 @@ impl Client {
         }
     }
 
+    /// Puts `image` in the device's drive, see `amt::Client::ider` and `supermicro::Client::media`.
+    pub async fn mount(&mut self, image: std::fs::File) -> Result<Media> {
+        match self {
+            Self::Amt(client) => client.ider(image).await.map(Media::Amt),
+            Self::Supermicro(client) => client.media(image).await.map(Media::Supermicro),
+            Self::Ipmi(_) => Err(Error::Unsupported),
+        }
+    }
+
     /// The device's own web pages, where what we don't do can be done.
     pub fn web_pages(&self) -> String {
         match self {
@@ -177,6 +195,16 @@ impl Kvm {
         match self {
             Self::Amt(kvm) => kvm.close().await,
             Self::Supermicro(kvm) => kvm.close().await,
+        }
+    }
+}
+
+impl Media {
+    /// Answers the device until it's done with the disc or `eject` takes it out, see `amt::Ider::serve`.
+    pub async fn serve(self, read: impl FnMut(Range<u64>), eject: impl Future<Output = ()>) -> Result<()> {
+        match self {
+            Self::Amt(ider) => ider.serve(read, eject).await,
+            Self::Supermicro(media) => media.serve(read, eject).await,
         }
     }
 }

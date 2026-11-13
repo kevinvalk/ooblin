@@ -1,7 +1,7 @@
 //! A Supermicro BMC's KVM: a web session for its token, a WebSocket on the web port, and ATEN's RFB handshake on it,
 //! which is what authenticates us. Once the handshake is done `Sender` says nothing but update requests, keys, the
-//! pointer and MouseSync: the same socket takes power and settings changes, and the BMC's viewer opens virtual media on
-//! `/vm`, none of which we could send by mistake.
+//! pointer and MouseSync: the same socket takes power and settings changes, none of which we could send by mistake.
+//! Virtual media has a WebSocket of its own, `/vm`, on which `Plug` says nothing but its PDUs.
 
 use futures_util::stream::{SplitSink, SplitStream};
 use futures_util::{SinkExt, StreamExt};
@@ -43,7 +43,7 @@ impl Ikvm {
         let web = Web::login(connection).await?;
         let opened = async {
             let token = web.token().await?;
-            handshake(socket(connection, web.sid()).await?, &token).await
+            handshake(socket(connection, web.sid(), "/").await?, &token).await
         };
         match tokio::time::timeout(HUNG, opened).await.unwrap_or(Err(Error::Timeout)) {
             Ok((receiver, sender, [width, height])) => Ok(Self { web, receiver, sender, width, height }),
@@ -55,9 +55,15 @@ impl Ikvm {
     }
 }
 
-/// The WebSocket on the web port, pinned as the web pages are, with the cookie and origin a browser sends.
-async fn socket(connection: &Connection, sid: &str) -> Result<Socket> {
-    let uri: Uri = format!("wss{}/", &connection.url["https".len()..]).parse().map_err(websocket)?;
+/// A virtual media WebSocket in `web`'s session, see `supermicro::media`.
+pub async fn media(connection: &Connection, web: &Web) -> Result<(Receiver, Plug)> {
+    let (sender, receiver) = socket(connection, web.sid(), "/vm").await?.split();
+    Ok((Receiver { socket: receiver, buffered: Vec::new() }, Plug(Sender { socket: sender })))
+}
+
+/// A WebSocket at `path` on the web port, pinned as the web pages are, with the cookie and origin a browser sends.
+async fn socket(connection: &Connection, sid: &str, path: &str) -> Result<Socket> {
+    let uri: Uri = format!("wss{}{path}", &connection.url["https".len()..]).parse().map_err(websocket)?;
     let host = uri.host().unwrap_or_default().trim_matches(['[', ']']).to_owned();
     let stream = tls(&host, uri.port_u16().unwrap_or(443), &connection.pin).await?;
     let request = ClientRequestBuilder::new(uri).with_header("Origin", &connection.url);
@@ -164,6 +170,19 @@ impl Sender {
 
     async fn send(&mut self, message: &[u8]) -> Result<()> {
         self.socket.send(tungstenite::Message::binary(message.to_vec())).await.map_err(websocket)
+    }
+}
+
+/// Our side of a virtual media WebSocket.
+pub struct Plug(Sender);
+
+impl Plug {
+    pub async fn send(&mut self, message: &[u8]) -> Result<()> {
+        self.0.send(message).await
+    }
+
+    pub async fn close(&mut self) {
+        self.0.close().await
     }
 }
 

@@ -12,15 +12,17 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use clap::Parser;
-use connections::{Change, Changed, Connected, Connections, Task};
+use connections::{Change, Changed, Connected, Connections, Serving, Task};
 use hosts::Device;
-use ooblin_core::amt::{AuditRecord, Ider, Screens, Settings};
+use ooblin_core::amt::{AuditRecord, Screens, Settings};
 use ooblin_core::ipmi::{Change as IpmiChange, Fru, IpmiSettings, IpmiStatus};
 use ooblin_core::supermicro::{BmcSettings, BmcStatus, Change as BmcChange};
 use ooblin_core::{
-    Client, Error, Event, Flavor, Found, Hardware, Input, Panel, Power, PowerAction, RMCP_PORT, Sensor, Status, Target,
+    Client, Error, Event, Flavor, Found, Hardware, Input, Media, Panel, Power, PowerAction, RMCP_PORT, Sensor, Status,
+    Target,
 };
 use serde::Serialize;
+use tauri::async_runtime::Receiver;
 use tauri::ipc::{Channel, Response};
 use tauri::{AppHandle, Emitter, Manager, State, WebviewWindow};
 use tauri_plugin_log::RotationStrategy;
@@ -340,7 +342,7 @@ fn pick_save(app: AppHandle, window: WebviewWindow, name: &str) -> Option<PathBu
     rfd::FileDialog::new().set_parent(&window).set_file_name(name).save_file()
 }
 
-/// A disk image in a device's drive: the id `ider_eject` takes, its file's name and its size.
+/// A disk image in a device's drive: the id `eject` takes, its file's name and its size.
 #[derive(Serialize, TS)]
 #[ts(export_to = "ooblin.ts")]
 struct Mounted {
@@ -359,10 +361,10 @@ enum Drive {
     Ended { error: Option<CommandError> },
 }
 
-/// Puts the image at `path` in the device's drive (see `amt::Client::ider`), taking out the one in it, then says on
+/// Puts the image at `path` in the device's drive (see `Client::mount`), taking out the one in it, then says on
 /// `drive` what the device does with it.
 #[tauri::command]
-async fn ider_mount(
+async fn mount(
     connections: State<'_, Connections>,
     host: &str,
     path: PathBuf,
@@ -372,21 +374,22 @@ async fn ider_mount(
     let size = file.metadata()?.len();
     let name = path.file_name().unwrap_or_default().to_string_lossy().into_owned();
     let image = format!("{name} in {host}'s drive");
-    let id = connections
-        .open(
-            host,
-            |connection| &connection.image,
-            async |client| Ok(Task(tauri::async_runtime::spawn(serve(client.amt()?.ider(file).await?, drive, image)))),
-        )
-        .await?;
+    let open = async |client: &mut Client| {
+        let media = client.mount(file).await?;
+        let (eject, ejected) = tauri::async_runtime::channel(1);
+        Ok(Serving { task: Task(tauri::async_runtime::spawn(serve(media, drive, image, ejected))), eject })
+    };
+    let id = connections.open(host, |connection| &connection.image, open).await?;
     Ok(Mounted { id, name, size })
 }
 
-/// Serves the disk `image` (see `Ider::serve`), saying on `drive` what the device reads of it and how serving it ended.
-async fn serve(ider: Ider, drive: Channel<Drive>, image: String) {
-    let ended = ider.serve(|read| drive.send(Drive::Read(read)).unwrap_or_default()).await;
+/// Serves the disk `image` until `ejected` (see `Media::serve`), saying on `drive` what the device reads of it and how
+/// serving it ended.
+async fn serve(media: Media, drive: Channel<Drive>, image: String, mut ejected: Receiver<()>) {
+    let read = |read| drive.send(Drive::Read(read)).unwrap_or_default();
+    let ended = media.serve(read, async move { ejected.recv().await.unwrap_or_default() }).await;
     match &ended {
-        Ok(()) => log::info!("The device closed {image}"),
+        Ok(()) => log::info!("{image} is out"),
         Err(error) => log::warn!("Serving {image} broke off: {error}"),
     }
     drive.send(Drive::Ended { error: ended.err().map(Into::into) }).unwrap_or_default();
@@ -394,7 +397,7 @@ async fn serve(ider: Ider, drive: Channel<Drive>, image: String) {
 
 /// Takes the disk image `id` names out of the drive, like `kvm_close`.
 #[tauri::command]
-async fn ider_eject(connections: State<'_, Connections>, host: &str, id: u64) -> Result<(), CommandError> {
+async fn eject(connections: State<'_, Connections>, host: &str, id: u64) -> Result<(), CommandError> {
     if let Ok(connection) = connections.get(host) {
         connection.image.close(Some(id)).await;
     }
@@ -601,8 +604,8 @@ fn main() {
             sol_close,
             pick,
             pick_save,
-            ider_mount,
-            ider_eject,
+            mount,
+            eject,
             title,
             fullscreen,
             grow,

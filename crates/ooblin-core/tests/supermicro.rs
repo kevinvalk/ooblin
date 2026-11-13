@@ -85,13 +85,14 @@ async fn reads_what_the_x10_says() -> Result<()> {
     // Its version as IPMI says it, as an IPMI login does.
     let info = client.info().await?;
     let redfish: Vec<_> = requests(&bmc).into_iter().filter(|request| request.contains("/redfish/")).collect();
-    assert_eq!(redfish, gets("Managers/1 Managers/1/EthernetInterfaces/1"));
-    assert_eq!((&*info.version, &*info.name, info.remote_access.kvm), ("4.07", "", Some(true)));
+    assert_eq!(redfish, gets("Managers/1 Managers/1/EthernetInterfaces/1 Managers/1/NetworkProtocol"));
+    let access = &info.remote_access;
+    assert_eq!((&*info.version, &*info.name, access.kvm, access.ider), ("4.07", "", Some(true), true));
 
     let power = client.power().await?;
     assert_eq!(requests(&bmc), gets("Systems/1"));
     assert_eq!(power.state, PowerState::On);
-    for action in [PowerAction::Reset, PowerAction::ResetToBios, PowerAction::Nmi] {
+    for action in [PowerAction::Reset, PowerAction::ResetToBios, PowerAction::ResetToImage, PowerAction::Nmi] {
         assert!(power.actions.contains(&action), "{action:?}");
     }
     assert!(!power.actions.contains(&PowerAction::On) && !power.actions.contains(&PowerAction::Cycle));

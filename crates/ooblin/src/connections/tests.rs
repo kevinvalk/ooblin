@@ -11,7 +11,7 @@ use ooblin_core::{Flavor, Target};
 use tauri::async_runtime::JoinHandle;
 use tokio::sync::oneshot;
 
-use super::{Change, Connections, Task};
+use super::{Change, Connections, Serving, Task};
 use crate::hosts::Hosts;
 
 async fn mock() -> Arc<Amt> {
@@ -151,11 +151,13 @@ async fn a_disk_image_replaced_stops_being_served() {
     let mount = async |serving: oneshot::Sender<()>| {
         let file = std::fs::File::open(image.path()).unwrap();
         let open = async |client: &mut ooblin_core::Client| {
-            let ider = client.amt()?.ider(file).await?;
-            Ok(Task(JoinHandle::Tokio(tokio::spawn(async move {
+            let media = client.mount(file).await?;
+            let (eject, mut ejected) = tauri::async_runtime::channel(1);
+            let task = Task(JoinHandle::Tokio(tokio::spawn(async move {
                 let _serving = serving;
-                let _ = ider.serve(|_| {}).await;
-            }))))
+                let _ = media.serve(|_| {}, async move { ejected.recv().await.unwrap_or_default() }).await;
+            })));
+            Ok(Serving { task, eject })
         };
         connections.open("127.0.0.1", |connection| &connection.image, open).await
     };
