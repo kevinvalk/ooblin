@@ -16,7 +16,7 @@ impl Client {
             flavor: Flavor::Amt,
             name: name(&settings),
             version: firmware("AMT").unwrap_or_default(),
-            build: firmware("Build Number"),
+            build: firmware("Build Number").unwrap_or_default(),
             control_mode: match setup.get("ProvisioningMode") {
                 Some("1") => "Admin",
                 Some("4") => "Client",

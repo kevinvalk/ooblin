@@ -10,6 +10,10 @@
    * what's around it doesn't change it. */
   export { choices };
 
+  /** A choice of `options`, `help` saying what it is, which can't change where a `loaded` BMC offers none. Its `id` is
+   * its page's `$props.id()`. */
+  export { select };
+
   /** A text field's value, trimmed. */
   export const text = (fields: FormData, name: string) => ((fields.get(name) as string | null) ?? "").trim();
 
@@ -55,6 +59,24 @@
   {#each Object.entries(options) as [value, label] (value)}
     <option {value} selected={value === current}>{label}</option>
   {/each}
+{/snippet}
+
+{#snippet select(
+  id: string,
+  name: string,
+  label: string,
+  current: string | undefined,
+  options: Record<string, string>,
+  help: string,
+  loaded: boolean,
+)}
+  {@const none = loaded && !Object.keys(options).length}
+  <div title={none ? "This BMC can't." : help}>
+    <label for="{id}-{name}">{label}</label>
+    <select id="{id}-{name}" {name} class="field" disabled={none}>
+      {@render choices(current, options)}
+    </select>
+  </div>
 {/snippet}
 
 <!-- Escape comes from its fields. -->

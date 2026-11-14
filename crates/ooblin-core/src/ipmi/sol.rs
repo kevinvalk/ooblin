@@ -25,9 +25,10 @@ pub struct Sol {
 }
 
 struct State {
-    /// Our last packet's number, 1 to 15, and its characters while the BMC hasn't taken them all.
+    /// Our last packet's number, 1 to 15, and its characters while the BMC hasn't taken them all, when we last sent
+    /// them and how often we sent them again without a word from the BMC.
     sequence: u8,
-    unacknowledged: Option<(Vec<u8>, Instant)>,
+    unacknowledged: Option<(Vec<u8>, Instant, u8)>,
     /// The BMC's last packet's number, as it sends one again until we acknowledge it.
     received: u8,
     /// When we last sent anything: the session ends after a minute or so of silence.
@@ -39,7 +40,7 @@ impl State {
     fn next(&mut self, data: Vec<u8>) -> Vec<u8> {
         self.sequence = self.sequence % 15 + 1;
         let packet = [&[self.sequence, 0, 0, 0][..], &data].concat();
-        self.unacknowledged = Some((data, Instant::now()));
+        self.unacknowledged = Some((data, Instant::now(), 0));
         packet
     }
 }
@@ -151,10 +152,16 @@ impl Sol {
     async fn acknowledge(&self, acknowledges: u8, accepted: u8, nack: bool) -> Result<()> {
         let rest = {
             let mut state = self.state.lock().unwrap();
-            if acknowledges != state.sequence || nack {
+            if acknowledges != state.sequence {
                 return Ok(());
             }
-            let Some((mut data, _)) = state.unacknowledged.take() else { return Ok(()) };
+            if nack {
+                if let Some((.., resends)) = state.unacknowledged.as_mut() {
+                    *resends = 0;
+                }
+                return Ok(());
+            }
+            let Some((mut data, ..)) = state.unacknowledged.take() else { return Ok(()) };
             data.drain(..usize::from(accepted).min(data.len()));
             if data.is_empty() {
                 self.acknowledged.notify_one();
@@ -165,16 +172,21 @@ impl Sol {
         self.send(&rest).await
     }
 
-    /// Sends again what wasn't acknowledged within a second, and tells the BMC we're here after 20 silent ones.
+    /// Sends again what wasn't acknowledged within a second, giving up after 7 resends that got no answer at all (the
+    /// most SOL's own retry count goes to), and tells the BMC we're here after 20 silent seconds.
     async fn tend(&self) -> Result<()> {
         let (again, quiet) = {
             let mut state = self.state.lock().unwrap();
             let sequence = state.sequence;
-            let again = state.unacknowledged.as_mut().filter(|(_, sent)| sent.elapsed() > Duration::from_secs(1));
-            let again = again.map(|(data, sent)| {
-                *sent = Instant::now();
-                [&[sequence, 0, 0, 0][..], data].concat()
-            });
+            let again = state.unacknowledged.as_mut().filter(|(_, sent, _)| sent.elapsed() > Duration::from_secs(1));
+            let again = match again {
+                Some((_, _, 7)) => return Err(Error::Timeout),
+                Some((data, sent, resends)) => {
+                    (*sent, *resends) = (Instant::now(), *resends + 1);
+                    Some([&[sequence, 0, 0, 0][..], data].concat())
+                }
+                None => None,
+            };
             (again, state.sent.elapsed() > Duration::from_secs(20))
         };
         if let Some(again) = again {

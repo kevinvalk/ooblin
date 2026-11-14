@@ -76,7 +76,7 @@ impl Client {
     }
 
     /// Adds a certificate, or a `trusted_root` to trust the certificates it signs, from a PEM or DER file's contents.
-    pub async fn add_certificate(&mut self, file: &[u8], trusted_root: bool) -> Result<()> {
+    pub(super) async fn add_certificate(&mut self, file: &[u8], trusted_root: bool) -> Result<()> {
         let der = match std::str::from_utf8(file).ok().and_then(pem_body) {
             Some(body) => BASE64_STANDARD.decode(body).map_err(|_| Error::Protocol("this PEM isn't base64".into()))?,
             None => file.to_vec(),
@@ -100,7 +100,7 @@ impl Client {
     }
 
     /// AMT refuses one that's in use.
-    pub async fn delete_certificate(&mut self, id: &str) -> Result<()> {
+    pub(super) async fn delete_certificate(&mut self, id: &str) -> Result<()> {
         self.delete("AMT_PublicKeyCertificate", id).await
     }
 }

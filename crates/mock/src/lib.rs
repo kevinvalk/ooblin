@@ -1,13 +1,14 @@
 //! A stand-in Intel AMT that replays a fixture recorded from a real one (see `record`): WS-Man on one port, the SOL,
 //! KVM and IDER redirection sessions on another, both over TLS with Digest. What a recording can't hold we answer by
 //! the spec: enumeration contexts, successful method calls, faults for classes the device lacks, and the handshakes.
-//! A fixture with `redfish/` is a Supermicro BMC's instead, which `Bmc` stands in for.
+//! A fixture with `redfish/` is a Supermicro BMC's instead, one with only `ipmi.txt` a BMC we know over IPMI alone:
+//! `Bmc` stands in for both.
 
 #![allow(non_snake_case, reason = "our XML types name their fields the way SOAP does, `Body` say")]
 
 mod bmc;
 pub mod ikvm;
-mod ipmi;
+pub mod ipmi;
 mod record;
 pub mod redfish;
 mod redirection;
@@ -20,13 +21,14 @@ pub use record::{crawl, record, record_sol};
 pub use transcript::{Direction, Transcript};
 
 use std::collections::HashMap;
+use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicUsize;
 use std::sync::{Arc, Mutex};
 
 use md5::{Digest as _, Md5};
-use ooblin_core::Flavor;
 use ooblin_core::amt::Connection;
+use ooblin_core::{Flavor, Target};
 use tokio::net::{TcpListener, ToSocketAddrs, UdpSocket};
 use tokio_rustls::TlsAcceptor;
 use tokio_rustls::rustls::ServerConfig;
@@ -46,9 +48,17 @@ pub fn fixture(name: &str) -> PathBuf {
     Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../../fixtures")).join(name)
 }
 
-/// Which device `fixture` was recorded from: one with `redfish/` is a BMC's.
+/// Which device `fixture` was recorded from: one with `redfish/` is a Supermicro's, one with `ipmi.txt` alone a BMC's.
 pub fn flavor(fixture: &Path) -> Flavor {
-    if fixture.join("redfish").is_dir() { Flavor::Supermicro } else { Flavor::Amt }
+    match (fixture.join("redfish").is_dir(), fixture.join("ipmi.txt").is_file()) {
+        (true, _) => Flavor::Supermicro,
+        (false, true) => Flavor::Ipmi,
+        (false, false) => Flavor::Amt,
+    }
+}
+
+pub fn hex(text: &str) -> Vec<u8> {
+    (0..text.len()).step_by(2).map(|at| u8::from_str_radix(&text[at..at + 2], 16).unwrap()).collect()
 }
 
 pub struct Amt {
@@ -105,6 +115,15 @@ impl Amt {
         amt
     }
 
+    /// Us at both our ports, as `USER` with `password`.
+    pub fn target(&self, password: &str) -> Target {
+        Target {
+            wsman_port: self.port,
+            redirection_port: self.redirection_port,
+            ..Target::new("127.0.0.1", USER, password)
+        }
+    }
+
     pub fn certificate() -> CertificateDer<'static> {
         identity().0
     }
@@ -126,7 +145,7 @@ pub async fn answer_pings(address: impl ToSocketAddrs) -> std::io::Result<u16> {
     let port = socket.local_addr()?.port();
     tokio::spawn(async move {
         let mut ping = [0; 12];
-        while let Ok((length, from)) = socket.recv_from(&mut ping).await {
+        while let Ok((length, from)) = receive(&socket, &mut ping).await {
             if length != 12 || !from.ip().is_loopback() {
                 continue;
             }
@@ -137,6 +156,16 @@ pub async fn answer_pings(address: impl ToSocketAddrs) -> std::io::Result<u16> {
         }
     });
     Ok(port)
+}
+
+/// Receives a datagram, past what Windows says when an answer of ours was refused: the client had gone.
+async fn receive(socket: &UdpSocket, buffer: &mut [u8]) -> std::io::Result<(usize, SocketAddr)> {
+    loop {
+        match socket.recv_from(buffer).await {
+            Err(error) if error.kind() == std::io::ErrorKind::ConnectionReset => continue,
+            received => return received,
+        }
+    }
 }
 
 /// Indexes replies laid out like go-wsman-messages' (`amt/general/get.xml`), by the class each one names.

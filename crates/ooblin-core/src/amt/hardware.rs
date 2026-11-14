@@ -7,7 +7,7 @@ impl Client {
         let board = self.get("CIM_Card").await?;
         let bios = self.get("CIM_BIOSElement").await?;
         let features = self.enumerate("CIM_BIOSFeature").await?;
-        let package = self.enumerate("CIM_ComputerSystemPackage").await?;
+        let id = self.system_id().await?;
         let processors = self.enumerate("CIM_Processor").await?;
         // CIM_Processor only has clock speeds, the rest is on the CIM_Chip tagged with its device ID, and that chip's
         // socket on its location. Enumerating CIM_Chip includes its subclass, the memory modules, we leave those out.
@@ -71,7 +71,7 @@ impl Client {
                 manufacturer: chassis.text("Manufacturer"),
                 version: chassis.text("Version"),
                 serial_number: chassis.text("SerialNumber"),
-                id: package.first().map(|package| guid(&package.text("PlatformGUID"))).unwrap_or_default(),
+                id,
             },
             motherboard: Motherboard {
                 product: board.text("Model"),
@@ -92,6 +92,14 @@ impl Client {
             disks: disks.collect(),
             batteries: batteries.collect(),
         })
+    }
+
+    /// The system GUID, which AMT gives as SMBIOS's bytes in hex.
+    pub(super) async fn system_id(&mut self) -> Result<String> {
+        let package = self.enumerate("CIM_ComputerSystemPackage").await?;
+        let hex = package.first().map(|package| package.text("PlatformGUID")).unwrap_or_default();
+        let guid = u128::from_str_radix(&hex, 16).ok().filter(|_| hex.len() == 32);
+        Ok(guid.map_or(hex, |guid| crate::uuid(guid.to_be_bytes()).to_lowercase()))
     }
 }
 
@@ -307,17 +315,6 @@ fn family(code: Option<&str>) -> String {
         _ => return code.unwrap_or_default().to_owned(),
     };
     name.to_owned()
-}
-
-/// SMBIOS keeps a GUID's first three fields little-endian, so the hex AMT gives us reads back to front there.
-pub(crate) fn guid(hex: &str) -> String {
-    if hex.len() != 32 {
-        return hex.to_owned();
-    }
-    let swapped = |range: std::ops::Range<usize>| -> String {
-        hex[range].as_bytes().chunks(2).rev().flat_map(|pair| pair.iter().map(|&byte| byte as char)).collect()
-    };
-    format!("{}-{}-{}-{}-{}", swapped(0..8), swapped(8..12), swapped(12..16), &hex[16..20], &hex[20..]).to_lowercase()
 }
 
 fn named(table: &[&str], code: Option<&str>) -> String {

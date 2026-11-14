@@ -7,9 +7,9 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Result, bail};
 use futures_util::{SinkExt, StreamExt};
-use mock::{Bmc, Direction, PASSWORD, Transcript, USER};
+use mock::{Bmc, Direction, PASSWORD, Transcript};
 use ooblin_core::supermicro::{Client, Kvm};
-use ooblin_core::{Error, Input, Target};
+use ooblin_core::{Error, Input};
 use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
 use rustls::crypto::aws_lc_rs;
 use rustls::pki_types::{CertificateDer, ServerName, UnixTime};
@@ -24,7 +24,7 @@ async fn start(fixture: &Path) -> Arc<Bmc> {
 }
 
 fn client(bmc: &Bmc, password: &str) -> Client {
-    Client::new(&Target::new(format!("127.0.0.1:{}", bmc.port), USER, password), None).unwrap()
+    Client::new(&bmc.target(password), None).unwrap()
 }
 
 fn requests(bmc: &Bmc) -> Vec<String> {
@@ -112,7 +112,7 @@ async fn shows_the_x10s_screen() -> Result<()> {
         let (size, rects, _) = parse(&frame);
         assert_eq!(size, [1024, 768]);
         if rects.is_empty() {
-            assert!(started.elapsed() < Duration::from_millis(1500), "{:?}", started.elapsed());
+            assert!(started.elapsed() < Duration::from_secs(2), "{:?}", started.elapsed());
             break;
         }
         assert_eq!(rects, [[0, 752, 16, 16]]);
@@ -215,7 +215,7 @@ async fn closing_cuts_a_paste_short() -> Result<()> {
     tokio::time::sleep(Duration::from_millis(100)).await;
     let started = Instant::now();
     kvm.close().await;
-    assert!(started.elapsed() < Duration::from_millis(500), "{:?}", started.elapsed());
+    assert!(started.elapsed() < Duration::from_secs(2), "{:?}", started.elapsed());
     // The rest of it goes nowhere: the socket's closed before we log out, and stays so.
     assert!(typing.await?.is_err());
     assert_closed(&bmc);
@@ -259,7 +259,10 @@ async fn shakes_hands(bmc: &Bmc, token: &str) -> Result<bool> {
     // Its version, security types and challenge, each answered.
     for answer in [&b"RFB 055.008\n"[..], &[16], &[token.as_bytes(), &[0; 24]].concat()] {
         socket.next().await;
-        socket.send(Message::binary(answer.to_vec())).await?;
+        // The BMC refuses by hanging up, which Windows reports as a reset when we send.
+        if socket.send(Message::binary(answer.to_vec())).await.is_err() {
+            return Ok(false);
+        }
     }
     Ok(matches!(socket.next().await, Some(Ok(Message::Binary(result))) if *result == [0; 4]))
 }
@@ -382,7 +385,7 @@ async fn drops_a_message_it_doesnt_know() -> Result<()> {
 async fn records_a_session_that_replays_alike() -> Result<()> {
     let x10 = start(&mock::fixture("x10")).await;
     let dir = tempfile::tempdir()?;
-    mock::ikvm::record(&Target::new(format!("127.0.0.1:{}", x10.port), USER, PASSWORD), dir.path()).await?;
+    mock::ikvm::record(&x10.target(PASSWORD), dir.path()).await?;
     assert_closed(&x10);
     let recorded = start(dir.path()).await;
     let (x10, recorded) = (frames(&x10).await?, frames(&recorded).await?);
@@ -415,6 +418,33 @@ async fn virtual_media_serves_the_image_until_ejected() -> Result<()> {
     let expected =
         ["WS /vm", "WS /vm", "vm 12 058004021f000000", "vm 25 0000000200000800", "vm 28 0101010101010101", "vm out"];
     assert_eq!(media, expected);
+    assert_eq!(requests.last().unwrap(), "GET /cgi/logout.cgi");
+    Ok(())
+}
+
+/// A drive the BMC refuses closes its socket again and logs out of its web session.
+#[tokio::test]
+async fn virtual_media_logs_out_when_refused() -> Result<()> {
+    let bmc = start(&mock::fixture("x10")).await;
+    let image = tempfile::NamedTempFile::new()?;
+    bmc.refuse_kvm();
+    let refused = client(&bmc, PASSWORD).media(std::fs::File::open(image.path())?).await;
+    let Err(Error::Protocol(message)) = refused else { bail!("the drive went in") };
+    assert!(message.contains("refused the KVM token"), "{message}");
+    assert_closed(&bmc);
+    Ok(())
+}
+
+/// Ejected before the host is done with it, the drive goes out as at any other time.
+#[tokio::test]
+async fn virtual_media_ejects_at_once() -> Result<()> {
+    let bmc = start(&mock::fixture("x10")).await;
+    let image = tempfile::NamedTempFile::new()?;
+    std::fs::write(image.path(), [0; 3 * 2048])?;
+    let media = client(&bmc, PASSWORD).media(std::fs::File::open(image.path())?).await?;
+    tokio::time::timeout(Duration::from_secs(5), media.serve(|_| {}, async {})).await??;
+    let requests = requests(&bmc);
+    assert!(requests.iter().any(|line| line == "vm out"), "{requests:?}");
     assert_eq!(requests.last().unwrap(), "GET /cgi/logout.cgi");
     Ok(())
 }

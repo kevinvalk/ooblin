@@ -42,6 +42,14 @@ impl Web {
         Ok(Self { http: connection.http.clone(), url: connection.url.clone(), sid: sid.to_owned() })
     }
 
+    /// Logs in, does `what` in the session and logs out again: the BMC has only a few, which stay until they time out.
+    pub async fn with<T>(connection: &Connection, what: impl AsyncFnOnce(&Self) -> Result<T>) -> Result<T> {
+        let web = Self::login(connection).await?;
+        let result = what(&web).await;
+        web.logout().await;
+        result
+    }
+
     pub fn sid(&self) -> &str {
         &self.sid
     }
@@ -56,12 +64,12 @@ impl Web {
 
     /// What the pages' CGI says to each of `reads` (`GENERIC_INFO.XML`), XML, with the token against cross-site
     /// requests its pages carry. Only reads: their names end in `.XML` and none starts with `SET_`.
-    pub async fn read(&self, reads: &[&str]) -> Result<Vec<String>> {
+    pub async fn read<const N: usize>(&self, reads: [&str; N]) -> Result<[String; N]> {
         let token = self.token_against_forgery().await?;
-        let mut answers = Vec::new();
-        for read in reads {
+        let mut answers = [const { String::new() }; N];
+        for (answer, read) in answers.iter_mut().zip(reads) {
             debug_assert!(read.ends_with(".XML") && !read.starts_with("SET_"));
-            answers.push(self.post("/cgi/ipmi.cgi", &token, format!("{read}=(0,0)")).await?);
+            *answer = self.post("/cgi/ipmi.cgi", &token, format!("{read}=(0,0)")).await?;
         }
         Ok(answers)
     }

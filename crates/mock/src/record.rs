@@ -17,7 +17,7 @@ use ooblin_core::{Error, Target};
 
 use crate::scrub::scrub;
 use crate::transcript::{Direction, Transcript};
-use crate::{Amt, PASSWORD, USER};
+use crate::{Amt, PASSWORD};
 
 /// Every class MeshCommander or go-wsman-messages knows of. A crawl is cheap, so we'd rather ask for one too many.
 const CLASSES: &[&str] = &[
@@ -295,7 +295,7 @@ pub async fn record(target: &Target, fixture: &Path) -> anyhow::Result<()> {
 
     eprint!("methods  recording…");
     let proxy = Amt::forward(device, fixture).await;
-    let mut client = Client::new(&Target { wsman_port: proxy.port, ..Target::new("127.0.0.1", USER, PASSWORD) }, None)?;
+    let mut client = Client::new(&proxy.target(PASSWORD), None)?;
     let reads = [
         client.status().await.err(),
         client.settings().await.err(),

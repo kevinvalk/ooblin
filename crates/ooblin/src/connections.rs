@@ -15,9 +15,9 @@ use std::io;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use ooblin_core::amt::{self, Alarm, Availability, General, Ipv6Settings, Recovery, Settings};
-use ooblin_core::{Client, Flavor, Info, Ipv4, Kvm, RemoteAccess, Sol, Target};
-use serde::{Deserialize, Serialize};
+use futures_util::future::join_all;
+use ooblin_core::{Client, Flavor, Info, Kvm, Sol, Target};
+use serde::Serialize;
 use tauri::async_runtime::{JoinHandle, Mutex, Sender};
 use ts_rs::TS;
 
@@ -119,50 +119,6 @@ pub struct Connected {
     pub unremembered: Option<String>,
 }
 
-/// A change to the settings, each made by the `Client` method it's named after.
-#[derive(Debug, Deserialize, TS)]
-#[ts(export_to = "ooblin.ts")]
-pub enum Change {
-    RemoteAccess(RemoteAccess),
-    General(General),
-    PowerPolicy(String),
-    Ipv4(Ipv4),
-    Ipv6(Ipv6Settings),
-    Availability(Availability),
-    Recovery(Recovery),
-    Clock,
-    AddAlarm(Alarm),
-    DeleteAlarm(String),
-    /// The certificate in the file at `path`, see `amt::Client::add_certificate`.
-    AddCertificate {
-        path: PathBuf,
-        trusted_root: bool,
-    },
-    DeleteCertificate(String),
-}
-
-impl Change {
-    async fn make(self, client: &mut amt::Client) -> Result<(), CommandError> {
-        match self {
-            Change::RemoteAccess(access) => client.set_remote_access(&access).await,
-            Change::General(general) => client.set_general(&general).await,
-            Change::PowerPolicy(id) => client.set_power_policy(&id).await,
-            Change::Ipv4(ipv4) => client.set_ipv4(&ipv4).await,
-            Change::Ipv6(ipv6) => client.set_ipv6(&ipv6).await,
-            Change::Availability(available) => client.set_availability(&available).await,
-            Change::Recovery(recovery) => client.set_recovery(&recovery).await,
-            Change::Clock => client.set_clock().await,
-            Change::AddAlarm(alarm) => client.add_alarm(&alarm).await,
-            Change::DeleteAlarm(name) => client.delete_alarm(&name).await,
-            Change::AddCertificate { path, trusted_root } => {
-                client.add_certificate(&std::fs::read(path)?, trusted_root).await
-            }
-            Change::DeleteCertificate(id) => client.delete_certificate(&id).await,
-        }?;
-        Ok(())
-    }
-}
-
 /// How a change went: why it failed, if it did, and the settings read after it either way, as a change that failed may
 /// have made some of it, or why they couldn't be read. AMT's settings or a BMC's.
 #[derive(Serialize, TS)]
@@ -215,7 +171,10 @@ impl Connections {
         if accepted.is_err() && remembered && !kept() {
             hosts.forget_password(&target.host).unwrap_or_default();
         }
-        accepted?;
+        // The connection replaced closes before we say we're in, freeing the device's serial console and drive.
+        if let Some(replaced) = accepted? {
+            replaced.close(&target.host).await;
+        }
         log::info!("Connected to {} ({:?} {}), connection {login}", target.host, info.flavor, info.version);
         Ok(Connected { info, unremembered: unremembered.map(|error| error.to_string()) })
     }
@@ -227,7 +186,7 @@ impl Connections {
         info: &Info,
         client: Client,
         remembered: bool,
-    ) -> Result<(), CommandError> {
+    ) -> Result<Option<Arc<Connection>>, CommandError> {
         let mut state = self.state.lock().unwrap();
         if state.logins.get(&target.host) != Some(&login) {
             return Err(CommandError::failed(format!("Connecting to {} was cancelled.", target.host)));
@@ -236,18 +195,22 @@ impl Connections {
         self.hosts()?.connected(target, info, remembered)?;
         let (client, kvm, sol, image) = (Mutex::new(client), Slot::default(), Slot::default(), Slot::default());
         let connection = Connection { id: login, client, kvm, sol, image };
-        // A connection replaced lets go of what's open on it, which the webview never does.
-        state.connections.insert(target.host.clone(), Arc::new(connection));
-        Ok(())
+        Ok(state.connections.insert(target.host.clone(), Arc::new(connection)))
     }
 
     /// Lets go of `host`'s connection, closing what's open on it, and cancels a login to it underway.
     pub async fn close(&self, host: &str) {
         let connection = self.state.lock().unwrap().remove(host);
         if let Some(connection) = connection {
-            connection.close().await;
-            log::info!("Disconnected from {host}, connection {}", connection.id);
+            connection.close(host).await;
         }
+    }
+
+    /// Closes every connection at once, so quitting waits for the slowest device rather than all of them in turn, and
+    /// cancels the logins underway.
+    pub async fn close_all(&self) {
+        let State { connections, .. } = std::mem::take(&mut *self.state.lock().unwrap());
+        join_all(connections.iter().map(|(host, connection)| connection.close(host))).await;
     }
 
     /// Forgets `host`, see `Hosts::forget`, letting go of its connection and cancelling a login to it underway.
@@ -257,7 +220,7 @@ impl Connections {
             (state.remove(host), self.hosts().and_then(|mut hosts| hosts.forget(host)))
         };
         if let Some(connection) = connection {
-            connection.close().await;
+            connection.close(host).await;
         }
         if remembered? {
             self.hosts()?.forget_password(host)?;
@@ -308,50 +271,27 @@ impl Connections {
         }
     }
 
-    /// Makes `change` to `host`'s settings, then reads them again: the name goes in the saved devices, and a disk
-    /// image comes out of a drive that's off.
-    pub async fn change(&self, host: &str, change: Change) -> Result<Changed<Settings>, CommandError> {
-        let connection = self.get(host)?;
-        log::info!("Changing {host}'s settings: {change:?}");
-        let (error, settings) = {
-            let mut client = connection.client.lock().await;
-            let client = client.amt()?;
-            (change.make(client).await.err(), client.settings().await.map_err(CommandError::from))
-        };
-        if let Some(error) = &error {
-            log::warn!("Changing {host}'s settings failed: {error}");
-        }
-        match &settings {
-            Ok(settings) => {
-                let name = &settings.general.name;
-                if let Err(error) = self.edit(|hosts| hosts.renamed(host, name)) {
-                    log::warn!("Saving {host}'s name {name} failed: {error}");
-                }
-                if !settings.remote_access.ider {
-                    connection.image.close(None).await;
-                }
-            }
-            Err(error) => log::warn!("Reading {host}'s settings after a change failed: {error}"),
-        }
-        Ok(Changed { error, settings })
-    }
-
-    /// Like `change`, for a BMC: `make` makes the change `what`, `read` reads the settings after.
-    pub async fn changed<T>(
+    /// Makes `change` to `host`'s settings with `make`, then reads them again with `read`, whether it went through or
+    /// not.
+    pub async fn change<C: std::fmt::Debug, T>(
         &self,
         host: &str,
-        what: impl std::fmt::Debug,
-        make: impl AsyncFnOnce(&mut Client) -> ooblin_core::Result<()>,
+        change: C,
+        make: impl AsyncFnOnce(&mut Client, C) -> ooblin_core::Result<()>,
         read: impl AsyncFnOnce(&mut Client) -> ooblin_core::Result<T>,
     ) -> Result<Changed<T>, CommandError> {
         let connection = self.get(host)?;
-        log::info!("Changing {host}'s settings: {what:?}");
+        log::info!("Changing {host}'s settings: {change:?}");
         let mut client = connection.client.lock().await;
-        let error = make(&mut client).await.err().map(CommandError::from);
+        let error = make(&mut client, change).await.err().map(CommandError::from);
         if let Some(error) = &error {
             log::warn!("Changing {host}'s settings failed: {error}");
         }
-        Ok(Changed { error, settings: read(&mut client).await.map_err(CommandError::from) })
+        let settings = read(&mut client).await.map_err(CommandError::from);
+        if let Err(error) = &settings {
+            log::warn!("Reading {host}'s settings after a change failed: {error}");
+        }
+        Ok(Changed { error, settings })
     }
 }
 
@@ -361,7 +301,7 @@ impl<T> Default for Slot<T> {
     }
 }
 
-impl<T: Redirection + Clone> Slot<T> {
+impl<T: Clone> Slot<T> {
     /// The one `id` names, while it's open.
     pub async fn get(&self, id: u64) -> Result<T, CommandError> {
         let slot = self.0.lock().await;
@@ -395,10 +335,11 @@ impl Slot<Serving> {
 
 impl Connection {
     /// Closes what's open on it.
-    async fn close(&self) {
+    async fn close(&self, host: &str) {
         self.kvm.close(None).await;
         self.sol.close(None).await;
         self.image.close(None).await;
+        log::info!("Disconnected from {host}, connection {}", self.id);
     }
 }
 

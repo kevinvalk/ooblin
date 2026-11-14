@@ -39,7 +39,7 @@ impl Client {
     }
 
     /// AMT refuses one in the past.
-    pub async fn add_alarm(&mut self, alarm: &Alarm) -> Result<()> {
+    pub(super) async fn add_alarm(&mut self, alarm: &Alarm) -> Result<()> {
         let at = Timestamp::from_second(alarm.at).map_err(|error| Error::Protocol(error.to_string()))?;
         let every = alarm.every_minutes;
         let template = AlarmTemplate {
@@ -53,7 +53,7 @@ impl Client {
         Ok(())
     }
 
-    pub async fn delete_alarm(&mut self, name: &str) -> Result<()> {
+    pub(super) async fn delete_alarm(&mut self, name: &str) -> Result<()> {
         self.delete("IPS_AlarmClockOccurrence", name).await
     }
 }

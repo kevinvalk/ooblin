@@ -82,7 +82,7 @@ impl Client {
             Err(error @ (Error::Transport(_) | Error::Timeout | Error::Http(_))) => error,
             done => return done,
         };
-        if supermicro::probe(&target.host).await {
+        if supermicro::probe(&target.authority()).await {
             match Self::login_as(target, pin, Flavor::Supermicro).await {
                 Err(Error::Protocol(_)) => {}
                 done => return done,

@@ -108,7 +108,8 @@ impl Media {
             if !to_host && length > 0 {
                 next(&mut self.receiver, &mut self.plug, false).await?;
             }
-            let (mut data, range, failed) = match self.cdrom.answer(&wrapper[15..15 + usize::from(wrapper[14])]) {
+            // The whole field, zeros past the command: `Cdrom` reads a command's fields without checking its length.
+            let (mut data, range, failed) = match self.cdrom.answer(&wrapper[15..]) {
                 Answer::Data(data) => (data, 0..0, false),
                 Answer::Read { lba, blocks } => {
                     let start = lba * 2048;

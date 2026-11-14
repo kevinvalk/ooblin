@@ -3,7 +3,7 @@
 //! (SHA-256), and 3 (SHA-1) from BMCs without it, AES-128 either way: never a suite without both. Layouts from the IPMI
 //! 2.0 specification, sections 13.6 to 13.32.
 
-use std::sync::atomic::{AtomicU8, AtomicU32, Ordering::Relaxed};
+use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, Ordering::Relaxed};
 use std::time::Duration;
 
 use aws_lc_rs::cipher::{AES_128, DecryptingKey, DecryptionContext, EncryptingKey, UnboundCipherKey};
@@ -36,6 +36,7 @@ pub struct Session {
     sequence: AtomicU32,
     /// The IPMI requests' own sequence, six bits, which answers carry back.
     request: AtomicU8,
+    closed: AtomicBool,
 }
 
 /// A suite's hash: for RAKP's codes and the integrity of every datagram after.
@@ -146,13 +147,13 @@ impl Session {
     /// Logs in to the BMC at `target`'s host, with SHA-256 if it can. A BMC that says no to the user or the role, or
     /// signs with another password than ours, is a wrong user or password, which we don't try again.
     pub async fn open(target: &Target) -> Result<Self> {
-        // A host naming its web port (`host:port`, `[v6]:port`) says nothing of IPMI's.
-        let host = match target.host.rsplit_once(':') {
-            Some((host, port)) if port.parse::<u16>().is_ok() && (host.ends_with(']') || !host.contains(':')) => host,
-            _ => &target.host,
-        };
-        let socket = UdpSocket::bind(if host.contains(':') { "[::]:0" } else { "0.0.0.0:0" }).await?;
-        socket.connect((host.trim_matches(['[', ']']), target.ipmi_port)).await?;
+        let host = target.ipmi_host();
+        // Resolvers list IPv6 first, yet a BMC with both may answer IPMI on IPv4 only.
+        let address = tokio::net::lookup_host((host, target.ipmi_port)).await?;
+        let address = address.min_by_key(|address| address.is_ipv6());
+        let address = address.ok_or_else(|| Error::Transport(format!("no address for {host}")))?;
+        let socket = UdpSocket::bind(if address.is_ipv6() { "[::]:0" } else { "0.0.0.0:0" }).await?;
+        socket.connect(address).await?;
         match Self::handshake(&socket, target, Hash::Sha256).await {
             // No such authentication or integrity algorithm, or no suite with them: an older BMC.
             Err(Error::Refused(0x04..=0x07 | 0x10..=0x12)) => Self::handshake(&socket, target, Hash::Sha1).await,
@@ -165,6 +166,7 @@ impl Session {
             sealing,
             sequence: AtomicU32::new(1),
             request: AtomicU8::new(0),
+            closed: AtomicBool::new(false),
         })
     }
 
@@ -217,9 +219,20 @@ impl Session {
         self.ask(function, command, data, 1, 5 * PATIENCE).await
     }
 
+    /// Like `attempt`, raising the session to administrator once the BMC says it's too low: RMCP+ lets a BMC start it
+    /// at user (ipmi_sim does), which is why ipmitool always raises it.
+    async fn ask(&self, function: u8, command: u8, data: &[u8], tries: u8, patience: Duration) -> Result<Vec<u8>> {
+        match self.attempt(function, command, data, tries, patience).await {
+            Err(Error::Refused(0xD4)) if self.attempt(0x06, 0x3B, &[ADMINISTRATOR], 3, PATIENCE).await.is_ok() => {
+                self.attempt(function, command, data, tries, patience).await
+            }
+            answer => answer,
+        }
+    }
+
     /// Sends a request up to `tries` times, each answer waited for `patience`. A resend the BMC says it already did
     /// (0xCF) went through.
-    async fn ask(&self, function: u8, command: u8, data: &[u8], tries: u8, patience: Duration) -> Result<Vec<u8>> {
+    async fn attempt(&self, function: u8, command: u8, data: &[u8], tries: u8, patience: Duration) -> Result<Vec<u8>> {
         let sequence = self.request.fetch_add(1, Relaxed) & 0x3F;
         for resend in 0..tries {
             self.send(MESSAGE, &message(0x20, function, 0x81, sequence, command, data)).await?;
@@ -245,9 +258,12 @@ impl Session {
 
     /// Sends a payload of `kind` without waiting for anything back.
     pub async fn send(&self, kind: u8, payload: &[u8]) -> Result<()> {
-        let datagram = self.sealing.seal(kind, self.id, self.sequence.fetch_add(1, Relaxed), payload);
-        self.socket.send(&datagram).await?;
+        self.socket.send(&self.sealed(kind, payload)).await?;
         Ok(())
+    }
+
+    fn sealed(&self, kind: u8, payload: &[u8]) -> Vec<u8> {
+        self.sealing.seal(kind, self.id, self.sequence.fetch_add(1, Relaxed), payload)
     }
 
     /// The next authentic payload of this session and its type, waiting for it as long as it takes: whatever else
@@ -255,11 +271,7 @@ impl Session {
     pub async fn receive(&self) -> Result<(u8, Vec<u8>)> {
         let mut datagram = [0; 1024];
         loop {
-            let length = match self.socket.recv(&mut datagram).await {
-                // Windows says so when an earlier datagram was refused.
-                Err(error) if error.kind() == std::io::ErrorKind::ConnectionReset => continue,
-                received => received?,
-            };
+            let length = recv(&self.socket, &mut datagram).await?;
             if let Some((kind, id, payload)) = self.sealing.open(&datagram[..length])
                 && id == self.ours
             {
@@ -270,7 +282,29 @@ impl Session {
 
     /// Ends the session at the BMC, within `GOODBYE`: it has only a few.
     pub async fn close(&self) {
+        self.closed.store(true, Relaxed);
         let _ = tokio::time::timeout(GOODBYE, self.request(0x06, 0x3C, &self.id.to_le_bytes())).await;
+    }
+}
+
+impl Drop for Session {
+    /// A session dropped unclosed, its future cancelled say, still ends at the BMC, without waiting for its answer.
+    fn drop(&mut self) {
+        if !self.closed.load(Relaxed) {
+            let sequence = self.request.fetch_add(1, Relaxed) & 0x3F;
+            let close = message(0x20, 0x06, 0x81, sequence, 0x3C, &self.id.to_le_bytes());
+            let _ = self.socket.try_send(&self.sealed(MESSAGE, &close));
+        }
+    }
+}
+
+/// Receives a datagram, past what Windows says when an earlier one was refused.
+async fn recv(socket: &UdpSocket, buffer: &mut [u8]) -> std::io::Result<usize> {
+    loop {
+        match socket.recv(buffer).await {
+            Err(error) if error.kind() == std::io::ErrorKind::ConnectionReset => continue,
+            received => return received,
+        }
     }
 }
 
@@ -283,7 +317,7 @@ async fn exchange(socket: &UdpSocket, kind: u8, payload: &[u8]) -> Result<Vec<u8
         let answer = async {
             let mut answer = [0; 512];
             loop {
-                let length = socket.recv(&mut answer).await?;
+                let length = recv(socket, &mut answer).await?;
                 let answer = &answer[..length];
                 if answer.len() >= 18 && answer[5] == kind + 1 && answer[16] == payload[0] {
                     return Ok::<_, Error>(answer[16..].to_vec());
@@ -294,8 +328,8 @@ async fn exchange(socket: &UdpSocket, kind: u8, payload: &[u8]) -> Result<Vec<u8
             let answer = answer?;
             return match answer[1] {
                 0 if answer.len() >= 8 => Ok(answer),
-                // An unknown user or role, or the password's code didn't check out.
-                0x0D | 0x09 | 0x0F => Err(Error::Unauthorized),
+                // An unknown user, a role it may not have, or the password's code didn't check out.
+                0x09 | 0x0A | 0x0D | 0x0F => Err(Error::Unauthorized),
                 status => Err(Error::Refused(status)),
             };
         }

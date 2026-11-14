@@ -13,7 +13,8 @@ use crate::{Error, Flavor, Result};
 
 pub const RMCP_PORT: u16 = 623;
 
-/// RMCP version 6 and class ASF, then ASF's enterprise number (4542), a presence ping (0x80) and its tag, 0.
+/// RMCP version 6, its sequence number and class ASF, then ASF's enterprise number (4542), a presence ping (0x80) and
+/// its tag, 0.
 const PING: [u8; 12] = [0x06, 0, 0, 0x06, 0, 0, 0x11, 0xBE, 0x80, 0, 0, 0];
 
 /// What a device says about itself before we log in: neither its name nor anything else that would need one. A BMC
@@ -47,12 +48,15 @@ pub async fn discover(networks: &str, port: u16, mut found: impl FnMut(Found)) -
     let answered = Mutex::new(HashSet::new());
 
     let ping = async {
-        for _ in 0..2 {
+        // As MeshCommander does, then as ipmitool does, sequence number 255: OpenBMC drops any other.
+        for sequence in [0, 0xFF] {
+            let mut ping = PING;
+            ping[2] = sequence;
             let mut pace = tokio::time::interval(Duration::from_millis(2));
             for address in addresses.iter().filter(|address| !answered.lock().unwrap().contains(*address)) {
                 pace.tick().await;
                 // Some addresses can't be sent to (no route, a broadcast), that's no reason to stop.
-                let _ = socket.send_to(&PING, (*address, port)).await;
+                let _ = socket.send_to(&ping, (*address, port)).await;
             }
             tokio::time::sleep(Duration::from_secs(1)).await;
         }
@@ -86,7 +90,7 @@ pub async fn discover(networks: &str, port: u16, mut found: impl FnMut(Found)) -
 fn addresses(networks: &str) -> Result<BTreeSet<Ipv4Addr>> {
     let mut addresses = BTreeSet::new();
     for network in networks.split([',', ' ']).filter(|network| !network.is_empty()) {
-        let invalid = || Error::Invalid(format!("{network} isn't an IPv4 address, range or network"));
+        let invalid = || Error::Invalid(format!("{network} isn't an IPv4 address, range or network."));
         let address = |text: &str| text.trim().parse::<Ipv4Addr>().map(u32::from).map_err(|_| invalid());
         let (first, last) = match network.split_once(['-', '/']) {
             Some((first, last)) if network.contains('-') => (address(first)?, address(last)?),
@@ -99,7 +103,7 @@ fn addresses(networks: &str) -> Result<BTreeSet<Ipv4Addr>> {
             None => (address(network)?, address(network)?),
         };
         if addresses.len() + last.saturating_sub(first) as usize >= 1 << 16 {
-            return Err(Error::Invalid("That's too many addresses, a /16 at most".into()));
+            return Err(Error::Invalid("That's too many addresses, a /16 at most.".into()));
         }
         addresses.extend((first..=last).map(Ipv4Addr::from));
     }

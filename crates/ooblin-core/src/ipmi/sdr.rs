@@ -103,7 +103,11 @@ pub async fn records(session: &Session) -> Result<Vec<Record>> {
     let mut reservation = reserve(session).await?;
     let (mut records, mut seen, mut id) = (Vec::new(), HashSet::new(), 0);
     while id != 0xFFFF && seen.insert(id) {
-        let (next, mut record) = read(session, &mut reservation, id, 0, 5).await?;
+        let (next, mut record) = match read(session, &mut reservation, id, 0, 5).await {
+            // An empty repository has no first record either.
+            Err(Error::Refused(0xCB)) if id == 0 => break,
+            read => read?,
+        };
         let length = 5 + usize::from(*record.get(4).ok_or_else(short)?);
         // What X10s answer at once; FreeIPMI starts here too and shrinks by 4 when it's too much.
         let mut chunk = 16;
@@ -454,6 +458,7 @@ const SPECIFIC: &[(u8, States)] = &[
             ("Timer interrupt", W, W),
         ],
     ),
+    (0x25, &[("Present", I, I), ("Absent", C, C), ("Disabled", C, C)]),
     (0x2B, &[("Hardware change detected", I, I), ("Firmware or software change detected", I, I)]),
 ];
 

@@ -42,7 +42,7 @@ impl Client {
     }
 
     /// Changes what differs from `access`, the listener following: on when anything is.
-    pub async fn set_remote_access(&mut self, access: &RemoteAccess) -> Result<()> {
+    pub(super) async fn set_remote_access(&mut self, access: &RemoteAccess) -> Result<()> {
         if let (Some(on), Some(kvm)) = (access.kvm, self.kvm_access_point().await?)
             && enabled(&kvm) != on
         {

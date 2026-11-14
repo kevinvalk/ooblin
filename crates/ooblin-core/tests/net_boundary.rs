@@ -20,7 +20,20 @@ fn visit(dir: &Path, offenders: &mut Vec<String>) {
             visit(&path, offenders);
         } else if !path.parent().unwrap().ends_with("ooblin-core/src/net") {
             let source = fs::read_to_string(&path).unwrap();
-            let network = ["reqwest", "rustls", "hyper", "tokio::net", "std::net", "tungstenite"];
+            // What opens a socket or looks a name up, however it's imported: addresses are no network.
+            let network = [
+                "reqwest",
+                "rustls",
+                "hyper",
+                "tungstenite",
+                "socket2",
+                "TcpStream",
+                "TcpSocket",
+                "TcpListener",
+                "UdpSocket",
+                "lookup_host",
+                "ToSocketAddrs",
+            ];
             offenders.extend(
                 network.iter().filter(|name| source.contains(*name)).map(|name| format!("{}: {name}", path.display())),
             );

@@ -71,7 +71,9 @@
       autofocus={!!device && !saved}
     />
   </label>
-  <label class="flex items-center gap-2"><input type="checkbox" bind:checked={login.remember} /> Remember the password</label>
+  {#if !saved}
+    <label class="flex items-center gap-2"><input type="checkbox" bind:checked={login.remember} /> Remember the password</label>
+  {/if}
   <button class="btn btn-primary mt-2 h-9">
     {#if connecting}<LoaderCircle class="size-4 animate-spin" /> Connecting…{:else}Connect{/if}
   </button>

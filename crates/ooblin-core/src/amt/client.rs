@@ -28,9 +28,7 @@ impl Client {
     }
 
     pub async fn put(&mut self, class: &str, instance: &impl ToXml) -> Result<()> {
-        let envelope = wsman::put(class, &[], instance, self.next_message_id());
-        self.connection.post(envelope).await?;
-        Ok(())
+        self.put_on(class, &[], instance).await
     }
 
     /// Like `put`, for the instance of several that its `keys` pick.
@@ -48,7 +46,7 @@ impl Client {
 
     /// AMT's own web pages, where what we don't do (users, say) can be done.
     pub fn web_pages(&self) -> String {
-        format!("https://{}:{}/", self.target.host, self.target.wsman_port)
+        format!("https://{}:{}/", self.target.authority(), self.target.wsman_port)
     }
 
     /// Calls a method that changes something, once. A non-zero `ReturnValue` is an error.

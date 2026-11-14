@@ -1,7 +1,19 @@
+use serde::Serialize;
+use ts_rs::TS;
+
 use super::Client;
-use super::hardware::guid;
 use super::wsman::Instance;
-use crate::{Configuration, Ipv4, Ipv6, Port, Result, Status};
+use crate::{Configuration, Info, Ipv4, Ipv6, Port, PowerState, Result};
+
+/// What the device's own status page shows: the device, its AMT and its network.
+#[derive(Debug, Serialize, TS)]
+#[ts(export, export_to = "core.ts")]
+pub struct Status {
+    pub info: Info,
+    pub power: PowerState,
+    pub system_id: String,
+    pub ports: Vec<Port>,
+}
 
 impl Ipv4 {
     /// From a port's `AMT_EthernetPortSettings`.
@@ -25,7 +37,7 @@ impl Client {
     pub async fn status(&mut self) -> Result<Status> {
         let info = self.info().await?;
         let power = self.power().await?;
-        let package = self.enumerate("CIM_ComputerSystemPackage").await?;
+        let system_id = self.system_id().await?;
         let settings = self.enumerate("AMT_EthernetPortSettings").await?;
         let ports = self.enumerate("CIM_EthernetPort").await?;
         let ipv6 = self.enumerate("IPS_IPv6PortSettings").await?;
@@ -61,11 +73,6 @@ impl Client {
             }
         });
 
-        Ok(Status {
-            info,
-            power: power.state,
-            system_id: package.first().map(|package| guid(&package.text("PlatformGUID"))).unwrap_or_default(),
-            ports: ports.collect(),
-        })
+        Ok(Status { info, power: power.state, system_id, ports: ports.collect() })
     }
 }

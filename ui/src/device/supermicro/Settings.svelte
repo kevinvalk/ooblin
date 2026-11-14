@@ -2,7 +2,7 @@
      HTTPS, which we speak, only there. The footer says how it went. -->
 <script lang="ts">
   import type { BmcChange, BmcSettings } from "../../bindings/core";
-  import Form, { choices, text } from "../Form.svelte";
+  import Form, { select, text } from "../Form.svelte";
   import type { Connection } from "../Device.svelte";
   import Fru from "../ipmi/Fru.svelte";
   import NetworkSettings from "../ipmi/NetworkSettings.svelte";
@@ -49,16 +49,6 @@
   const modes = (modes?: string[]) => Object.fromEntries((modes ?? []).map((mode) => [mode, MODES[mode] ?? mode]));
 </script>
 
-<!-- A choice that saves as it changes, which can't change where the BMC has none. -->
-{#snippet select(name: string, label: string, current: string | undefined, options: Record<string, string>, help: string)}
-  <div title={data && !Object.keys(options).length ? "This BMC can't." : help}>
-    <label for="{id}-{name}">{label}</label>
-    <select id="{id}-{name}" {name} class="field" disabled={data && !Object.keys(options).length}>
-      {@render choices(current, options)}
-    </select>
-  </div>
-{/snippet}
-
 <section>
   <h2>Server</h2>
   <Server loaded={!!data} restore={data?.power_restore} sol={data?.sol} {save} {busy} />
@@ -77,18 +67,22 @@
           save(done, name === "fan" ? { FanMode: text(fields, "fan") } : { MouseMode: text(fields, "mouse") })}
       >
         {@render select(
+          id,
           "fan",
           "Fan mode",
           data?.fan_mode.mode,
           modes(data?.fan_mode.modes),
           "How fast the BMC runs the fans: Standard and Optimal are quieter, Full speed and Heavy IO cooler.",
+          !!data,
         )}
         {@render select(
+          id,
           "mouse",
           "KVM mouse mode",
           data?.mouse_mode.mode,
           modes(data?.mouse_mode.modes),
           "We send where the pointer is, which only Absolute takes as it is: in another mode it may not land where clicked.",
+          !!data,
         )}
       </Form>
     </div>

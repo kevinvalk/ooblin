@@ -35,7 +35,7 @@
             <dd class="flex items-center gap-4">{#if sensor}
                 {@const { reading, unit, state, low, high } = sensor}
                 <span class={state ? "" : "w-24 flex-none"}>
-                  {reading !== null ? `${reading} ${unit}` : state || "Absent"}
+                  {reading !== null ? `${reading} ${unit}` : state || "No reading"}
                 </span>
                 {#if reading !== null && low !== null && high !== null && low < high}
                   <meter min={low} max={high} value={reading} title="Critical under {low} and over {high} {unit}"></meter>

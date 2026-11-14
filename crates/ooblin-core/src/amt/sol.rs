@@ -7,7 +7,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt, ReadHalf, WriteHalf};
 use tokio::sync::Mutex;
 
 use super::Client;
-use crate::net::{Redirection, Session, Stream};
+use crate::net::{Redirection, Session, Stream, read_exact, write_all};
 use crate::{Error, GOODBYE, Result};
 
 /// An open serial console. What the device writes and what we type go separate ways, so typing never waits.
@@ -24,7 +24,7 @@ struct Writer {
 }
 
 impl Client {
-    /// Opens the device's serial console, turning SOL on first if need be.
+    /// Opens the device's serial console, where SOL is on.
     pub async fn sol(&mut self) -> Result<Sol> {
         Sol::open(self.redirect(Session::Sol).await?).await
     }
@@ -55,8 +55,7 @@ impl Sol {
         let mut reader = self.reader.lock().await;
         loop {
             // Reading a byte gives up nothing when it times out.
-            let mut kind = [0];
-            match tokio::time::timeout(Duration::from_secs(1), reader.read(&mut kind)).await {
+            let kind = match tokio::time::timeout(Duration::from_secs(1), reader.read_u8()).await {
                 Err(_) => {
                     let mut writer = self.writer.lock().await;
                     if writer.sent.elapsed() > Duration::from_secs(2) {
@@ -64,21 +63,17 @@ impl Sol {
                     }
                     return Ok(Vec::new());
                 }
-                Ok(Ok(0)) => return Err(Error::Transport("the device closed the connection".into())),
-                Ok(read) => read?,
+                Ok(kind) => kind?,
             };
-            let mut header = [0; 7]; // padding and the sequence, which we don't check
-            reader.read_exact(&mut header).await?;
-            match kind[0] {
+            read_exact(&mut *reader, 7).await?; // padding and the sequence, which we don't check
+            match kind {
                 0x2A => {
-                    let len = reader.read_u16_le().await?;
-                    let mut data = vec![0; len.into()];
-                    reader.read_exact(&mut data).await?;
-                    return Ok(data);
+                    let len = read_exact(&mut *reader, 2).await?;
+                    return read_exact(&mut *reader, u16::from_le_bytes([len[0], len[1]]).into()).await;
                 }
                 // The serial port's control lines.
                 0x29 => {
-                    reader.read_exact(&mut [0; 2]).await?;
+                    read_exact(&mut *reader, 2).await?;
                 }
                 0x2B => {} // a keep-alive back
                 other => return Err(Error::Protocol(format!("an SOL message we don't know: {other:#04x}"))),
@@ -108,11 +103,8 @@ impl Sol {
 }
 
 impl Writer {
-    /// TLS may hold on to what we write until we flush.
     async fn send(&mut self, kind: u8, data: &[u8]) -> Result<()> {
-        let message = [&[kind, 0, 0, 0][..], &self.sequence.to_le_bytes(), data].concat();
-        self.half.write_all(&message).await?;
-        self.half.flush().await?;
+        write_all(&mut self.half, &[&[kind, 0, 0, 0][..], &self.sequence.to_le_bytes(), data].concat()).await?;
         (self.sequence, self.sent) = (self.sequence + 1, Instant::now());
         Ok(())
     }

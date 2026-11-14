@@ -25,5 +25,8 @@ pub use ider::Ider;
 pub use kvm::{Kvm, Screens};
 pub use logs::AuditRecord;
 pub use power::Recovery;
-pub use settings::{Availability, DnsUpdate, General, Ipv6Configuration, Ipv6Settings, Network, PowerPolicy, Settings};
+pub use settings::{
+    Availability, Change, DnsUpdate, General, Ipv6Configuration, Ipv6Settings, Network, PowerPolicy, Settings,
+};
 pub use sol::Sol;
+pub use status::Status;

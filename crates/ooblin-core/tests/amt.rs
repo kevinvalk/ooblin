@@ -6,10 +6,10 @@ use std::sync::atomic::Ordering;
 
 use anyhow::{Context, Result, bail};
 use flate2::{Compress, Compression, FlushCompress};
-use mock::{Amt, Bmc, Direction, PASSWORD, Transcript, USER};
+use mock::{Amt, Bmc, Direction, PASSWORD, Transcript};
 use ooblin_core::amt::wsman::parse_instance;
 use ooblin_core::amt::{
-    Alarm, Availability, Client, DnsUpdate, General, Ipv6Configuration, Ipv6Settings, Redirection, Session,
+    Alarm, Availability, Change, Client, DnsUpdate, General, Ipv6Configuration, Ipv6Settings, Redirection, Session,
 };
 use ooblin_core::{
     Configuration, Consent, Error, Flavor, Found, Input, Ipv4, PowerAction, PowerState, RemoteAccess, Target, discover,
@@ -24,12 +24,8 @@ async fn samples() -> Arc<Amt> {
     start(&mock::fixture("go-wsman-messages")).await
 }
 
-fn target(amt: &Amt, password: &str) -> Target {
-    Target { wsman_port: amt.port, redirection_port: amt.redirection_port, ..Target::new("127.0.0.1", USER, password) }
-}
-
 fn client(amt: &Amt, password: &str, pin: Option<String>) -> Result<Client> {
-    Ok(Client::new(&target(amt, password), pin)?)
+    Ok(Client::new(&amt.target(password), pin)?)
 }
 
 #[tokio::test]
@@ -103,22 +99,21 @@ async fn reads_every_fixture() -> Result<()> {
     for fixture in mock::fixtures() {
         let (flavor, name) = (mock::flavor(&fixture), fixture.display().to_string());
         let target = match flavor {
-            Flavor::Amt => target(&*start(&fixture).await, PASSWORD),
-            Flavor::Supermicro | Flavor::Ipmi => {
-                let bmc = Bmc::start("127.0.0.1:0", &fixture).await;
-                Target { ipmi_port: bmc.ipmi_port, ..Target::new(format!("127.0.0.1:{}", bmc.port), USER, PASSWORD) }
-            }
+            Flavor::Amt => start(&fixture).await.target(PASSWORD),
+            Flavor::Supermicro | Flavor::Ipmi => Bmc::start("127.0.0.1:0", &fixture).await.target(PASSWORD),
         };
         let (mut client, info) = ooblin_core::Client::login(&target, None, None).await.context(name.clone())?;
         assert_eq!(info.flavor, flavor, "{name}");
         client.power().await.context(name.clone())?;
         client.event_log().await.context(name.clone())?;
-        let hardware = client.hardware().await.context(name.clone())?;
-        anyhow::ensure!(
-            !hardware.processors.is_empty() && !hardware.memory.is_empty(),
-            "{name}: no processor or memory"
-        );
-        client.event_log().await.context(name.clone())?;
+        // We read hardware over AMT and Redfish only.
+        if flavor != Flavor::Ipmi {
+            let hardware = client.hardware().await.context(name.clone())?;
+            anyhow::ensure!(
+                !hardware.processors.is_empty() && !hardware.memory.is_empty(),
+                "{name}: no processor or memory"
+            );
+        }
         match &mut client {
             ooblin_core::Client::Amt(client) => {
                 client.settings().await.context(name.clone())?;
@@ -165,7 +160,10 @@ async fn reads_what_the_ms_02_says() -> Result<()> {
     assert_eq!((processor.mhz, processor.max_mhz), (Some(4600), Some(8500)));
     assert_eq!((hardware.memory[0].bytes, hardware.disks[0].bytes), (Some(32 << 30), Some(2_000_398_934_000)));
     assert!(hardware.batteries.is_empty());
-    let port = &client.status().await?.ports[0];
+    let status = client.status().await?;
+    // PlatformGUID 419CA440943AC455A192A4409CD22E55, its first three fields swapped as SMBIOS does.
+    assert_eq!([&*status.system_id, &*hardware.system.id], ["40a49c41-3a94-55c4-a192-a4409cd22e55"; 2]);
+    let port = &status.ports[0];
     assert_eq!(port.ipv4.subnet_mask, "255.255.192.0");
     assert!(port.ipv6.is_none(), "IPv6 is off");
     for times in [
@@ -190,14 +188,14 @@ async fn changes_the_settings() -> Result<()> {
     sent();
 
     let access = RemoteAccess { sol: false, consent: Consent::All, ..settings.remote_access };
-    client.set_remote_access(&access).await?;
+    client.change(Change::RemoteAccess(access)).await?;
     let changes = sent();
     assert_eq!(changes[0].get("RequestedState"), Some("32769"));
     assert_eq!((&*changes[1].class, changes[1].get("OptInRequired")), ("IPS_OptInService", Some("4294967295")));
     assert_eq!(changes.len(), 2, "KVM and the listener stay on");
 
     let general = General { name: "renamed.example.com".into(), respond_to_ping: false, ..settings.general };
-    client.set_general(&general).await?;
+    client.change(Change::General(general)).await?;
     let put = sent().pop().context("no Put")?;
     let name = (put.get("HostName"), put.get("DomainName"));
     assert_eq!((name, put.get("PingResponseEnabled")), ((Some("renamed"), Some("example.com")), Some("false")));
@@ -205,33 +203,33 @@ async fn changes_the_settings() -> Result<()> {
 
     let active: Vec<_> = settings.power_policies.iter().filter(|policy| policy.active).collect();
     assert_eq!((&*active[0].id, &*active[0].description), ("SCHEME 1", "ON in S0, ME Wake in S3, S4-5 (AC only)"));
-    client.set_power_policy("SCHEME 0").await?;
+    client.change(Change::PowerPolicy("SCHEME 0".into())).await?;
     let request = amt.requests.lock().unwrap().pop().context("no request")?;
     assert!(request.contains(r#"Name="InstanceID">SCHEME 0<"#), "on the scheme: {request}");
 
     // Network: what isn't an address never goes out, a manual address names the port, DHCP takes the addresses out.
     let typo = Ipv4 { address: "192.0.2.700".into(), ..client.settings().await?.network.ipv4 };
     sent();
-    assert!(matches!(client.set_ipv4(&typo).await, Err(Error::Invalid(_))));
+    assert!(matches!(client.change(Change::Ipv4(typo)).await, Err(Error::Invalid(_))));
     let typo = Ipv6Settings { address: "2001:db8::g".into(), ..client.settings().await?.network.ipv6 };
     sent();
-    assert!(matches!(client.set_ipv6(&typo).await, Err(Error::Invalid(_))));
+    assert!(matches!(client.change(Change::Ipv6(typo)).await, Err(Error::Invalid(_))));
     assert!(amt.requests.lock().unwrap().is_empty(), "sent");
     let ipv4 = Ipv4 { configuration: Configuration::Manual, address: "192.0.2.7".into(), ..settings.network.ipv4 };
-    client.set_ipv4(&ipv4).await?;
+    client.change(Change::Ipv4(ipv4)).await?;
     let request = amt.requests.lock().unwrap().pop().context("no Put")?;
     assert!(request.contains(r#"Name="InstanceID">Intel(r) AMT Ethernet Port Settings 0<"#), "{request}");
     let put = parse_instance(&request)?;
     assert_eq!((put.get("DHCPEnabled"), put.get("IPAddress")), (Some("false"), Some("192.0.2.7")));
     let available = Availability { asleep: true, ..settings.network.available };
-    client.set_availability(&available).await?;
+    client.change(Change::Availability(available)).await?;
     let put = sent().pop().context("no Put")?;
     assert_eq!((put.all("LinkPolicy").collect::<Vec<_>>(), put.get("IPAddress")), (vec!["1", "14", "16"], None));
 
     // IPv6 is off on the MS-02: turning it on links it again, with the port and its settings as keys.
     assert_eq!(settings.network.ipv6.configuration, Ipv6Configuration::Off);
     let ipv6 = Ipv6Settings { configuration: Ipv6Configuration::Automatic, ..settings.network.ipv6 };
-    client.set_ipv6(&ipv6).await?;
+    client.change(Change::Ipv6(ipv6)).await?;
     let request = amt.requests.lock().unwrap().pop().context("no Put")?;
     assert!(request.contains(">Intel(r) AMT Ethernet Port 0<") && request.contains(">Intel(r) IPS IPv6 Settings 0<"));
     assert_eq!(parse_instance(&request)?.get("IsCurrent"), Some("1"), "{request}");
@@ -241,22 +239,26 @@ async fn changes_the_settings() -> Result<()> {
     let own = &settings.certificates[0];
     assert!(own.read_only && own.in_use && own.name == "Intel® AMT self-signed certificate", "{own:?}");
     assert!(settings.tls.iter().all(|tls| tls.enabled && !tls.mutual) && settings.tls[1].local);
-    client.add_certificate(b"-----BEGIN CERTIFICATE-----\nMIIB\n-----END CERTIFICATE-----\n", true).await?;
+    let file = tempfile::NamedTempFile::new()?;
+    std::fs::write(&file, "-----BEGIN CERTIFICATE-----\nMIIB\n-----END CERTIFICATE-----\n")?;
+    client.change(Change::AddCertificate { path: file.path().into(), trusted_root: true }).await?;
     assert_eq!(sent().pop().context("no add")?.get("CertificateBlob"), Some("MIIB"));
-    client.delete_certificate("Intel(r) AMT Certificate: Handle: 1").await?;
+    let gone = Change::AddCertificate { path: file.path().with_extension("gone"), trusted_root: true };
+    assert!(matches!(client.change(gone).await, Err(Error::Invalid(_))));
+    client.change(Change::DeleteCertificate("Intel(r) AMT Certificate: Handle: 1".into())).await?;
     let request = amt.requests.lock().unwrap().pop().context("no Delete")?;
     assert!(request.contains("transfer/Delete") && request.contains(">Intel(r) AMT Certificate: Handle: 1<"));
 
     let general = General { dns_update: DnsUpdate::Amt, ..client.settings().await?.general };
-    client.set_general(&general).await?;
+    client.change(Change::General(general)).await?;
     let put = sent().pop().context("no Put")?;
     assert_eq!((put.get("DDNSUpdateEnabled"), put.get("DDNSUpdateByDHCPServerEnabled")), (Some("true"), Some("false")));
 
     let alarm = Alarm { name: "Backups".into(), at: 1_800_000_000, every_minutes: 1440, forget: false };
-    client.add_alarm(&alarm).await?;
+    client.change(Change::AddAlarm(alarm)).await?;
     let request = amt.requests.lock().unwrap().pop().context("no alarm")?;
     assert!(request.contains(">2027-01-15T08:00:00Z<") && request.contains(">P1DT0H0M<"), "{request}");
-    client.delete_alarm("Backups").await?;
+    client.change(Change::DeleteAlarm("Backups".into())).await?;
     assert!(amt.requests.lock().unwrap().pop().context("no Delete")?.contains(r#"Name="InstanceID">Backups<"#));
 
     // The MS-02 was recorded headless, so with no screen active, and shows the first.
@@ -265,7 +267,7 @@ async fn changes_the_settings() -> Result<()> {
     client.show_screen(1).await?;
     assert_eq!(sent().pop().context("no Put")?.get("DefaultScreen"), Some("1"));
 
-    client.set_clock().await?;
+    client.change(Change::Clock).await?;
     let set = sent().pop().context("no time")?;
     assert_eq!((&*set.class, set.get("Ta0")), ("SetHighAccuracyTimeSynch_INPUT", Some("1792388976")));
     Ok(())
@@ -277,10 +279,22 @@ async fn opens_redirection_sessions_with_digest() -> Result<()> {
     Transcript(vec![received(b"hello")]).save(&fixture.path().join("sol.transcript"))?;
     let amt = start(fixture.path()).await;
 
-    let mut sol = Redirection::open(&target(&amt, PASSWORD), None, Session::Sol).await?;
+    let mut sol = Redirection::open(&amt.target(PASSWORD), None, Session::Sol).await?;
     assert_eq!(sol.read_exact(5).await?, b"hello");
-    let refused = Redirection::open(&target(&amt, "wrong"), None, Session::Sol).await;
+    let refused = Redirection::open(&amt.target("wrong"), None, Session::Sol).await;
     assert!(matches!(refused, Err(Error::Unauthorized)));
+    Ok(())
+}
+
+#[tokio::test]
+async fn reaches_an_ipv6_address_with_or_without_brackets() -> Result<()> {
+    let amt = Amt::start("[::1]:0", "[::1]:0", &mock::fixture("ms-02")).await;
+
+    for host in ["::1", "[::1]"] {
+        let target = Target { host: host.into(), ..amt.target(PASSWORD) };
+        Client::new(&target, None)?.info().await.context(host)?;
+        Redirection::open(&target, None, Session::Sol).await.context(host)?;
+    }
     Ok(())
 }
 

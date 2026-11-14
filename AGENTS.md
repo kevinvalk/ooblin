@@ -30,8 +30,8 @@ We check our own work in the running app against the mock, every command with a 
 (`perl -e 'alarm 120; exec @ARGV' <command>`): a hang costs the user far more than a retry.
 
 1. `cargo verify` builds the debug app (hidden window, MCP bridge on localhost, its own identifier so its own devices
-   and keychain, never the user's, and no dialogs: it picks the file `OOBLIN_PICK` names), `cargo build -p mock`
-   the mock.
+   and keychain, never the user's, and no dialogs: it picks the file `OOBLIN_PICK` names and saves to `OOBLIN_SAVE`),
+   `cargo build -p mock` the mock.
 2. Run `target/debug/mock run x10` (a BMC on 16443, its IPMI on UDP 623, so first), `target/debug/mock run ms-02`
    (`go-wsman-messages` for Intel's samples) and `TAURI_MCP_NO_FOREGROUND=1 target/debug/ooblin 127.0.0.1 --password
    'P@ssw0rd'` as background tasks, the binaries themselves so stopping a task stops it. The variable keeps screenshots

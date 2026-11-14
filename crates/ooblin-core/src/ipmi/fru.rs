@@ -120,7 +120,7 @@ fn changes(image: &[u8], fru: &Fru) -> Result<Vec<Write>> {
     let mut changes = vec![];
     for (((name, _), area), wanted) in AREAS.iter().zip(&areas).zip(wanted) {
         let Some((fixed, values)) = wanted else { continue };
-        let area = area.as_ref().ok_or_else(|| Error::Invalid(format!("this FRU has no {name} area")))?;
+        let area = area.as_ref().ok_or_else(|| Error::Invalid(format!("This FRU has no {name} area.")))?;
         if let Some(bytes) = area.rebuild(name, &fixed, &values)? {
             changes.push(Write { name, at: area.at, was: area.room[..bytes.len()].to_vec(), bytes });
         }
@@ -143,7 +143,7 @@ struct Area {
 
 impl Area {
     fn parse(image: &[u8], name: &str, at: usize, fixed: usize, limit: usize) -> Result<Self> {
-        let damaged = || Error::Invalid(format!("the FRU's {name} area is damaged"));
+        let damaged = || Error::Invalid(format!("The FRU's {name} area is damaged."));
         let len = *image.get(at + 1).ok_or_else(damaged)? as usize * 8;
         let bytes = image.get(at..at + len).ok_or_else(damaged)?.to_vec();
         let mut fields = vec![];
@@ -177,10 +177,10 @@ impl Area {
             return Ok(None);
         }
         if self.overlaps {
-            return Err(Error::Invalid(format!("the FRU's {name} area overlaps another, so we leave it alone")));
+            return Err(Error::Invalid(format!("The FRU's {name} area overlaps another, so we leave it alone.")));
         }
         if sum(&self.bytes) != 0 {
-            return Err(Error::Invalid(format!("the FRU's {name} area has a bad checksum, so we leave it alone")));
+            return Err(Error::Invalid(format!("The FRU's {name} area has a bad checksum, so we leave it alone.")));
         }
         let mut fields = self.fields.clone();
         if fields.len() < values.len() {
@@ -197,7 +197,7 @@ impl Area {
             let over = bytes.len() + 1 - room;
             let s = if over == 1 { "" } else { "s" };
             return Err(Error::Invalid(format!(
-                "that doesn't fit the FRU's {name} area, it's {over} byte{s} too long"
+                "That doesn't fit the FRU's {name} area, it's {over} byte{s} too long."
             )));
         }
         bytes[1] = (len / 8) as u8;
@@ -208,8 +208,12 @@ impl Area {
 }
 
 fn areas(image: &[u8]) -> Result<[Option<Area>; 3]> {
+    if image.is_empty() {
+        return Ok([None, None, None]);
+    }
     let header = image.get(..8).filter(|h| h[0] == 1 && sum(h) == 0);
-    let header = header.ok_or_else(|| Error::Invalid("the FRU's header is damaged or of an unknown version".into()))?;
+    let header =
+        header.ok_or_else(|| Error::Invalid("The FRU's header is damaged or of an unknown version.".into()))?;
     let area = |i: usize| {
         let (name, fixed) = AREAS[i];
         let at = header[2 + i] as usize * 8;
@@ -242,18 +246,18 @@ fn decode(field: &[u8]) -> String {
 
 fn encode(value: &str) -> Result<Vec<u8>> {
     if !value.bytes().all(|b| (0x20..0x7F).contains(&b)) {
-        return Err(Error::Invalid(format!("a FRU holds only printable ASCII, not \"{value}\"")));
+        return Err(Error::Invalid(format!("A FRU holds only printable ASCII, not \"{value}\".")));
     }
     match value.as_bytes() {
         [] => Ok(vec![0xC0]),
         // 0xC1 ends the fields, so a single character can only be 6-bit ASCII.
         &[c @ 0x20..0x60] => Ok(vec![0x81, c - 0x20]),
         [_] => Err(Error::Invalid(format!(
-            "a FRU can't hold the single character \"{value}\", only a capital, digit or sign"
+            "A FRU can't hold the single character \"{value}\", only a capital, digit or sign."
         ))),
         bytes if bytes.len() <= 63 => Ok([&[0xC0 | bytes.len() as u8], bytes].concat()),
         bytes => {
-            Err(Error::Invalid(format!("a FRU field holds at most 63 characters, \"{value}\" has {}", bytes.len())))
+            Err(Error::Invalid(format!("A FRU field holds at most 63 characters, \"{value}\" has {}.", bytes.len())))
         }
     }
 }
@@ -262,18 +266,22 @@ fn minutes(manufactured: Option<u32>) -> Result<Vec<u8>> {
     let Some(at) = manufactured else { return Ok(vec![0; 3]) };
     let minutes = at.saturating_sub(EPOCH) / 60;
     if !(1..1 << 24).contains(&minutes) {
-        return Err(Error::Invalid("a FRU's board date can only be from 1996 through 2027".into()));
+        return Err(Error::Invalid("A FRU's board date can only be from 1996 through 2027.".into()));
     }
     Ok(minutes.to_le_bytes()[..3].to_vec())
 }
 
 async fn image(session: &Session, id: u8) -> Result<Vec<u8>> {
-    let info = session.request(STORAGE, 0x10, &[id]).await?;
+    let info = match session.request(STORAGE, 0x10, &[id]).await {
+        // No such FRU device, "not present" to ipmitool: it has no areas.
+        Err(Error::Refused(0xCB | 0xCC)) => return Ok(Vec::new()),
+        info => info?,
+    };
     let &[low, high, access, ..] = &info[..] else {
         return Err(Error::Protocol("the FRU inventory info is too short".into()));
     };
     if access & 1 != 0 {
-        return Err(Error::Invalid("this FRU is addressed in words, which we don't support".into()));
+        return Err(Error::Invalid("This FRU is addressed in words, which we don't support.".into()));
     }
     read_range(session, id, 0, u16::from_le_bytes([low, high]).into()).await
 }
@@ -316,7 +324,7 @@ async fn write_range(session: &Session, id: u8, name: &str, at: usize, bytes: &[
             }
             Err(Error::Refused(0x80)) => {
                 let partly = if done > 0 { ", after changing part of it" } else { "" };
-                return Err(Error::Invalid(format!("the BMC write-protects the FRU's {name} area{partly}")));
+                return Err(Error::Invalid(format!("The BMC write-protects the FRU's {name} area{partly}.")));
             }
             Err(e) => return Err(e),
         }

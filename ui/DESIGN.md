@@ -57,10 +57,10 @@ sidebar's device names and the footer included. MAC addresses are written `12:07
   they don't reach into the section title stuck above it, which would cover them.
 - Icons are 16px Lucide icons, icon-only buttons are `btn-icon` and have a `title`.
 - Explanations go in a native `title` tooltip, not in the layout.
-- Settings that can change are a `Form` (`src/device/Form.svelte`, both flavors') of `label` and field rows
-  (checkboxes, `.field` inputs and selects), the settings being the fields' defaults. A switch or choice of its own saves as it changes. Fields that go
-  together (a name, an address) save together, from a ✓ and ✕ at the right of their card title, there all along so
-  it's clear what saves this way and enabled once something changed. Enter saves and Escape cancels. Either way the
-  footer says how it went, and the form then shows what the device took.
+- Settings that can change are a `Form` (`src/device/Form.svelte`, every flavor's) of `label` and field rows
+  (checkboxes, `.field` inputs and selects), the settings being the fields' defaults. A switch or choice of its own
+  saves as it changes. Fields that go together (a name, an address) save together, from a ✓ and ✕ at the right of their
+  card title, there all along so it's clear what saves this way and enabled once something changed. Enter saves and
+  Escape cancels. Either way the footer says how it went, and the form then shows what the device took.
 - Text fields for names and addresses don't capitalize or spell check (`autocapitalize="off" spellcheck="false"`).
 - Anything that can lose work asks first, in a `<dialog class="dialog">`, as do small forms (scheduling a wake-up).

@@ -22,7 +22,7 @@ use serde_json::{Value, json};
 use tokio::sync::OnceCell;
 use ts_rs::TS;
 
-use crate::ipmi::{self, Fru, Network, PowerRestore, SolSettings};
+use crate::ipmi::{self, Fru, Network, PowerRestore, SolSettings, sel};
 use crate::mac;
 use crate::{
     Bios, Configuration, Consent, Disk, Error, Event, Flavor, Hardware, Info, Ipv4, Ipv6, Module, Motherboard, Panel,
@@ -35,6 +35,9 @@ pub struct Client {
     ipmi: ipmi::Client,
     /// What changes only with the BMC's firmware or the server's hardware, either of which ends our connection.
     facts: OnceCell<Facts>,
+    /// Its firmware's version as IPMI says it, which changes no more than `facts` do, kept apart because a login reads
+    /// it and not them.
+    firmware: OnceCell<String>,
 }
 
 /// What the server and its BMC are: the day its firmware (in `info`) was built, Redfish's version, the BIOS's and the
@@ -63,9 +66,9 @@ pub struct Lan {
     pub mac: String,
 }
 
-/// How the BMC is set up: its network, what it serves on which port, how it runs the fans and our mouse, where it gets the time and
-/// sends its log, and the server's power restore policy, serial console and FRU, `None` where the BMC doesn't say. An
-/// empty mode is one this BMC doesn't have.
+/// How the BMC is set up: its network, what it serves on which port, how it runs the fans and our mouse, where it gets
+/// the time and sends its log, and the server's power restore policy, serial console and FRU, `None` where the BMC
+/// doesn't say. An empty mode is one this BMC doesn't have.
 #[derive(Debug, Serialize, TS)]
 #[ts(export, export_to = "core.ts")]
 pub struct BmcSettings {
@@ -141,7 +144,12 @@ pub enum Change {
 impl Client {
     /// Connects lazily, as `amt::Client::new` does.
     pub fn new(target: &Target, pin: Option<String>) -> Result<Self> {
-        Ok(Self { connection: Connection::new(target, pin)?, ipmi: ipmi::Client::new(target), facts: OnceCell::new() })
+        Ok(Self {
+            connection: Connection::new(target, pin)?,
+            ipmi: ipmi::Client::new(target),
+            facts: OnceCell::new(),
+            firmware: OnceCell::new(),
+        })
     }
 
     /// Refuses a Redfish service that isn't a Supermicro BMC.
@@ -154,8 +162,9 @@ impl Client {
     pub async fn status(&mut self) -> Result<BmcStatus> {
         let system = self.get::<ComputerSystem>("/redfish/v1/Systems/1");
         let facts = self.facts.get_or_try_init(|| self.read_facts());
-        let ((info, interface), system, facts) = tokio::try_join!(self.manager(), system, facts)?;
-        let facts = facts.clone();
+        // Not `try_join!`, which would drop `dashboard` between its web login and logout.
+        let (manager, system, facts) = tokio::join!(self.manager(), system, facts);
+        let ((info, interface), system, facts) = (manager?, system?, facts?.clone());
         Ok(BmcStatus {
             info,
             power: system.state(),
@@ -171,7 +180,7 @@ impl Client {
 
     /// The identify light over IPMI, which every BMC has, the POST code from Redfish.
     pub async fn panel(&mut self) -> Result<Panel> {
-        let snooping = self.get::<Snooping>("/redfish/v1/Managers/1/Snooping");
+        let snooping = self.optional::<Snooping>("/redfish/v1/Managers/1/Snooping");
         let (snooping, panel) = tokio::try_join!(snooping, self.ipmi.panel())?;
         Ok(Panel { post_code: u8::from_str_radix(&snooping.PostCode, 16).ok(), ..panel })
     }
@@ -214,12 +223,15 @@ impl Client {
         self.connection.post("/redfish/v1/Systems/1/Actions/ComputerSystem.Reset", &json!({"ResetType": reset})).await
     }
 
+    /// The system alone first, so a wrong password is tried once.
     pub async fn hardware(&mut self) -> Result<Hardware> {
         let system: ComputerSystem = self.get("/redfish/v1/Systems/1").await?;
-        let chassis: Chassis = self.get("/redfish/v1/Chassis/1").await?;
-        let processors: Vec<Cpu> = self.members("/redfish/v1/Systems/1/Processors").await?;
-        let memory: Vec<Dimm> = self.members("/redfish/v1/Systems/1/Memory").await?;
-        let storage: Vec<Storage> = self.members("/redfish/v1/Systems/1/SimpleStorage").await?;
+        let (chassis, processors, memory, storage) = tokio::try_join!(
+            self.get::<Chassis>("/redfish/v1/Chassis/1"),
+            self.members::<Cpu>("/redfish/v1/Systems/1/Processors"),
+            self.members::<Dimm>("/redfish/v1/Systems/1/Memory"),
+            self.members::<Storage>("/redfish/v1/Systems/1/SimpleStorage"),
+        )?;
         // The X10 says a serial number it doesn't have as spaces.
         Ok(Hardware {
             system: System {
@@ -280,23 +292,18 @@ impl Client {
         })
     }
 
-    /// Newest first. The X10 says how bad an event is only in its raw IPMI data: a threshold crossed is a warning
-    /// while non-critical (offsets 0, 1, 6, 7), else critical.
+    /// Newest first. The X10 says how bad an event is only in its raw IPMI data, which we rate as `ipmi`'s SEL.
     pub async fn event_log(&mut self) -> Result<Vec<Event>> {
         let log: Collection<Entry> = self.get("/redfish/v1/Systems/1/LogServices/Log1/Entries").await?;
         let byte = |hex: &str| u8::from_str_radix(hex.trim_start_matches("0x"), 16).unwrap_or_default();
         let events = log.Members.into_iter().rev().map(|entry| {
             let raw = &entry.Oem.Supermicro.RawEventData;
-            let threshold = entry.EntryCode != "Deassert" && byte(&raw.EventDirAndType) & 0x7F == 1;
+            let state = sel::state(byte(&raw.SensorType), byte(&raw.EventDirAndType), byte(&raw.EventData1));
             Event {
                 time: entry.Created.parse::<jiff::Timestamp>().map_or(0, |time| time.as_second() as u32),
                 source: if entry.SensorType.is_empty() { entry.OemSensorType } else { entry.SensorType },
                 description: entry.Message,
-                severity: match byte(&raw.EventData1) & 0x0F {
-                    _ if !threshold => Severity::Info,
-                    0 | 1 | 6 | 7 => Severity::Warning,
-                    _ => Severity::Critical,
-                },
+                severity: state.map_or(Severity::Info, |(_, severity)| severity),
             }
         });
         Ok(events.collect())
@@ -312,15 +319,13 @@ impl Client {
     pub async fn bmc_settings(&mut self) -> Result<BmcSettings> {
         // A BMC with IPMI turned off has none of these.
         let ipmi = async {
-            match self.ipmi.settings().await {
-                Ok(settings) => (settings.power_restore, settings.sol, settings.fru),
-                Err(error) => {
-                    log::warn!("The BMC's IPMI didn't answer: {error}");
-                    (None, None, None)
-                }
-            }
+            self.ipmi
+                .server_settings()
+                .await
+                .inspect_err(|error| log::warn!("The BMC's IPMI didn't answer: {error}"))
+                .unwrap_or_default()
         };
-        let (interface, protocols, ntp, syslog, fan_mode, mouse_mode, (power_restore, sol, fru)) = tokio::join!(
+        let (interface, protocols, ntp, syslog, fan_mode, mouse_mode, ipmi) = tokio::join!(
             self.get::<EthernetInterface>("/redfish/v1/Managers/1/EthernetInterfaces/1"),
             self.get::<Value>("/redfish/v1/Managers/1/NetworkProtocol"),
             self.optional::<NtpResource>("/redfish/v1/Managers/1/NTP"),
@@ -357,9 +362,9 @@ impl Client {
                 server: syslog.SyslogServerIP,
                 port: syslog.SyslogPortNumber,
             },
-            power_restore,
-            sol,
-            fru,
+            power_restore: ipmi.power_restore,
+            sol: ipmi.sol,
+            fru: ipmi.fru,
         })
     }
 
@@ -370,7 +375,11 @@ impl Client {
             Change::FanMode(fan) => self.connection.patch("/redfish/v1/Managers/1/FanMode", &mode(fan)).await,
             Change::MouseMode(mouse) => self.connection.patch("/redfish/v1/Managers/1/MouseMode", &mode(mouse)).await,
             Change::Ntp(ntp) => {
-                let ntp = json!({"NTPEnable": ntp.enabled, "PrimaryNTPServer": ntp.primary, "SecondaryNTPServer": ntp.secondary});
+                let ntp = json!({
+                    "NTPEnable": ntp.enabled,
+                    "PrimaryNTPServer": ntp.primary,
+                    "SecondaryNTPServer": ntp.secondary,
+                });
                 self.connection.patch("/redfish/v1/Managers/1/NTP", &ntp).await
             }
             Change::Syslog(log) => {
@@ -391,9 +400,9 @@ impl Client {
         format!("{}/", self.connection.url())
     }
 
-    /// What a login says, and the BMC's own port for `status`.
-    /// Its firmware's version as IPMI says it (`4.07`), as an IPMI login does: Redfish says `4.7`. The manager alone
-    /// first, so a wrong password is tried once: the X10 locks the account after five.
+    /// What a login says, and the BMC's own port for `status`: its firmware's version as IPMI says it (`4.07`), as an
+    /// IPMI login does, where Redfish says `4.7`. The manager alone first, so a wrong password is tried once: the X10
+    /// locks the account after five.
     async fn manager(&self) -> Result<(Info, EthernetInterface)> {
         let manager: Manager = self.get("/redfish/v1/Managers/1").await?;
         if manager.Oem.Supermicro.is_none() {
@@ -401,13 +410,14 @@ impl Client {
         }
         let interface = self.get::<EthernetInterface>("/redfish/v1/Managers/1/EthernetInterfaces/1");
         let protocols = self.get::<Value>("/redfish/v1/Managers/1/NetworkProtocol");
-        let (interface, protocols, firmware) = tokio::join!(interface, protocols, self.ipmi.firmware());
+        let firmware = self.firmware.get_or_try_init(|| self.ipmi.firmware());
+        let (interface, protocols, firmware) = tokio::join!(interface, protocols, firmware);
         let (interface, protocols) = (interface?, protocols?);
         let info = Info {
             flavor: Flavor::Supermicro,
             name: if interface.FQDN.is_empty() { interface.HostName.clone() } else { interface.FQDN.clone() },
-            version: firmware.unwrap_or(manager.FirmwareVersion),
-            build: None,
+            version: firmware.ok().cloned().unwrap_or(manager.FirmwareVersion),
+            build: String::new(),
             control_mode: String::new(),
             fingerprint: self.connection.fingerprint().expect("a successful call has pinned a certificate"),
             remote_access: RemoteAccess {
@@ -422,12 +432,12 @@ impl Client {
     }
 
     /// Turns services on or off and moves their ports as the BMC's own port page does: in one change of all it has,
-    /// HTTPS (which we speak) and those Redfish doesn't show (WS-Man, HTTP's redirect to HTTPS) as they are. IPMI isn't
-    /// on that page. Turning the KVM off turns virtual media off with it, as the page does, and no two may share a port.
+    /// HTTPS (which we speak) and those Redfish doesn't show (WS-Man, HTTP's redirect to HTTPS) as they are. IPMI
+    /// isn't on that page. Turning the KVM off turns virtual media off with it, as the page does, and no two may share
+    /// a port.
     async fn set_services(&self, services: &[Service]) -> Result<()> {
-        let web = Web::login(&self.connection).await?;
-        let changed = async {
-            let [ports] = <[String; 1]>::try_from(web.read(&["GETPORTSINFO.XML"]).await?).unwrap();
+        Web::with(&self.connection, async |web| {
+            let [ports] = web.read(["GETPORTSINFO.XML"]).await?;
             let mut fields = attributes(&ports, "PORT_INFO")?;
             for service in services {
                 let Some((_, key)) = SERVICES.iter().find(|(name, _)| *name == service.name) else { continue };
@@ -458,10 +468,8 @@ impl Client {
                 }
                 None => Ok(()),
             }
-        };
-        let changed = changed.await;
-        web.logout().await;
-        changed
+        })
+        .await
     }
 
     /// Sets the BMC's network as its own network page does: in one change of all it has, what we don't show (IPv6, its
@@ -469,17 +477,11 @@ impl Client {
     /// may answer us no more.
     async fn set_network(&self, network: &Network) -> Result<()> {
         network.check()?;
-        let web = Web::login(&self.connection).await?;
-        let changed = async {
-            let [config, ipv6] =
-                <[String; 2]>::try_from(web.read(&["CONFIG_INFO.XML", "CONFIG_IPV6.XML"]).await?).unwrap();
-            let value = |xml: &str, element: &str, name: &str| -> Result<String> {
-                let attributes = attributes(xml, element)?;
-                let found = attributes.into_iter().find(|(attribute, _)| attribute == name);
-                Ok(found.map(|(_, value)| value.trim().to_owned()).unwrap_or_default())
-            };
+        Web::with(&self.connection, async |web| {
+            let [config, ipv6] = web.read(["CONFIG_INFO.XML", "CONFIG_IPV6.XML"]).await?;
             let on = |on: bool| if on { "on" } else { "off" }.to_owned();
-            let rmcp = u16::from_str_radix(&value(&config, "LAN", "RMCP_PORT")?, 16).unwrap_or(623);
+            let dhcpv6 = if attribute(&ipv6, "DHCPV6", "MODE")? == "1" { "stateful" } else { "stateless" };
+            let rmcp = u16::from_str_radix(&attribute(&config, "LAN", "RMCP_PORT")?, 16).unwrap_or(623);
             let vlan = network.vlan.unwrap_or(0);
             let fields = [
                 ("bmcip", network.address.clone()),
@@ -491,21 +493,19 @@ impl Client {
                 ("rmcpport", rmcp.to_string()),
                 // No DNS server is all zeros to its page.
                 ("dns_server", network.dns.clone().filter(|dns| !dns.is_empty()).unwrap_or("000.000.000.000".into())),
-                ("bmcipv6_dns_server", value(&ipv6, "DNS_SERVER", "IP")?),
+                ("bmcipv6_dns_server", attribute(&ipv6, "DNS_SERVER", "IP")?),
                 ("bmcipv6_addr", String::new()),
                 ("bmcipv6_opt", "add".into()),
-                ("bmcipv6_autoconf", on(value(&ipv6, "AUTOCONF", "VALUE")? == "1")),
-                ("dhcpv6_mode", if value(&ipv6, "DHCPV6", "MODE")? == "1" { "stateful" } else { "stateless" }.into()),
-                ("lan_interface", value(&config, "LAN_IF", "INTERFACE")?),
-                ("link_conf", value(&config, "LINK_INFO", "MII_LINK_CONF")?),
+                ("bmcipv6_autoconf", on(attribute(&ipv6, "AUTOCONF", "VALUE")? == "1")),
+                ("dhcpv6_mode", dhcpv6.into()),
+                ("lan_interface", attribute(&config, "LAN_IF", "INTERFACE")?),
+                ("link_conf", attribute(&config, "LINK_INFO", "MII_LINK_CONF")?),
                 ("hostname", network.hostname.clone().unwrap_or_default()),
             ];
             let fields: Vec<_> = fields.into_iter().map(|(name, value)| (name.to_owned(), value)).collect();
             web.change("config_lan", &fields).await.map(drop)
-        };
-        let changed = changed.await;
-        web.logout().await;
-        changed
+        })
+        .await
     }
 
     /// The resource at `path`, or its default where this BMC doesn't have it: an OEM one, say.
@@ -537,22 +537,12 @@ impl Client {
     /// The day the firmware was built and the BIOS released, from the BMC's dashboard's CGI: a web login of its own,
     /// only for this.
     async fn dashboard(&self) -> Result<(String, String)> {
-        let web = Web::login(&self.connection).await?;
-        let read = web.read(&["GENERIC_INFO.XML", "SMBIOS_INFO.XML"]).await;
-        web.logout().await;
-        let [generic, smbios] = <[String; 2]>::try_from(read?).unwrap();
-        let attribute = |xml: &str, element: &str, name: &str| {
-            let xml = roxmltree::Document::parse(xml.trim_start()).ok()?;
-            let element = xml.descendants().find(|node| node.has_tag_name(element))?;
-            Some(element.attribute(name)?.trim().to_owned())
-        };
+        let [generic, smbios] =
+            Web::with(&self.connection, async |web| web.read(["GENERIC_INFO.XML", "SMBIOS_INFO.XML"]).await).await?;
         // A date as `05/29/2026`.
-        let date = |date: Option<String>| {
-            let date = date.unwrap_or_default();
-            match date.split('/').collect::<Vec<_>>()[..] {
-                [month, day, year] => format!("{year}-{month}-{day}"),
-                _ => String::new(),
-            }
+        let date = |date: Result<String>| match date.unwrap_or_default().split('/').collect::<Vec<_>>()[..] {
+            [month, day, year] => format!("{year}-{month}-{day}"),
+            _ => String::new(),
         };
         Ok((date(attribute(&generic, "GENERIC", "IPMIFW_BLDTIME")), date(attribute(&smbios, "BIOS", "REL_DATE"))))
     }
@@ -650,19 +640,18 @@ fn attributes(xml: &str, element: &str) -> Result<Vec<(String, String)>> {
     Ok(node.attributes().map(|attribute| (attribute.name().to_owned(), attribute.value().to_owned())).collect())
 }
 
+/// The attribute `name` of the element named `element` in the BMC's pages' XML `xml`, trimmed, empty where it has none.
+fn attribute(xml: &str, element: &str, name: &str) -> Result<String> {
+    let found = attributes(xml, element)?.into_iter().find(|(attribute, _)| attribute == name);
+    Ok(found.map(|(_, value)| value.trim().to_owned()).unwrap_or_default())
+}
+
 /// Sets the field `name` among `fields` to `value`.
 fn set(fields: &mut Vec<(String, String)>, name: &str, value: String) {
     match fields.iter_mut().find(|(field, _)| field == name) {
         Some((_, was)) => *was = value,
         None => fields.push((name.to_owned(), value)),
     }
-}
-
-#[derive(Default, Deserialize)]
-#[serde(default)]
-struct Vlan {
-    VLANEnable: bool,
-    VLANId: u16,
 }
 
 /// See `Client::read_facts`.
@@ -734,6 +723,13 @@ struct EthernetInterface {
     IPv6Addresses: Vec<Address>,
     IPv6DefaultGateway: String,
     NameServers: Vec<String>,
+}
+
+#[derive(Default, Deserialize)]
+#[serde(default)]
+struct Vlan {
+    VLANEnable: bool,
+    VLANId: u16,
 }
 
 #[derive(Clone, Default, Deserialize)]
@@ -860,6 +856,7 @@ struct Sel {
 #[derive(Default, Deserialize)]
 #[serde(default)]
 struct RawEventData {
+    SensorType: String,
     EventDirAndType: String,
     EventData1: String,
 }
@@ -876,7 +873,6 @@ struct Protocol {
 #[serde(default)]
 struct Condition {
     State: String,
-    Health: String,
 }
 
 #[derive(Default, Deserialize)]

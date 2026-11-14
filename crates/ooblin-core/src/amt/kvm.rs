@@ -12,7 +12,7 @@ use tokio::sync::Mutex;
 use ts_rs::TS;
 
 use super::Client;
-use crate::net::{Redirection, Session, Stream};
+use crate::net::{Redirection, Session, Stream, read_exact, write_all};
 use crate::{Error, GOODBYE, Input, Result};
 
 /// An open KVM session. The screen and what we send go separate ways, so typing never waits for the screen.
@@ -140,18 +140,16 @@ impl Kvm {
             // Until the whole screen anew is due, or a second. Reading a byte gives up nothing when it times out.
             let due = screen.changed.map(|last| (last + QUIET).min(screen.anew + BUSY));
             let wait = due.map_or(BUSY, |due| due.saturating_duration_since(Instant::now()).min(BUSY));
-            let mut kind = [0];
-            match tokio::time::timeout(wait, screen.reader.read(&mut kind)).await {
+            let kind = match tokio::time::timeout(wait, screen.reader.read_u8()).await {
                 Err(_) => {
                     if due.is_some_and(|due| due <= Instant::now()) {
                         self.request(&mut screen, true).await?;
                     }
                     return Ok(screen.size(frame));
                 }
-                Ok(Ok(0)) => return Err(Error::Transport("the device ended the KVM session".into())),
-                Ok(read) => read?,
+                Ok(kind) => kind?,
             };
-            match kind[0] {
+            match kind {
                 0 => break,
                 2 => {} // the Bell, AMT 19 rings it before its first update
                 1 => {
@@ -258,9 +256,7 @@ impl Kvm {
 
 impl Screen {
     async fn read(&mut self, len: usize) -> Result<Vec<u8>> {
-        let mut bytes = vec![0; len];
-        self.reader.read_exact(&mut bytes).await?;
-        Ok(bytes)
+        read_exact(&mut self.reader, len).await
     }
 
     /// One tile's worth of the zlib stream. A 64 by 64 tile inflates to at most 3 bytes a pixel (RLE in RGB565, runs
@@ -282,10 +278,8 @@ impl Screen {
 }
 
 impl Keyboard {
-    /// TLS may hold on to what we write until we flush.
     async fn send(&mut self, bytes: &[u8]) -> Result<()> {
-        self.writer.write_all(bytes).await?;
-        Ok(self.writer.flush().await?)
+        write_all(&mut self.writer, bytes).await
     }
 
     async fn input(&mut self, input: Input) -> Result<()> {

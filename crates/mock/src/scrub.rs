@@ -108,7 +108,7 @@ fn addresses(text: &str) -> String {
     found.into_iter().fold(text.to_owned(), |text, address| text.replace(address, &fake(address)))
 }
 
-fn fake(value: &str) -> String {
+pub(crate) fn fake(value: &str) -> String {
     let hash = Md5::digest(value);
     if value.parse::<Ipv4Addr>().is_ok() {
         return format!("192.0.2.{}", 1 + hash[0] % 254);

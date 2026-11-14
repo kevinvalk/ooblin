@@ -1,5 +1,8 @@
 # The X10's answers over IPMI, read-only: "NETFN CMD REQUEST -> RESPONSE" in hex, the response after its completion
-# code, or the code it refused with. Addresses scrubbed: the BMC's MAC and IPs are the Redfish fixture's.
+# code, or the code it refused with; "ping SEQUENCE -> PONG" its pong to a presence ping with that RMCP sequence number.
+# Addresses scrubbed: the BMC's MAC and IPs are the Redfish fixture's.
+ping 00 -> 0600ff06000011be40000010000011be000000008100000000000000
+ping ff -> 0600ff06000011be40000010000011be000000008100000000000000
 06 01  -> 2001040702bf7c2a006d0800000000
 06 37  -> 433030314d535ca11fa0cbd500000000
 06 38 8e04 -> 0196040345530000

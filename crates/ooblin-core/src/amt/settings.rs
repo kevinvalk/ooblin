@@ -1,5 +1,6 @@
 // Addresses only: `core` has no sockets, see tests/net_boundary.rs.
 use core::net::{Ipv4Addr, Ipv6Addr};
+use std::path::PathBuf;
 use std::str::FromStr;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -104,6 +105,28 @@ pub enum DnsUpdate {
     Amt,
 }
 
+/// A change to the settings, see `Client::change`.
+#[derive(Debug, Deserialize, TS)]
+#[ts(export, export_to = "core.ts")]
+pub enum Change {
+    RemoteAccess(RemoteAccess),
+    General(General),
+    PowerPolicy(String),
+    Ipv4(Ipv4),
+    Ipv6(Ipv6Settings),
+    Availability(Availability),
+    Recovery(Recovery),
+    Clock,
+    AddAlarm(Alarm),
+    DeleteAlarm(String),
+    /// The certificate in the file at `path`, see `Client::add_certificate`.
+    AddCertificate {
+        path: PathBuf,
+        trusted_root: bool,
+    },
+    DeleteCertificate(String),
+}
+
 impl Client {
     pub async fn settings(&mut self) -> Result<Settings> {
         let general = self.get("AMT_GeneralSettings").await?;
@@ -157,6 +180,28 @@ impl Client {
         })
     }
 
+    pub async fn change(&mut self, change: Change) -> Result<()> {
+        match change {
+            Change::RemoteAccess(access) => self.set_remote_access(&access).await,
+            Change::General(general) => self.set_general(&general).await,
+            Change::PowerPolicy(id) => self.set_power_policy(&id).await,
+            Change::Ipv4(ipv4) => self.set_ipv4(&ipv4).await,
+            Change::Ipv6(ipv6) => self.set_ipv6(&ipv6).await,
+            Change::Availability(available) => self.set_availability(&available).await,
+            Change::Recovery(recovery) => self.set_recovery(&recovery).await,
+            Change::Clock => self.set_clock().await,
+            Change::AddAlarm(alarm) => self.add_alarm(&alarm).await,
+            Change::DeleteAlarm(name) => self.delete_alarm(&name).await,
+            Change::AddCertificate { path, trusted_root } => {
+                // Not a bare `?`: a file that won't read isn't the device being unreachable.
+                let file = std::fs::read(path)
+                    .map_err(|error| Error::Invalid(format!("That certificate file won't read: {error}.")))?;
+                self.add_certificate(&file, trusted_root).await
+            }
+            Change::DeleteCertificate(id) => self.delete_certificate(&id).await,
+        }
+    }
+
     /// The wired port's settings, AMT's first.
     async fn wired_port(&mut self) -> Result<Instance> {
         let ports = self.enumerate("AMT_EthernetPortSettings").await?;
@@ -164,13 +209,13 @@ impl Client {
     }
 
     /// Only addresses: AMT takes whatever it's given, and one it can't use takes it off the network.
-    pub async fn set_ipv4(&mut self, wanted: &Ipv4) -> Result<()> {
+    async fn set_ipv4(&mut self, wanted: &Ipv4) -> Result<()> {
         let addresses =
             [&wanted.address, &wanted.subnet_mask, &wanted.gateway, &wanted.primary_dns, &wanted.secondary_dns];
         addresses.iter().try_for_each(|address| valid::<Ipv4Addr>(address, "IPv4"))?;
         if wanted.configuration == Configuration::Manual && (wanted.address.is_empty() || wanted.subnet_mask.is_empty())
         {
-            return Err(Error::Invalid("A manual configuration needs an address and a subnet mask".into()));
+            return Err(Error::Invalid("A manual configuration needs an address and a subnet mask.".into()));
         }
         let mut port = self.wired_port().await?;
         let configuration = wanted.configuration;
@@ -204,7 +249,7 @@ impl Client {
 
     /// Like MeshCommander: the addresses on the port's IPv6 settings, `::` for none, and IPv6 on or off on the link
     /// between them. Only addresses, see `set_ipv4`.
-    pub async fn set_ipv6(&mut self, wanted: &Ipv6Settings) -> Result<()> {
+    async fn set_ipv6(&mut self, wanted: &Ipv6Settings) -> Result<()> {
         let configuration = wanted.configuration;
         let addresses = [&wanted.address, &wanted.gateway, &wanted.primary_dns, &wanted.secondary_dns];
         addresses.iter().try_for_each(|address| valid::<Ipv6Addr>(address, "IPv6"))?;
@@ -243,7 +288,7 @@ impl Client {
         self.put_on("CIM_ElementSettingData", &keys, &changed).await
     }
 
-    pub async fn set_availability(&mut self, wanted: &Availability) -> Result<()> {
+    async fn set_availability(&mut self, wanted: &Availability) -> Result<()> {
         let mut port = self.wired_port().await?;
         let states = [wanted.on, wanted.asleep, wanted.on_battery, wanted.asleep_on_battery];
         let policies = Availability::POLICIES.into_iter().zip(states).filter_map(|(it, on)| on.then_some(it));
@@ -262,7 +307,7 @@ impl Client {
         self.put_on("AMT_EthernetPortSettings", &[("InstanceID", Key::Value(&id))], &port).await
     }
 
-    pub async fn set_general(&mut self, wanted: &General) -> Result<()> {
+    async fn set_general(&mut self, wanted: &General) -> Result<()> {
         let mut general = self.get("AMT_GeneralSettings").await?;
         // AMT keeps them apart, like MeshCommander we split at the first dot.
         let (host, domain) = wanted.name.split_once('.').unwrap_or((&wanted.name, ""));
@@ -277,13 +322,13 @@ impl Client {
     }
 
     /// Makes the power policy with this `id` the active one.
-    pub async fn set_power_policy(&mut self, id: &str) -> Result<()> {
+    async fn set_power_policy(&mut self, id: &str) -> Result<()> {
         self.invoke_on(id, &SetPowerScheme).await?;
         Ok(())
     }
 
     /// Sets the device's clock to ours, like MeshCommander: AMT wants the time it said last and when we heard it.
-    pub async fn set_clock(&mut self) -> Result<()> {
+    async fn set_clock(&mut self) -> Result<()> {
         let clock = self.query(&GetLowAccuracyTimeSynch).await?.parse("Ta0");
         let clock = clock.ok_or_else(|| Error::Protocol("the device didn't say its time".into()))?;
         self.invoke(&SetHighAccuracyTimeSynch { Ta0: clock, Tm1: now(), Tm2: now() }).await?;
@@ -295,7 +340,7 @@ impl Client {
 fn valid<T: FromStr>(address: &str, kind: &str) -> Result<()> {
     match address.is_empty() || address.parse::<T>().is_ok() {
         true => Ok(()),
-        false => Err(Error::Invalid(format!("{address} isn't an {kind} address"))),
+        false => Err(Error::Invalid(format!("{address} isn't an {kind} address."))),
     }
 }
 

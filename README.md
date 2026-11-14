@@ -50,17 +50,22 @@ every fixture, so whatever a device once told us keeps parsing. `mock run` also 
 your own, and `mock record <fixture> <host> --sol` records only the serial console, for as long as you like: make
 the device write to it (mount a disk image, say), then press Enter.
 
-A Supermicro BMC is recorded the same way: its Redfish (scrubbed, in DMTF's mockup layout under `redfish/`) and a short
-KVM session. `mock run x10` serves it on 127.0.0.1:16443, beside an AMT fixture: Redfish, the web login the KVM's
-token comes from and the KVM's WebSocket, where the recorded screen waits for the viewer to ask for each update, and
-its dashboard's CGI (`cgi/`). On UDP 623 it answers IPMI as a BMC does: logins, the chassis commands, and a serial
-console that greets with a login prompt and echoes what's typed.
+A Supermicro BMC is recorded the same way: its Redfish (scrubbed, in DMTF's mockup layout under `redfish/`), its IPMI
+(scrubbed, every answer our reads asked for in `ipmi.txt`) and a short KVM session; a BMC we know over IPMI alone, its
+IPMI. `mock run x10` serves it on 127.0.0.1:16443, beside an AMT fixture: Redfish, the web login the KVM's token comes
+from and the KVM's WebSocket, where the recorded screen waits for the viewer to ask for each update, and its dashboard's
+CGI (`cgi/`). On UDP 623 it answers IPMI as the recording does, and as a BMC does what it can't hold: logins, the
+chassis commands, and a serial console that greets with a login prompt and echoes what's typed.
 
 Fixtures are committed, so record a device that has nothing to hide. Serials, addresses and names are scrubbed, but the
 audit log keeps its user names and client addresses, and the KVM session keeps a screenshot of whatever is on screen.
 `fixtures/go-wsman-messages` is an untouched copy of Intel's sample responses from
 [go-wsman-messages](https://github.com/device-management-toolkit/go-wsman-messages) (`pkg/wsman/wsmantesting/responses`
-at `00402b9`, Apache-2.0), which the mock serves alongside.
+at `00402b9`, Apache-2.0), which the mock serves alongside. `fixtures/ipmi-sim` is what OpenIPMI's simulator, another
+IPMI 2.0 implementation, told ipmitool: `mock run ipmi-sim` serves a BMC we know over IPMI alone. `fixtures/openbmc` is
+OpenBMC, its CI's `obmc-phosphor-image-romulus.static.mtd` booted in `qemu-system-arm -M romulus-bmc -nographic -drive
+file=<it>,format=raw,if=mtd -net nic -net user,hostfwd=udp::623-:623` and recorded with `mock record openbmc 127.0.0.1
+--user root` (0penBmc).
 
 ## What it supports
 
@@ -114,12 +119,12 @@ and its network: host name, DHCP or its addresses, DNS server and VLAN, as its o
 ### Any BMC, over IPMI 2.0
 
 Whoever made it (Dell, HPE, Lenovo, ASRock Rack, Gigabyte, OpenBMC, a Supermicro without Redfish), over IPMI alone
-(RMCP+ on UDP 623, SHA-256 or SHA-1 with AES): the BMC's maker, firmware and network port, power with booting once to
-BIOS or PXE, the identify light, sensors from its SDR (every second), the event log in words, its FRU as hardware, the
-serial console (SOL), and settings: its network (DHCP or its addresses, and VLAN), what the server does when power comes
-back, the serial console's speed, the FRU's
-chassis, board and product fields (rewritten in place, checked by reading them back), and its users to read. Not: a
-screen (IPMI has none, and every vendor's KVM is its own) nor virtual media (likewise).
+(RMCP+ on UDP 623, SHA-256 or SHA-1 with AES), as checked against the X10, OpenBMC and OpenIPMI's simulator: the BMC's
+maker, firmware and network port, power with booting once to BIOS or PXE, the identify light, sensors from its SDR
+(every second), the event log in words, its FRU as hardware, the serial console (SOL), and settings: its network (DHCP
+or its addresses, and VLAN), what the server does when power comes back, the serial console's speed, the FRU's chassis,
+board and product fields (rewritten in place, checked by reading them back), and its users to read. Not: a screen (IPMI
+has none, and every vendor's KVM is its own) nor virtual media (likewise).
 
 Connecting tries Intel AMT, then a Supermicro's Redfish (asked without the password), then IPMI, whose login never
 sends it; the connect form's Kind picks one instead.

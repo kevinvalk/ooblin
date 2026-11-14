@@ -13,6 +13,7 @@ pub mod web;
 
 pub use discovery::{Found, RMCP_PORT, discover, nearby};
 pub use redirection::{REDIRECTION_PORT, Redirection, Session, decode_fields, encode_fields};
+pub(crate) use redirection::{read_exact, write_all};
 
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
@@ -49,7 +50,7 @@ impl Connection {
         let pin = Pin::new(pin);
         Ok(Self {
             http: http(&pin)?,
-            url: format!("https://{}:{}/wsman", target.host, target.wsman_port),
+            url: format!("https://{}:{}/wsman", target.authority(), target.wsman_port),
             user: target.user.clone(),
             password: target.password.clone(),
             challenge: None,
@@ -117,16 +118,20 @@ pub type Stream = TlsStream<TcpStream>;
 
 /// A TLS connection to `host`'s `port` that only takes the pinned certificate, for a protocol of its own.
 async fn tls(host: &str, port: u16, pin: &Arc<Pin>) -> Result<Stream> {
-    let tcp = tokio::time::timeout(Duration::from_secs(10), TcpStream::connect((host, port)))
-        .await
-        .map_err(|_| Error::Transport(format!("connecting to {host}:{port} timed out")))??;
-    // Our messages are small and each waits on an answer, Nagle's algorithm would hold every one of them back.
-    tcp.set_nodelay(true)?;
+    let host = host.trim_matches(['[', ']']);
     let name = ServerName::try_from(host.to_owned()).map_err(|error| Error::Transport(error.to_string()))?;
-    TlsConnector::from(Arc::new(pin.tls()))
-        .connect(name, tcp)
+    let connect = async {
+        let tcp = TcpStream::connect((host, port)).await?;
+        // Our messages are small and each waits on an answer, Nagle's algorithm would hold every one of them back.
+        tcp.set_nodelay(true)?;
+        TlsConnector::from(Arc::new(pin.tls()))
+            .connect(name, tcp)
+            .await
+            .map_err(|error| pin.mismatch().unwrap_or_else(|| error.into()))
+    };
+    tokio::time::timeout(Duration::from_secs(10), connect)
         .await
-        .map_err(|error| pin.mismatch().unwrap_or_else(|| error.into()))
+        .map_err(|_| Error::Transport(format!("connecting to {host}:{port} timed out")))?
 }
 
 /// reqwest's own message is just "error sending request for url (…)", the actual reason is the last of its causes. A

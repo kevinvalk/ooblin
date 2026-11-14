@@ -45,7 +45,7 @@ fn event(entry: &[u8], records: &[Record]) -> Event {
     let (event, deasserted, offset) = (direction & 0x7F, direction & 0x80 != 0, data[0] & 0x0F);
     let record = records.iter().find(|record| record.number() == number && record.owner() == entry[7]);
     let source = record.map_or_else(|| sensor_type_name(sensor_type), Record::name);
-    let Some((text, asserting, deasserting)) = meaning(sensor_type, event, offset) else {
+    let Some((text, severity)) = state(sensor_type, direction, data[0]) else {
         let oem = sensor_type >= 0xC0 || (0x70..0x80).contains(&event);
         let description = format!("{} event, data {}", if oem { "OEM" } else { "Unknown" }, hex(&entry[12..]));
         return Event { time: time(3), source, description, severity: Severity::Info };
@@ -77,7 +77,14 @@ fn event(entry: &[u8], records: &[Record]) -> Event {
         let unit = record.unit();
         description = format!("{description}, {} {comparison} {}", amount(reading, &unit), amount(threshold, &unit));
     }
-    Event { time: time(3), source, description, severity: if deasserted { deasserting } else { asserting } }
+    Event { time: time(3), source, description, severity }
+}
+
+/// What an event of a sensor of `sensor_type` says, by its event direction and type and its event data 1, and how bad
+/// it is.
+pub(crate) fn state(sensor_type: u8, direction: u8, data: u8) -> Option<(&'static str, Severity)> {
+    let (text, asserting, deasserting) = meaning(sensor_type, direction & 0x7F, data & 0x0F)?;
+    Some((text, if direction & 0x80 != 0 { deasserting } else { asserting }))
 }
 
 fn amount(value: f64, unit: &str) -> String {

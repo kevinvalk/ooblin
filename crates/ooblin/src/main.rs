@@ -12,19 +12,18 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use clap::Parser;
-use connections::{Change, Changed, Connected, Connections, Serving, Task};
+use connections::{Changed, Connected, Connections, Serving, Task};
 use hosts::Device;
-use ooblin_core::amt::{AuditRecord, Screens, Settings};
+use ooblin_core::amt::{AuditRecord, Change, Screens, Settings, Status};
 use ooblin_core::ipmi::{Change as IpmiChange, Fru, IpmiSettings, IpmiStatus};
 use ooblin_core::supermicro::{BmcSettings, BmcStatus, Change as BmcChange};
 use ooblin_core::{
-    Client, Error, Event, Flavor, Found, Hardware, Input, Media, Panel, Power, PowerAction, RMCP_PORT, Sensor, Status,
-    Target,
+    Client, Error, Event, Flavor, Found, Hardware, Input, Media, Panel, Power, PowerAction, RMCP_PORT, Sensor, Target,
 };
 use serde::Serialize;
 use tauri::async_runtime::Receiver;
 use tauri::ipc::{Channel, Response};
-use tauri::{AppHandle, Emitter, Manager, State, WebviewWindow};
+use tauri::{AppHandle, Emitter, Manager, RunEvent, State, WebviewWindow};
 use tauri_plugin_log::RotationStrategy;
 use tauri_plugin_opener::OpenerExt;
 use tauri_plugin_window_state::StateFlags;
@@ -73,7 +72,7 @@ fn devices(connections: State<'_, Connections>) -> Result<Vec<Device>, CommandEr
 }
 
 /// Without a `password`, with the one we have: from the command line or the OS credential store. `remember` keeps
-/// a typed one there.
+/// a typed one there, as does a device remembered already: the password that last worked replaces the one before.
 #[tauri::command]
 async fn connect(
     connections: State<'_, Connections>,
@@ -84,11 +83,13 @@ async fn connect(
     remember: bool,
     flavor: Option<Flavor>,
 ) -> Result<Connected, CommandError> {
-    let remember = remember && password.is_some();
+    let hosts = connections.hosts()?;
+    let remembered = hosts.device(&host).is_some_and(|device| device.remembered);
+    let remember = password.is_some() && (remember || remembered);
     let target = match (password, launch.login(&host)) {
         (Some(password), _) => Target::new(host, user, password),
         (None, Some(target)) => target,
-        (None, None) => connections.hosts()?.target(&host)?,
+        (None, None) => hosts.target(&host)?,
     };
     connections.connect(target, flavor, remember).await
 }
@@ -192,9 +193,8 @@ async fn ipmi_change(
     host: &str,
     change: IpmiChange,
 ) -> Result<Changed<IpmiSettings>, CommandError> {
-    let what = format!("{change:?}");
-    let make = async |client: &mut Client| client.ipmi()?.change(change).await;
-    connections.changed(host, what, make, async |client| client.ipmi()?.settings().await).await
+    let make = async |client: &mut Client, change| client.ipmi()?.change(change).await;
+    connections.change(host, change, make, async |client| client.ipmi()?.settings().await).await
 }
 
 /// Like `change`, for a BMC.
@@ -204,20 +204,32 @@ async fn bmc_change(
     host: &str,
     change: BmcChange,
 ) -> Result<Changed<BmcSettings>, CommandError> {
-    let what = format!("{change:?}");
-    let make = async |client: &mut Client| client.supermicro()?.change(change).await;
-    connections.changed(host, what, make, async |client| client.supermicro()?.bmc_settings().await).await
+    let make = async |client: &mut Client, change| client.supermicro()?.change(change).await;
+    connections.change(host, change, make, async |client| client.supermicro()?.bmc_settings().await).await
 }
 
-/// Changes a setting and says how it went, see `Connections::change`. The webview closes the screen and serial console
-/// once they're off.
+/// Changes a setting and says how it went, see `Connections::change`: the name goes in the saved devices, and a disk
+/// image comes out of a drive that's off. The webview closes the screen and serial console once they're off.
 #[tauri::command]
 async fn change(
     connections: State<'_, Connections>,
     host: &str,
     change: Change,
 ) -> Result<Changed<Settings>, CommandError> {
-    connections.change(host, change).await
+    let make = async |client: &mut Client, change| client.amt()?.change(change).await;
+    let changed = connections.change(host, change, make, async |client| client.amt()?.settings().await).await?;
+    if let Ok(settings) = &changed.settings {
+        let name = &settings.general.name;
+        if let Err(error) = connections.edit(|hosts| hosts.renamed(host, name)) {
+            log::warn!("Saving {host}'s name {name} failed: {error}");
+        }
+        if !settings.remote_access.ider
+            && let Ok(connection) = connections.get(host)
+        {
+            connection.image.close(None).await;
+        }
+    }
+    Ok(changed)
 }
 
 /// Writes the certificate as PEM to `path`.
@@ -333,11 +345,12 @@ fn pick(app: AppHandle, window: WebviewWindow, kind: &str, extensions: Vec<Strin
     rfd::FileDialog::new().set_parent(&window).add_filter(kind, &extensions).pick_file()
 }
 
-/// Asks where to save a file, suggesting `name`, see `pick`.
+/// Asks where to save a file, suggesting `name`, see `pick`. The verify build saves to `OOBLIN_SAVE`, never over the
+/// file it picks.
 #[tauri::command]
 fn pick_save(app: AppHandle, window: WebviewWindow, name: &str) -> Option<PathBuf> {
     if verify(&app) {
-        return std::env::var_os("OOBLIN_PICK").map(PathBuf::from);
+        return std::env::var_os("OOBLIN_SAVE").map(PathBuf::from);
     }
     rfd::FileDialog::new().set_parent(&window).set_file_name(name).save_file()
 }
@@ -501,7 +514,6 @@ impl From<keyring::Error> for CommandError {
 #[test]
 fn bindings() -> Result<(), ts_rs::ExportError> {
     let config = ts_rs::Config::from_env();
-    Change::export(&config)?;
     Changed::<()>::export(&config)?;
     CommandError::export(&config)?;
     Connected::export(&config)?;
@@ -611,6 +623,11 @@ fn main() {
             grow,
             save_log
         ])
-        .run(tauri::generate_context!())
-        .expect("the Tauri runtime starts");
+        .build(tauri::generate_context!())
+        .expect("the Tauri runtime starts")
+        .run(|app, event| {
+            if let RunEvent::Exit = event {
+                tauri::async_runtime::block_on(app.state::<Connections>().close_all());
+            }
+        });
 }

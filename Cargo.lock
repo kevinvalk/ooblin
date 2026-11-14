@@ -3293,6 +3293,7 @@ name = "ooblin"
 version = "0.1.0"
 dependencies = [
  "clap",
+ "futures-util",
  "keyring",
  "log",
  "mock",

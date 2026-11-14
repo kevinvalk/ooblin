@@ -6,6 +6,7 @@
   import type {
     Availability,
     Certificate,
+    Change,
     Configuration,
     Consent,
     DnsUpdate,
@@ -15,7 +16,6 @@
     Ipv6Settings,
     Settings,
   } from "../../bindings/core";
-  import type { Change } from "../../bindings/ooblin";
   import { reason, type Connection } from "../Device.svelte";
   import Form, { choices, text } from "../Form.svelte";
   import { CONFIGURATIONS } from "../Network.svelte";

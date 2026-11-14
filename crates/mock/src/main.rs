@@ -1,17 +1,17 @@
-//! A stand-in Intel AMT or Supermicro BMC for development, see the README.
+//! A stand-in Intel AMT, Supermicro or IPMI-only BMC for development, see the README.
 
 use clap::Parser;
 use mock::{Amt, Bmc, PASSWORD, USER};
 use ooblin_core::{Client, Flavor, Target};
 
 #[derive(Parser)]
-#[command(about = "A stand-in Intel AMT or Supermicro BMC, replaying fixtures recorded from real ones")]
+#[command(about = "A stand-in Intel AMT, Supermicro or IPMI-only BMC, replaying fixtures recorded from real ones")]
 enum Command {
     /// Serve a fixture on 127.0.0.1: an AMT's WS-Man on 16993, SOL, KVM and IDER on 16995, a BMC's web port on 16443,
     /// presence pings on UDP 623, where a BMC answers IPMI too.
     Run { fixture: String },
     /// Record a device into a fixture, read-only: an AMT's WS-Man data (scrubbed) and a short SOL, KVM and IDER
-    /// session, a BMC's Redfish (scrubbed) and a short KVM session.
+    /// session, a BMC's Redfish and IPMI (scrubbed) and a short KVM session.
     Record {
         fixture: String,
         host: String,
@@ -51,7 +51,7 @@ async fn main() -> anyhow::Result<()> {
             // What the BMC is asked, as it is: the KVM's keys and pointer among it.
             loop {
                 tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-                for request in std::mem::take(&mut *bmc.requests.lock().unwrap()) {
+                for request in bmc.asked() {
                     println!("{request}");
                 }
             }
@@ -67,9 +67,10 @@ async fn main() -> anyhow::Result<()> {
                 Flavor::Amt => mock::record(&target, &dir).await,
                 Flavor::Supermicro => {
                     mock::redfish::record(&target, &dir).await?;
+                    mock::ipmi::record(&target, &dir).await?;
                     mock::ikvm::record(&target, &dir).await
                 }
-                Flavor::Ipmi => anyhow::bail!("{host} speaks only IPMI, which we don't record yet"),
+                Flavor::Ipmi => mock::ipmi::record(&target, &dir).await,
             }
         }
     }

@@ -45,9 +45,9 @@ export type BmcChange = { "FanMode": string } | { "MouseMode": string } | { "Ntp
 export type BmcNetwork = { hostname: string | null, dhcp: boolean, address: string, subnet_mask: string, gateway: string, dns: string | null, vlan: number | null, };
 
 /**
- * How the BMC is set up: its network, what it serves on which port, how it runs the fans and our mouse, where it gets the time and
- * sends its log, and the server's power restore policy, serial console and FRU, `None` where the BMC doesn't say. An
- * empty mode is one this BMC doesn't have.
+ * How the BMC is set up: its network, what it serves on which port, how it runs the fans and our mouse, where it gets
+ * the time and sends its log, and the server's power restore policy, serial console and FRU, `None` where the BMC
+ * doesn't say. An empty mode is one this BMC doesn't have.
  */
 export type BmcSettings = { network: BmcNetwork, services: Array<Service>, fan_mode: Mode, mouse_mode: Mode, ntp: Ntp, syslog: Syslog, power_restore: PowerRestore | null, sol: SolSettings | null, fru: Fru | null, };
 
@@ -79,6 +79,11 @@ read_only: boolean,
  * What AMT's TLS shows us.
  */
 in_use: boolean, };
+
+/**
+ * A change to the settings, see `Client::change`.
+ */
+export type Change = { "RemoteAccess": RemoteAccess } | { "General": General } | { "PowerPolicy": string } | { "Ipv4": Ipv4 } | { "Ipv6": Ipv6Settings } | { "Availability": Availability } | { "Recovery": Recovery } | "Clock" | { "AddAlarm": Alarm } | { "DeleteAlarm": string } | { "AddCertificate": { path: string, trusted_root: boolean, } } | { "DeleteCertificate": string };
 
 export type Configuration = "Dhcp" | "Os" | "Manual";
 
@@ -150,19 +155,20 @@ shared_with_os: boolean, respond_to_ping: boolean,
 awake_minutes: number, dns_update: DnsUpdate, };
 
 /**
- * Everything the device knows about its hardware, gathered by the BIOS at boot. Only what's installed: empty memory
- * slots and drive bays never make it into WS-Man. Text the device left out is empty, numbers it left out are `None`.
+ * Everything the device knows about its hardware, gathered by the BIOS at boot. Only what's installed, no empty memory
+ * slots or drive bays. Text the device left out is empty, numbers it left out are `None`.
  */
 export type Hardware = { system: System, motherboard: Motherboard, bios: Bios, processors: Array<Processor>, memory: Array<Module>, disks: Array<Disk>, batteries: Array<Battery>, };
 
 /**
- * What a login says about the device. A BMC leaves AMT's own facts (`build`, `control_mode`) out.
+ * What a login says about the device. Text it doesn't have is empty: AMT's own facts (`build`, `control_mode`) on a
+ * BMC, the `fingerprint` over IPMI.
  */
 export type Info = { flavor: Flavor, 
 /**
  * The host name, with its domain if it has one.
  */
-name: string, version: string, build: string | null, 
+name: string, version: string, build: string, 
 /**
  * "Admin" or "Client", only admin control mode redirects without asking someone at the device for consent.
  */
@@ -196,12 +202,12 @@ export type IpmiSettings = { network: BmcNetwork | null, power_restore: PowerRes
 
 /**
  * What the BMC says it is, and its own network port. `manufacturer` by name where we know the vendor, else its IANA
- * number; `system_id` is the system GUID as SMBIOS and the OS write it.
+ * number, blank where it's unset; `system_id` is the system GUID as SMBIOS and the OS write it.
  */
 export type IpmiStatus = { info: Info, power: PowerState, manufacturer: string, product_id: number, ipmi_version: string, system_id: string, ports: Array<Port>, };
 
 /**
- * The addresses are what AMT uses, which it gets from DHCP, the OS or what was set (`Manual`).
+ * The addresses the management port uses, from DHCP, from what was set (`Manual`) or on AMT shared with the OS.
  */
 export type Ipv4 = { configuration: Configuration, address: string, subnet_mask: string, gateway: string, primary_dns: string, secondary_dns: string, };
 
@@ -242,7 +248,7 @@ export type Ntp = { enabled: boolean, primary: string, secondary: string, };
 export type Panel = { identify: boolean | null, post_code: number | null, };
 
 /**
- * AMT has one wired port and maybe a wireless one.
+ * A device's management port: a BMC's own, or AMT's wired one and maybe a wireless one.
  */
 export type Port = { wireless: boolean, mac: string, link_up: boolean, mbps: number | null, ipv4: Ipv4, 
 /**
@@ -256,9 +262,9 @@ ipv6: Ipv6 | null, };
 export type Power = { state: PowerState, actions: Array<PowerAction>, };
 
 /**
- * The power changes AMT can make. The `Soft` ones, `Sleep` and `Hibernate` ask the OS, the `To` ones power on or reset
- * into the BIOS setup, a network boot or the disk image in the IDER drive, once, or with the BIOS's screen on the serial
- * console (`UseSOL`).
+ * The power changes a device can make, each flavor offering what it can. The `Soft` ones, `Sleep` and `Hibernate` ask
+ * the OS, the `To` ones power on or reset into the BIOS setup, a network boot or the disk image in the virtual drive
+ * (AMT's IDER, a BMC's virtual CD), once, or with the BIOS's screen on the serial console (AMT's `UseSOL`).
  */
 export type PowerAction = "On" | "SoftOff" | "Off" | "SoftReset" | "Reset" | "Cycle" | "Sleep" | "Hibernate" | "Nmi" | "OnToBios" | "OnToPxe" | "OnToImage" | "OnToSerial" | "ResetToBios" | "ResetToPxe" | "ResetToImage" | "ResetToSerial";
 
@@ -277,7 +283,7 @@ description: string, active: boolean, };
 export type PowerRestore = "StayOff" | "Previous" | "PowerOn";
 
 /**
- * The CIM `PowerState`s AMT reports, folded into what a person cares about and named the way they'd say it.
+ * The power states the devices report, folded into what a person cares about and named the way they'd say it.
  */
 export type PowerState = "On" | "Asleep" | "Hibernating" | "Off" | "Unknown";
 

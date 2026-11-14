@@ -7,7 +7,7 @@ use super::wsman::{Instance, Reference, method};
 use crate::{Error, Power, PowerAction, PowerState, Result};
 
 impl PowerAction {
-    /// Its CIM `PowerState`, as go-wsman-messages names them (8 is a hard off, the handover had it as soft).
+    /// Its CIM `PowerState`, as go-wsman-messages names them: 8 is a hard off, 12 the soft one.
     fn state(self) -> u8 {
         match self {
             Self::On | Self::OnToBios | Self::OnToPxe | Self::OnToImage | Self::OnToSerial => 2,
@@ -141,7 +141,7 @@ impl Client {
     }
 
     /// Like MeshCommander, a state the device didn't take is one its BIOS doesn't allow.
-    pub async fn set_recovery(&mut self, wanted: &Recovery) -> Result<()> {
+    pub(super) async fn set_recovery(&mut self, wanted: &Recovery) -> Result<()> {
         let state =
             32768 | u16::from(wanted.one_click == Some(true)) | u16::from(wanted.platform_erase == Some(true)) << 1;
         self.invoke(&BootStateChange { RequestedState: state }).await?;

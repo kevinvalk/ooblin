@@ -13,7 +13,7 @@ use ooblin_core::supermicro::{Client, Connection, probe};
 use ooblin_core::{Error, Target};
 use serde_json::Value;
 
-use crate::{Bmc, PASSWORD, USER, scrub};
+use crate::{Bmc, PASSWORD, scrub};
 
 /// `USER:PASSWORD` in Base64.
 const BASIC: &str = "Basic YWRtaW46UEBzc3cwcmQ=";
@@ -142,10 +142,10 @@ impl Bmc {
 pub async fn record(target: &Target, fixture: &Path) -> anyhow::Result<()> {
     let device = Some(Connection::new(target, None)?);
     let proxy = Bmc::serve("127.0.0.1:0", fixture, State { device, ..State::default() }).await;
-    let host = format!("127.0.0.1:{}", proxy.port);
+    let proxied = proxy.target(PASSWORD);
     eprint!("Redfish  recording…");
-    anyhow::ensure!(probe(&host).await, "{} doesn't answer Redfish", target.host);
-    let mut client = Client::new(&Target::new(&host, USER, PASSWORD), None)?;
+    anyhow::ensure!(probe(&proxied.host).await, "{} doesn't answer Redfish", target.host);
+    let mut client = Client::new(&proxied, None)?;
     client.status().await?;
     client.panel().await.ok();
     client.power().await?;

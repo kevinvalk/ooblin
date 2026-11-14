@@ -3,7 +3,7 @@
 
 use std::convert::Infallible;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 
 use http_body_util::Full;
 use hyper::body::{Bytes, Incoming};
@@ -11,12 +11,13 @@ use hyper::server::conn::http1;
 use hyper::service::service_fn;
 use hyper::{Request, Response};
 use hyper_util::rt::TokioIo;
+use ooblin_core::Target;
 use tokio::net::{TcpListener, ToSocketAddrs};
 use tokio_rustls::TlsAcceptor;
 use tokio_rustls::rustls::ServerConfig;
 use tokio_rustls::rustls::version::TLS12;
 
-use crate::{identity, ikvm, ipmi, redfish};
+use crate::{USER, identity, ikvm, ipmi, redfish};
 
 pub struct Bmc {
     pub port: u16,
@@ -25,7 +26,9 @@ pub struct Bmc {
     pub(crate) fixture: PathBuf,
     pub(crate) redfish: redfish::State,
     pub(crate) ikvm: ikvm::State,
-    pub(crate) ipmi: Mutex<ipmi::State>,
+    pub(crate) ipmi: Mutex<ipmi::Replay>,
+    /// The BMC we ask what the replay can't answer, when recording its IPMI.
+    pub(crate) ipmi_device: OnceLock<ooblin_core::ipmi::Session>,
     /// Where it answers IPMI, on 127.0.0.1: `serve_ipmi` answers on more.
     pub ipmi_port: u16,
 }
@@ -46,7 +49,10 @@ impl Bmc {
             fixture: fixture.to_owned(),
             redfish,
             ikvm: ikvm::State::default(),
-            ipmi: Mutex::new(ipmi::State::new(fixture)),
+            ipmi: Mutex::new(ipmi::Replay::read(
+                &std::fs::read_to_string(fixture.join("ipmi.txt")).unwrap_or_default(),
+            )),
+            ipmi_device: OnceLock::new(),
             ipmi_port: ipmi.local_addr().unwrap().port(),
         });
         bmc.answer_ipmi(ipmi);
@@ -67,6 +73,16 @@ impl Bmc {
             }
         });
         bmc
+    }
+
+    /// Us at our web port and our IPMI port, as `USER` with `password`.
+    pub fn target(&self, password: &str) -> Target {
+        Target { ipmi_port: self.ipmi_port, ..Target::new(format!("127.0.0.1:{}", self.port), USER, password) }
+    }
+
+    /// What we were asked since the last call, oldest first.
+    pub fn asked(&self) -> Vec<String> {
+        std::mem::take(&mut self.requests.lock().unwrap())
     }
 }
 

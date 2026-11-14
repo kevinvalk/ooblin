@@ -34,7 +34,7 @@ enum Heard {
 }
 
 impl Client {
-    /// Puts `image` in the device's CD-ROM drive from its next boot on, turning IDER on first if need be.
+    /// Puts `image` in the device's CD-ROM drive from its next boot on, where IDER is on.
     pub async fn ider(&mut self, image: std::fs::File) -> Result<Ider> {
         let cdrom = Cdrom::new(image).await?;
         let redirection = self.redirect(Session::Ider).await?;
@@ -65,7 +65,7 @@ impl Ider {
 
     async fn answer(&mut self, mut read: impl FnMut(Range<u64>)) -> Result<()> {
         loop {
-            let kind = self.redirection.read_exact(1).await?[0];
+            let kind = self.redirection.read_u8().await?;
             match self.hear(kind).await? {
                 Heard::Closed => return Ok(()),
                 Heard::Command(command) => {
@@ -151,12 +151,8 @@ impl Ider {
             if left == 0 {
                 break;
             }
-            let mut kind = [0];
-            if let Ok(read) = tokio::time::timeout(Duration::ZERO, self.redirection.read(&mut kind)).await {
-                if read? == 0 {
-                    return Err(Error::Transport("the device closed the connection".into()));
-                }
-                match self.hear(kind[0]).await? {
+            if let Ok(kind) = tokio::time::timeout(Duration::ZERO, self.redirection.read_u8()).await {
+                match self.hear(kind?).await? {
                     Heard::Nothing => {}
                     Heard::Reset => return Ok(()),
                     Heard::Closed | Heard::Command(_) => {

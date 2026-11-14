@@ -55,17 +55,17 @@ impl Ikvm {
     }
 }
 
-/// A virtual media WebSocket in `web`'s session, see `supermicro::media`.
+/// A virtual media WebSocket in `web`'s session, see `supermicro::media`, given up on after `HUNG` like `Ikvm::open`.
 pub async fn media(connection: &Connection, web: &Web) -> Result<(Receiver, Plug)> {
-    let (sender, receiver) = socket(connection, web.sid(), "/vm").await?.split();
+    let socket = tokio::time::timeout(HUNG, socket(connection, web.sid(), "/vm")).await.unwrap_or(Err(Error::Timeout));
+    let (sender, receiver) = socket?.split();
     Ok((Receiver { socket: receiver, buffered: Vec::new() }, Plug(Sender { socket: sender })))
 }
 
 /// A WebSocket at `path` on the web port, pinned as the web pages are, with the cookie and origin a browser sends.
 async fn socket(connection: &Connection, sid: &str, path: &str) -> Result<Socket> {
     let uri: Uri = format!("wss{}{path}", &connection.url["https".len()..]).parse().map_err(websocket)?;
-    let host = uri.host().unwrap_or_default().trim_matches(['[', ']']).to_owned();
-    let stream = tls(&host, uri.port_u16().unwrap_or(443), &connection.pin).await?;
+    let stream = tls(uri.host().unwrap_or_default(), uri.port_u16().unwrap_or(443), &connection.pin).await?;
     let request = ClientRequestBuilder::new(uri).with_header("Origin", &connection.url);
     Ok(client_async(request.with_header("Cookie", format!("SID={sid}")), stream).await.map_err(websocket)?.0)
 }
@@ -117,7 +117,7 @@ impl Receiver {
                 match self.socket.next().await {
                     Some(Ok(tungstenite::Message::Binary(bytes))) => self.buffered.extend_from_slice(&bytes),
                     Some(Ok(tungstenite::Message::Close(_))) | None => {
-                        return Err(Error::Transport("the BMC closed the KVM session".into()));
+                        return Err(Error::Transport("the BMC hung up".into()));
                     }
                     Some(Ok(_)) => {}
                     Some(Err(error)) => return Err(websocket(error)),

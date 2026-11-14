@@ -11,6 +11,7 @@ pub mod supermicro;
 pub use client::{Client, Kvm, Media, Sol};
 pub use net::{Found, RMCP_PORT, discover, fingerprint, nearby};
 
+use core::net::Ipv6Addr;
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
@@ -40,6 +41,23 @@ impl Target {
             password: password.into(),
         }
     }
+
+    /// `host` for IPMI, bare: one naming its web port (`host:port`, `[v6]:port`) says nothing of IPMI's.
+    pub fn ipmi_host(&self) -> &str {
+        let host = match self.host.rsplit_once(':') {
+            Some((host, port)) if port.parse::<u16>().is_ok() && (host.ends_with(']') || !host.contains(':')) => host,
+            _ => &self.host,
+        };
+        host.trim_matches(['[', ']'])
+    }
+
+    /// `host` as a URL has it, an IPv6 address in brackets.
+    fn authority(&self) -> String {
+        match self.host.parse::<Ipv6Addr>() {
+            Ok(_) => format!("[{}]", self.host),
+            Err(_) => self.host.clone(),
+        }
+    }
 }
 
 pub type Result<T, E = Error> = std::result::Result<T, E>;
@@ -47,6 +65,15 @@ pub type Result<T, E = Error> = std::result::Result<T, E>;
 /// A MAC address as we write them, `12:07:14:5F:37:F1`.
 fn mac(mac: &str) -> String {
     mac.to_uppercase().replace('-', ":")
+}
+
+/// A system GUID as SMBIOS and the OS write it: its first three fields little-endian.
+fn uuid(mut guid: [u8; 16]) -> String {
+    guid[0..4].reverse();
+    guid[4..6].reverse();
+    guid[6..8].reverse();
+    let hex = format!("{:032X}", u128::from_be_bytes(guid));
+    [&hex[..8], &hex[8..12], &hex[12..16], &hex[16..20], &hex[20..]].join("-")
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -84,6 +111,7 @@ pub enum Error {
     /// An IPMI command's completion code, or a session setup's status, that isn't 0: see `net::ipmi`.
     #[error("the BMC refused that (IPMI code {0:#04X})")]
     Refused(u8),
+    /// Shown as it is, so a sentence with its capital and period.
     #[error("{0}")]
     Invalid(String),
 }
@@ -109,7 +137,8 @@ pub enum Flavor {
     Ipmi,
 }
 
-/// What a login says about the device. A BMC leaves AMT's own facts (`build`, `control_mode`) out.
+/// What a login says about the device. Text it doesn't have is empty: AMT's own facts (`build`, `control_mode`) on a
+/// BMC, the `fingerprint` over IPMI.
 #[derive(Debug, Serialize, TS)]
 #[ts(export, export_to = "core.ts")]
 pub struct Info {
@@ -117,7 +146,7 @@ pub struct Info {
     /// The host name, with its domain if it has one.
     pub name: String,
     pub version: String,
-    pub build: Option<String>,
+    pub build: String,
     /// "Admin" or "Client", only admin control mode redirects without asking someone at the device for consent.
     pub control_mode: String,
     /// The pinned certificate's, see `fingerprint`.
@@ -156,7 +185,7 @@ pub struct Power {
     pub actions: Vec<PowerAction>,
 }
 
-/// The CIM `PowerState`s AMT reports, folded into what a person cares about and named the way they'd say it.
+/// The power states the devices report, folded into what a person cares about and named the way they'd say it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, TS)]
 #[ts(export, export_to = "core.ts")]
 pub enum PowerState {
@@ -167,9 +196,9 @@ pub enum PowerState {
     Unknown,
 }
 
-/// The power changes AMT can make. The `Soft` ones, `Sleep` and `Hibernate` ask the OS, the `To` ones power on or reset
-/// into the BIOS setup, a network boot or the disk image in the IDER drive, once, or with the BIOS's screen on the serial
-/// console (`UseSOL`).
+/// The power changes a device can make, each flavor offering what it can. The `Soft` ones, `Sleep` and `Hibernate` ask
+/// the OS, the `To` ones power on or reset into the BIOS setup, a network boot or the disk image in the virtual drive
+/// (AMT's IDER, a BMC's virtual CD), once, or with the BIOS's screen on the serial console (AMT's `UseSOL`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[ts(export, export_to = "core.ts")]
 pub enum PowerAction {
@@ -192,8 +221,8 @@ pub enum PowerAction {
     ResetToSerial,
 }
 
-/// Everything the device knows about its hardware, gathered by the BIOS at boot. Only what's installed: empty memory
-/// slots and drive bays never make it into WS-Man. Text the device left out is empty, numbers it left out are `None`.
+/// Everything the device knows about its hardware, gathered by the BIOS at boot. Only what's installed, no empty memory
+/// slots or drive bays. Text the device left out is empty, numbers it left out are `None`.
 #[derive(Debug, Serialize, TS)]
 #[ts(export, export_to = "core.ts")]
 pub struct Hardware {
@@ -280,17 +309,7 @@ pub struct Battery {
     pub design_capacity_mwh: Option<u32>,
 }
 
-/// What the device's own status page shows: the device, its AMT and its network.
-#[derive(Debug, Serialize, TS)]
-#[ts(export, export_to = "core.ts")]
-pub struct Status {
-    pub info: Info,
-    pub power: PowerState,
-    pub system_id: String,
-    pub ports: Vec<Port>,
-}
-
-/// AMT has one wired port and maybe a wireless one.
+/// A device's management port: a BMC's own, or AMT's wired one and maybe a wireless one.
 #[derive(Debug, Serialize, TS)]
 #[ts(export, export_to = "core.ts")]
 pub struct Port {
@@ -303,7 +322,7 @@ pub struct Port {
     pub ipv6: Option<Ipv6>,
 }
 
-/// The addresses are what AMT uses, which it gets from DHCP, the OS or what was set (`Manual`).
+/// The addresses the management port uses, from DHCP, from what was set (`Manual`) or on AMT shared with the OS.
 #[derive(Debug, Serialize, Deserialize, TS)]
 #[ts(export, export_to = "core.ts")]
 pub struct Ipv4 {

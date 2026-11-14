@@ -112,8 +112,8 @@ pub async fn chassis(session: &Session) -> Result<Chassis> {
     let (power, misc) = (status.first().copied().unwrap_or(0), status.get(2).copied().unwrap_or(0));
     Ok(Chassis {
         on: power & 1 != 0,
-        // Lit for a while (1) or until turned off (2).
-        identify: (misc & 0x40 != 0).then_some(misc >> 4 & 0x03 != 0),
+        // Lit for a while (1) or until turned off (2). OpenBMC says 3, reserved, until it's first asked to identify.
+        identify: (misc & 0x40 != 0).then_some(matches!(misc >> 4 & 0x03, 1 | 2)),
         restore: [PowerRestore::StayOff, PowerRestore::Previous, PowerRestore::PowerOn]
             .get(usize::from(power >> 5 & 0x03))
             .copied(),
@@ -143,7 +143,7 @@ pub async fn sol_settings(session: &Session) -> Result<SolSettings> {
 /// Sets how fast the server's serial port runs for SOL, one of 9600, 19200, 38400, 57600 or 115200 bits a second.
 pub async fn set_sol_bit_rate(session: &Session, bit_rate: u32) -> Result<()> {
     let Some((number, _)) = BIT_RATES.iter().find(|(_, rate)| *rate == bit_rate) else {
-        return Err(Error::Invalid(format!("SOL doesn't run at {bit_rate} bits a second")));
+        return Err(Error::Invalid(format!("SOL doesn't run at {bit_rate} bits a second.")));
     };
     // Both the setting that lasts and the one in use now.
     for parameter in [5, 6] {

@@ -19,7 +19,7 @@ pub struct Client {
 }
 
 /// What the BMC says it is, and its own network port. `manufacturer` by name where we know the vendor, else its IANA
-/// number; `system_id` is the system GUID as SMBIOS and the OS write it.
+/// number, blank where it's unset; `system_id` is the system GUID as SMBIOS and the OS write it.
 #[derive(Debug, Serialize, TS)]
 #[ts(export, export_to = "core.ts")]
 pub struct IpmiStatus {
@@ -34,7 +34,7 @@ pub struct IpmiStatus {
 
 /// What can be set over IPMI: the BMC's network, the server's power restore policy, its serial console and its FRU, and
 /// the BMC's users to read. `None` where the BMC doesn't say.
-#[derive(Debug, Serialize, TS)]
+#[derive(Debug, Default, Serialize, TS)]
 #[ts(export, export_to = "core.ts")]
 pub struct IpmiSettings {
     pub network: Option<Network>,
@@ -102,7 +102,7 @@ impl Client {
                 manufacturer: manufacturer(device.manufacturer),
                 product_id: device.product_id,
                 ipmi_version: device.ipmi_version,
-                system_id: uuid(&guid),
+                system_id: guid.try_into().map(crate::uuid).unwrap_or_default(),
                 ports: lan(session).await.into_iter().collect(),
             })
         })
@@ -139,13 +139,12 @@ impl Client {
         };
         with(&self.target, async |session| {
             if let Some(device) = device {
-                // Set in progress, which not every BMC has; the BIOS hasn't seen it yet; this boot only, from
-                // `device`; committed and complete.
-                let _ = session.request(CHASSIS, 0x08, &[0x00, 0x01]).await;
-                session.request(CHASSIS, 0x08, &[0x04, 0x01, 0x01]).await?;
-                session.request(CHASSIS, 0x08, &[0x05, 0x80, device << 2, 0, 0, 0]).await?;
-                let _ = session.request(CHASSIS, 0x08, &[0x00, 0x02]).await;
-                let _ = session.request(CHASSIS, 0x08, &[0x00, 0x00]).await;
+                // The BIOS hasn't seen it yet; this boot only, from `device`.
+                let changes = async {
+                    session.request(CHASSIS, 0x08, &[0x04, 0x01, 0x01]).await?;
+                    session.request(CHASSIS, 0x08, &[0x05, 0x80, device << 2, 0, 0, 0]).await.map(drop)
+                };
+                in_progress(|state| async move { session.request(CHASSIS, 0x08, &[0, state]).await }, changes).await?;
             }
             session.request_once(CHASSIS, 0x02, &[control]).await.map(drop)
         })
@@ -163,7 +162,13 @@ impl Client {
 
     /// Newest first, each sensor's event in its own words.
     pub async fn event_log(&self) -> Result<Vec<Event>> {
-        with(&self.target, async |session| sel::events(session, &sdr::records(session).await?).await).await
+        with(&self.target, async |session| {
+            // The records only name the sensors, which events go without.
+            let records = sdr::records(session).await;
+            let records = records.inspect_err(|error| log::warn!("No sensor records for the event log: {error}"));
+            sel::events(session, &records.unwrap_or_default()).await
+        })
+        .await
     }
 
     /// The identify light; IPMI has no POST codes.
@@ -177,15 +182,20 @@ impl Client {
 
     pub async fn settings(&self) -> Result<IpmiSettings> {
         with(&self.target, async |session| {
+            let channel = lan_channel(session).await;
+            let server = server_settings(session).await?;
             Ok(IpmiSettings {
-                network: network(session).await,
-                power_restore: chassis(session).await?.restore,
-                sol: sol_settings(session).await.ok(),
-                fru: fru::read(session, 0).await.ok(),
-                users: users(session).await.unwrap_or_default(),
+                network: network(session, channel).await,
+                users: users(session, channel.unwrap_or(1)).await.unwrap_or_default(),
+                ..server
             })
         })
         .await
+    }
+
+    /// What of `settings` is the server's, for a flavor that reads the BMC's network and users otherwise.
+    pub async fn server_settings(&self) -> Result<IpmiSettings> {
+        with(&self.target, server_settings).await
     }
 
     pub async fn change(&self, change: Change) -> Result<()> {
@@ -204,7 +214,7 @@ impl Client {
 
     /// Most BMCs have web pages on HTTPS too.
     pub fn web_pages(&self) -> String {
-        format!("https://{}/", self.target.host)
+        format!("https://{}/", self.target.authority())
     }
 }
 
@@ -213,11 +223,21 @@ fn info(device: &Device, sol: bool) -> Info {
         flavor: Flavor::Ipmi,
         name: String::new(),
         version: device.firmware.clone(),
-        build: None,
+        build: String::new(),
         control_mode: String::new(),
         fingerprint: String::new(),
         remote_access: RemoteAccess { kvm: None, sol, ider: false, consent: Consent::None, consent_fixed: true },
     }
+}
+
+/// The server's power restore policy, serial console and FRU, `None` where the BMC doesn't say.
+async fn server_settings(session: &Session) -> Result<IpmiSettings> {
+    Ok(IpmiSettings {
+        power_restore: chassis(session).await?.restore,
+        sol: sol_settings(session).await.ok(),
+        fru: fru::read(session, 0).await.ok(),
+        ..Default::default()
+    })
 }
 
 /// Get Device ID: the major firmware version in binary, the minor in BCD.
@@ -251,35 +271,17 @@ fn manufacturer(iana: u32) -> String {
         2011 => "Huawei",
         37945 | 48512 => "Inspur",
         6653 => "Tyan",
+        0 => "",
         _ => return format!("IANA {iana}"),
     };
     name.to_owned()
 }
 
-/// The system GUID as SMBIOS and the OS write it: its first three fields little-endian, empty if there's none.
-fn uuid(guid: &[u8]) -> String {
-    let Ok(guid) = <[u8; 16]>::try_from(guid) else { return String::new() };
-    let hex = |bytes: &[u8]| bytes.iter().map(|byte| format!("{byte:02X}")).collect::<String>();
-    let reversed = |bytes: &[u8]| hex(&bytes.iter().rev().copied().collect::<Vec<_>>());
-    format!(
-        "{}-{}-{}-{}-{}",
-        reversed(&guid[0..4]),
-        reversed(&guid[4..6]),
-        reversed(&guid[6..8]),
-        hex(&guid[8..10]),
-        hex(&guid[10..16])
-    )
-}
-
-/// The BMC's own port on its first LAN channel, as its LAN parameters say it: no DNS, which IPMI has none of, nor a
-/// link speed.
+/// The BMC's own port on its first LAN channel, as its LAN parameters say it, blank where they don't: no DNS, which
+/// IPMI has none of, nor a link speed.
 async fn lan(session: &Session) -> Option<Port> {
     let channel = lan_channel(session).await?;
-    let parameter = async |number: u8| -> Vec<u8> {
-        let answer = session.request(TRANSPORT, 0x02, &[channel, number, 0, 0]).await.unwrap_or_default();
-        answer.get(1..).unwrap_or_default().to_vec()
-    };
-    let address = |bytes: Vec<u8>| bytes.iter().map(u8::to_string).collect::<Vec<_>>().join(".");
+    let parameter = async |number: u8| lan_parameter(session, channel, number, 0).await.unwrap_or_default();
     let source = parameter(4).await.first().copied().unwrap_or(0) & 0x0F;
     let hardware = parameter(5).await;
     let hardware = hardware.iter().map(|byte| format!("{byte:02x}")).collect::<Vec<_>>().join(":");
@@ -291,9 +293,9 @@ async fn lan(session: &Session) -> Option<Port> {
         mbps: None,
         ipv4: Ipv4 {
             configuration: if source == 2 { Configuration::Dhcp } else { Configuration::Manual },
-            address: address(parameter(3).await),
-            subnet_mask: address(parameter(6).await),
-            gateway: address(parameter(12).await),
+            address: dotted(&parameter(3).await),
+            subnet_mask: dotted(&parameter(6).await),
+            gateway: dotted(&parameter(12).await),
             primary_dns: String::new(),
             secondary_dns: String::new(),
         },
@@ -303,10 +305,7 @@ async fn lan(session: &Session) -> Option<Port> {
 
 /// Its IPv6 addresses, static and from SLAAC or DHCPv6, those in use; `None` where IPv6 is off or the BMC has none.
 async fn ipv6(session: &Session, channel: u8) -> Option<Ipv6> {
-    let parameter = async |number: u8, set: u8| {
-        let answer = session.request(TRANSPORT, 0x02, &[channel, number, set, 0]).await.ok()?;
-        answer.get(1..).map(<[u8]>::to_vec)
-    };
+    let parameter = async |number: u8, set: u8| lan_parameter(session, channel, number, set).await;
     // Off (0), or how many static and dynamic addresses it holds.
     if parameter(51, 0).await?.first() == Some(&0) {
         return None;
@@ -326,31 +325,31 @@ async fn ipv6(session: &Session, channel: u8) -> Option<Ipv6> {
     Some(Ipv6 { addresses, gateway: String::new(), primary_dns: String::new(), secondary_dns: String::new() })
 }
 
-/// The BMC's network settings as IPMI keeps them: no host name or DNS, which it has none of.
-async fn network(session: &Session) -> Option<Network> {
-    let channel = lan_channel(session).await?;
-    let parameter = async |number: u8| -> Option<Vec<u8>> {
-        Some(session.request(TRANSPORT, 0x02, &[channel, number, 0, 0]).await.ok()?.get(1..)?.to_vec())
-    };
-    let address = |bytes: Vec<u8>| bytes.iter().map(u8::to_string).collect::<Vec<_>>().join(".");
-    // Enabled in bit 15, its ID in the 12 below.
-    let vlan = parameter(20).await.and_then(|vlan| {
-        let vlan = u16::from_le_bytes([*vlan.first()?, *vlan.get(1)?]);
-        (vlan & 0x8000 != 0).then_some(vlan & 0x0FFF)
-    });
+/// The BMC's network settings on LAN `channel`, if there is one, as IPMI keeps them: no host name or DNS, which it has
+/// none of.
+async fn network(session: &Session, channel: Option<u8>) -> Option<Network> {
+    let channel = channel?;
+    let parameter = async |number: u8| lan_parameter(session, channel, number, 0).await;
     Some(Network {
         hostname: None,
         dhcp: parameter(4).await?.first()? & 0x0F == 2,
-        address: address(parameter(3).await?),
-        subnet_mask: address(parameter(6).await?),
-        gateway: address(parameter(12).await?),
+        address: dotted(&parameter(3).await?),
+        subnet_mask: dotted(&parameter(6).await?),
+        gateway: dotted(&parameter(12).await?),
         dns: None,
-        vlan,
+        vlan: vlan(session, channel).await,
     })
 }
 
+/// Its VLAN, `None` where it has none or doesn't say: enabled in bit 15, its ID in the 12 below.
+async fn vlan(session: &Session, channel: u8) -> Option<u16> {
+    let vlan = lan_parameter(session, channel, 20, 0).await?;
+    let vlan = u16::from_le_bytes([*vlan.first()?, *vlan.get(1)?]);
+    (vlan & 0x8000 != 0).then_some(vlan & 0x0FFF)
+}
+
 /// Sets the BMC's network as ipmitool does (`lan set`), in progress until committed, its address last: once that
-/// changes, the BMC may answer us no more.
+/// changes, the BMC may answer us no more. Its VLAN only where it changes, as not every BMC has one.
 async fn set_network(session: &Session, network: &Network) -> Result<()> {
     network.check()?;
     let channel = lan_channel(session).await.ok_or_else(|| Error::Protocol("the BMC has no LAN channel".into()))?;
@@ -359,10 +358,10 @@ async fn set_network(session: &Session, network: &Network) -> Result<()> {
     };
     let octets =
         |address: &str| address.parse::<core::net::Ipv4Addr>().map(|address| address.octets()).unwrap_or_default();
-    let _ = set(0, &[1]).await;
-    let vlan = network.vlan.map_or(0, |vlan| vlan | 0x8000).to_le_bytes();
-    set(20, &vlan).await?;
-    let changed = async {
+    let changes = async {
+        if network.vlan != vlan(session, channel).await {
+            set(20, &network.vlan.map_or(0, |vlan| vlan | 0x8000).to_le_bytes()).await?;
+        }
         if network.dhcp {
             return set(4, &[2]).await;
         }
@@ -371,10 +370,29 @@ async fn set_network(session: &Session, network: &Network) -> Result<()> {
         set(12, &octets(&network.gateway)).await?;
         set(3, &octets(&network.address)).await
     };
-    let changed = changed.await;
-    let _ = set(0, &[2]).await;
-    let _ = set(0, &[0]).await;
+    in_progress(|state| async move { set(0, &[state]).await }, changes).await
+}
+
+/// Makes `changes` with parameter 0 "set in progress", then committed and complete whatever came of them, so it doesn't
+/// stay locked to us. Not every BMC has that parameter, so we ignore what it says.
+async fn in_progress<T, F: Future<Output = Result<T>>>(
+    state: impl Fn(u8) -> F,
+    changes: impl Future<Output = Result<()>>,
+) -> Result<()> {
+    let _ = state(1).await;
+    let changed = changes.await;
+    let _ = state(2).await;
+    let _ = state(0).await;
     changed
+}
+
+/// LAN configuration parameter `number`'s set `set` on `channel`, after its revision byte.
+async fn lan_parameter(session: &Session, channel: u8, number: u8, set: u8) -> Option<Vec<u8>> {
+    Some(session.request(TRANSPORT, 0x02, &[channel, number, set, 0]).await.ok()?.get(1..)?.to_vec())
+}
+
+fn dotted(bytes: &[u8]) -> String {
+    bytes.iter().map(u8::to_string).collect::<Vec<_>>().join(".")
 }
 
 /// The first channel whose medium is a LAN (802.3, or another).
@@ -388,9 +406,8 @@ async fn lan_channel(session: &Session) -> Option<u8> {
     None
 }
 
-/// The user slots that have a name, on the LAN channel.
-async fn users(session: &Session) -> Result<Vec<User>> {
-    let channel = lan_channel(session).await.unwrap_or(1);
+/// The user slots that have a name, on `channel`.
+async fn users(session: &Session, channel: u8) -> Result<Vec<User>> {
     let access = async |id: u8| session.request(APPLICATION, 0x44, &[channel, id]).await;
     let most = access(1).await?.first().copied().unwrap_or(0) & 0x3F;
     let mut users = Vec::new();

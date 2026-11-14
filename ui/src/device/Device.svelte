@@ -3,8 +3,8 @@
      Whether a device that doesn't answer is gone is App's to say. -->
 <script module lang="ts">
   import type { Component, Snippet } from "svelte";
-  import type { Change, Changed, CommandError, Drive, Mounted } from "../bindings/ooblin";
-  import type { BmcChange, BmcSettings as BmcSettingsData, Flavor, IpmiChange, Info, Power, PowerAction, PowerState, RemoteAccess, Settings as SettingsData } from "../bindings/core";
+  import type { Changed, CommandError, Drive, Mounted } from "../bindings/ooblin";
+  import type { BmcChange, BmcSettings as BmcSettingsData, Change, Flavor, IpmiChange, Info, Power, PowerAction, PowerState, Settings as SettingsData } from "../bindings/core";
 
   /** What App shows of a connection too: in the sidebar, the title and the footer. */
   export interface Connection {
@@ -19,7 +19,8 @@
     footer?: Snippet;
   }
 
-  /** The stretches a disk image is shown in, as read, and how fast AMT reads one at most, bytes a second. */
+  /** The stretches a disk image is shown in, as read, and the meter's top speed in bytes a second: how fast AMT reads
+   * one at most, as we know no BMC's. */
   const CELLS = 128;
   const TOP = 1.1e6;
 
@@ -120,11 +121,6 @@
     if (tab === kind) show(names[0]);
   }
 
-  /** What the device lets us redirect, as the settings last said. */
-  let access: RemoteAccess = $derived(
-    (pages.get("settings")?.data as SettingsData | undefined)?.remote_access ?? connection.info.remote_access,
-  );
-
   let saving = $state(false);
 
   /** Makes a settings `change` and shows the settings after, read again however it went: one that failed may have
@@ -149,27 +145,37 @@
     }
   }
 
-  /** What the settings saved, which they then show. The hardware, its FRU among it, reads afresh. AMT's say its name,
-   * and what's turned off goes (Rust ejects the image itself), a BMC's whether its KVM and virtual media serve. */
+  /** What the settings saved, which they then show. The hardware, its FRU among it, reads afresh, and what's turned
+   * off goes (Rust ejects AMT's image itself). */
   function saved(data: unknown) {
     pages.set(names.at(-1)!, { data, read: new Date() });
     names.filter((name) => tabs[name].fixed).forEach((name) => pages.delete(name));
-    if ("services" in (data as object)) {
-      const service = (name: string) => (data as BmcSettingsData).services.find((service) => service.name === name);
-      const [kvm, media] = [service("KVMIP"), service("VirtualMedia")];
-      if (kvm) opened.kvm &&= connection.info.remote_access.kvm = kvm.enabled;
-      if (media) connection.info.remote_access.ider = media.enabled;
+    landed(data);
+    const { kvm, sol, ider } = connection.info.remote_access;
+    opened.kvm &&= !!kvm;
+    opened.sol &&= sol;
+    if (amt && !ider) image = undefined;
+  }
+
+  /** What the settings, read or saved, say of the device: AMT's its name and what it lets us redirect, a BMC's whether
+   * its KVM and virtual media serve. */
+  function landed(data: unknown) {
+    if (amt) {
+      const { general, remote_access } = data as SettingsData;
+      connection.info.name = general.name;
+      connection.info.remote_access = remote_access;
+    } else if (connection.info.flavor === "Supermicro") {
+      const access = connection.info.remote_access;
+      const enabled = (name: string) =>
+        (data as BmcSettingsData).services.find((service) => service.name === name)?.enabled;
+      access.kvm = enabled("KVMIP") ?? access.kvm;
+      access.ider = enabled("VirtualMedia") ?? access.ider;
     }
-    if (!amt) return;
-    const { general, remote_access } = data as SettingsData;
-    connection.info.name = general.name;
-    opened.kvm &&= !!remote_access.kvm;
-    opened.sol &&= remote_access.sol;
-    if (!remote_access.ider) image = undefined;
   }
 
   /** Why the screen, serial console or a disk image can't open, if it can't. */
   function off(kind: "kvm" | "sol" | "ider") {
+    const access = connection.info.remote_access;
     if (kind === "kvm" && access.kvm === null) return "This device has no KVM.";
     if (access[kind]) return;
     const what = { kvm: "KVM is", sol: "The serial console is", ider: "Disk images are" }[kind];
@@ -188,7 +194,9 @@
       // One quiet read that fails leaves what the one before read.
       (error) => (quietly ? before : { error: reason(error) }),
     );
-    if (pages.get(name) === before && page) pages.set(name, page);
+    if (pages.get(name) !== before || !page) return;
+    pages.set(name, page);
+    if (name === names.at(-1) && page.data) landed(page.data);
   }
 
   // A tab read `every` so often is, while it's shown: that long after the read before landed, so a slow device isn't
@@ -329,14 +337,20 @@
     mounting = true;
     const mounted = $state({ id: 0, name: "", size: 0, read: 0, rate: 0, cells: Array<number>(CELLS).fill(0) });
     let [tick, last] = [0, 0];
+    let ended: CommandError | null | undefined;
+    const out = (error: CommandError | null) =>
+      error
+        ? say(`${mounted.name} came out of the drive: ${reason(error)}`, true)
+        : say(`${title} closed the disk image (a reset, say), mount it again to use it.`);
+    // A BMC reads it as soon as it's in, so it may come out before `mount` answers, which then says so.
     const drive = new Channel<Drive>((event) => {
-      // Until it's in, and once it's out, it's not ours to show.
-      if (image !== mounted) return;
       if (event.kind === "Ended") {
+        ended = event.error;
+        if (image !== mounted) return;
         image = undefined;
-        if (event.error) return say(`${mounted.name} came out of the drive: ${reason(event.error)}`, true);
-        return say(`${title} closed the disk image (a reset, say), mount it again to use it.`);
+        return out(ended);
       }
+      if (!mounted.size) return;
       mounted.read += event.end - event.start;
       const cell = (at: number) => (at * CELLS) / mounted.size;
       for (let i = Math.floor(cell(event.start)); i < cell(event.end); i++) mounted.cells[i] = Date.now();
@@ -349,6 +363,7 @@
     });
     try {
       Object.assign(mounted, await invoke<Mounted>("mount", { host: connection.host, path, drive }));
+      if (ended !== undefined) return out(ended);
       image = mounted;
       const seen = amt ? "the device sees it from its next boot on" : "a USB CD-ROM drive on the device";
       say(`${mounted.name} is in the drive, ${seen}.`);
@@ -458,8 +473,9 @@
       {@const speed = Math.min(image.rate / TOP, 1)}
       <div
         class="flex gap-0.75"
-        title="Disk read {(image.rate / 1e6).toFixed(2)} MB/s which top out at about {TOP /
-          1e6} MB/s as each read goes through a small management engine."
+        title="Disk read {(image.rate / 1e6).toFixed(2)} MB/s{amt
+          ? `, which top out at about ${TOP / 1e6} MB/s as each read goes through a small management engine`
+          : ''}."
       >
         <div class="flex w-1 items-end outline outline-line">
           <div

@@ -6,12 +6,14 @@
 
 use std::sync::Arc;
 
-use mock::{Amt, Bmc, PASSWORD, USER};
-use ooblin_core::{Flavor, Target};
+use mock::{Amt, Bmc, PASSWORD};
+use ooblin_core::amt::{Change, Settings};
+use ooblin_core::{Client, Flavor, Target};
 use tauri::async_runtime::JoinHandle;
 use tokio::sync::oneshot;
 
-use super::{Change, Connections, Serving, Task};
+use super::{Changed, Connections, Serving, Task};
+use crate::CommandError;
 use crate::hosts::Hosts;
 
 async fn mock() -> Arc<Amt> {
@@ -20,7 +22,7 @@ async fn mock() -> Arc<Amt> {
 
 /// The mock answers at both names, which are two devices to us.
 fn target(amt: &Amt, host: &str) -> Target {
-    Target { wsman_port: amt.port, redirection_port: amt.redirection_port, ..Target::new(host, USER, PASSWORD) }
+    Target { host: host.into(), ..amt.target(PASSWORD) }
 }
 
 fn connections(dir: &tempfile::TempDir) -> Connections {
@@ -175,6 +177,12 @@ async fn a_disk_image_replaced_stops_being_served() {
     assert!(!image.serving().await);
 }
 
+/// A change to AMT's settings, as the `change` command makes it.
+async fn change(connections: &Connections, host: &str, change: Change) -> Result<Changed<Settings>, CommandError> {
+    let make = async |client: &mut Client, change| client.amt()?.change(change).await;
+    connections.change(host, change, make, async |client| client.amt()?.settings().await).await
+}
+
 /// The settings are read again after a change, whether it went through or not.
 #[tokio::test]
 async fn a_change_says_how_it_went_and_the_settings_after() {
@@ -182,12 +190,12 @@ async fn a_change_says_how_it_went_and_the_settings_after() {
     let connections = connections(&dir);
     connections.connect(target(&amt, "127.0.0.1"), None, false).await.unwrap();
 
-    let changed = connections.change("127.0.0.1", Change::Clock).await.unwrap();
+    let changed = change(&connections, "127.0.0.1", Change::Clock).await.unwrap();
     assert!(changed.error.is_none() && changed.settings.is_ok());
 
     let missing = Change::AddCertificate { path: dir.path().join("missing.pem"), trusted_root: false };
-    let changed = connections.change("127.0.0.1", missing).await.unwrap();
-    assert!(changed.error.is_some() && changed.settings.is_ok());
+    let changed = change(&connections, "127.0.0.1", missing).await.unwrap();
+    assert!(matches!(changed.error, Some(CommandError::Failed { .. })) && changed.settings.is_ok());
 }
 
 /// Devices saved before BMCs carry no flavor, they're AMT's.
@@ -203,14 +211,10 @@ fn an_old_hosts_json_reads_as_amt() {
 /// A BMC as typed, its port in the host, and connected to.
 async fn bmc(connections: &Connections) -> (Arc<Bmc>, String) {
     let bmc = Bmc::start("127.0.0.1:0", &mock::fixture("x10")).await;
-    let host = format!("127.0.0.1:{}", bmc.port);
-    let target = Target { ipmi_port: bmc.ipmi_port, ..Target::new(&host, USER, PASSWORD) };
+    let target = bmc.target(PASSWORD);
+    let host = target.host.clone();
     connections.connect(target, None, false).await.unwrap();
     (bmc, host)
-}
-
-fn requests(bmc: &Bmc) -> Vec<String> {
-    std::mem::take(&mut bmc.requests.lock().unwrap())
 }
 
 /// Only an unsaved device is asked whether it speaks Redfish, before it gets a password.
@@ -220,10 +224,10 @@ async fn a_bmc_is_found_once_and_saved_as_one() {
     let connections = connections(&dir);
     let (bmc, host) = bmc(&connections).await;
     assert_eq!(connections.hosts().unwrap().flavor(&host), Some(Flavor::Supermicro));
-    assert_eq!(requests(&bmc)[0], "GET /redfish/v1/ (no login)");
+    assert_eq!(bmc.asked()[0], "GET /redfish/v1/ (no login)");
 
-    connections.connect(Target::new(&host, USER, PASSWORD), None, false).await.unwrap();
-    assert!(!requests(&bmc).iter().any(|request| request.ends_with("(no login)")));
+    connections.connect(bmc.target(PASSWORD), None, false).await.unwrap();
+    assert!(!bmc.asked().iter().any(|request| request.ends_with("(no login)")));
 }
 
 /// A BMC's screen comes and goes through the slot as AMT's does, each in a web session of its own: the one before has
@@ -233,7 +237,7 @@ async fn a_bmc_screen_logs_out_before_the_next_logs_in() {
     let dir = tempfile::tempdir().unwrap();
     let connections = connections(&dir);
     let (bmc, host) = bmc(&connections).await;
-    requests(&bmc);
+    bmc.asked();
     let open =
         || connections.open(&host, |connection| &connection.kvm, async |client| client.kvm().await.map(Arc::new));
     let (first, second) = (open().await.unwrap(), open().await.unwrap());
@@ -245,7 +249,7 @@ async fn a_bmc_screen_logs_out_before_the_next_logs_in() {
     let web = |request: &String| !request.starts_with("ikvm ");
     let session = ["POST /cgi/login.cgi", "GET /cgi/url_redirect.cgi?url_name=man_ikvm_html5_bootstrap", "WS /"];
     let session = [&session[..], &["WS closed", "GET /cgi/logout.cgi"]].concat();
-    assert_eq!(requests(&bmc).into_iter().filter(web).collect::<Vec<_>>(), [&session[..], &session].concat());
+    assert_eq!(bmc.asked().into_iter().filter(web).collect::<Vec<_>>(), [&session[..], &session].concat());
 }
 
 /// What only AMT does fails on a BMC without asking it, its serial console goes over IPMI.
@@ -254,15 +258,49 @@ async fn a_bmc_doesnt_do_what_only_amt_does() {
     let dir = tempfile::tempdir().unwrap();
     let connections = connections(&dir);
     let (bmc, host) = bmc(&connections).await;
-    requests(&bmc);
-    let changed = connections.change(&host, Change::Clock).await;
-    assert_eq!(changed.err().unwrap().to_string(), "this device doesn't support that");
-    assert!(requests(&bmc).is_empty());
+    bmc.asked();
+    let changed = change(&connections, &host, Change::Clock).await.unwrap();
+    assert_eq!(changed.error.unwrap().to_string(), "this device doesn't support that");
+    assert!(bmc.asked().is_empty());
 
     let open =
         || connections.open(&host, |connection| &connection.sol, async |client| client.sol().await.map(Arc::new));
     let id = open().await.unwrap();
     let sol = &connections.get(&host).unwrap().sol;
     sol.close(Some(id)).await;
-    assert_eq!(requests(&bmc)[0], "IPMI 06 48 [01, 01, c4, 00, 00, 00]");
+    assert_eq!(bmc.asked()[0], "IPMI 06 48 [01, 01, c4, 00, 00, 00]");
+}
+
+/// A login to a device we're connected to closes what's open on the connection it replaces: a screen's web session.
+#[tokio::test]
+async fn a_connection_replaced_is_closed() {
+    let dir = tempfile::tempdir().unwrap();
+    let connections = connections(&dir);
+    let (bmc, host) = bmc(&connections).await;
+    connections
+        .open(&host, |connection| &connection.kvm, async |client| client.kvm().await.map(Arc::new))
+        .await
+        .unwrap();
+    let old = connections.get(&host).unwrap();
+    bmc.asked();
+
+    connections.connect(bmc.target(PASSWORD), None, false).await.unwrap();
+    assert!(old.kvm.0.lock().await.is_none());
+    assert!(bmc.asked().contains(&"GET /cgi/logout.cgi".to_owned()));
+}
+
+/// An IPMI login has no certificate, so the one pinned over TLS stays, until the device is forgotten.
+#[tokio::test]
+async fn an_ipmi_login_keeps_the_pin() {
+    let dir = tempfile::tempdir().unwrap();
+    let connections = connections(&dir);
+    let (bmc, host) = bmc(&connections).await;
+    let pin = connections.hosts().unwrap().pin(&host);
+    assert!(pin.is_some());
+
+    connections.connect(bmc.target(PASSWORD), Some(Flavor::Ipmi), false).await.unwrap();
+    assert_eq!(connections.hosts().unwrap().pin(&host), pin);
+
+    connections.forget(&host).await.unwrap();
+    assert_eq!(connections.hosts().unwrap().pin(&host), None);
 }

@@ -3,15 +3,18 @@
 //! session's own protocol. Byte layouts follow MeshCommander's `amt-redir-ws-0.1.0.js` (Apache-2.0).
 
 use digest_auth::{AuthContext, Charset, Qop, WwwAuthenticateHeader};
-use tokio::io::{AsyncReadExt, AsyncWriteExt, ReadHalf, WriteHalf};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, ReadHalf, WriteHalf};
 
-use super::{Pin, Stream, tls};
+use super::{HUNG, Pin, Stream, tls};
 use crate::{Error, Result, Target};
 
 pub const REDIRECTION_PORT: u16 = 16995;
 const AUTH_URI: &str = "/RedirectionService";
 /// Digest with qop, the one authentication type we speak.
 const DIGEST: u8 = 4;
+/// The most a message may say it carries, far above any AMT sends (SOL's lengths are u16, a tile 64 by 64), so a
+/// garbled length can't make us allocate gigabytes.
+const MOST: usize = 1 << 20;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Session {
@@ -47,16 +50,17 @@ impl Redirection {
         Ok(self.stream.read(buf).await?)
     }
 
-    pub async fn read_exact(&mut self, len: usize) -> Result<Vec<u8>> {
-        let mut buf = vec![0; len];
-        self.stream.read_exact(&mut buf).await?;
-        Ok(buf)
+    /// The next message's first byte, however long that takes.
+    pub async fn read_u8(&mut self) -> Result<u8> {
+        Ok(self.stream.read_u8().await?)
     }
 
-    /// TLS may hold on to what we write until we flush, so we do.
+    pub async fn read_exact(&mut self, len: usize) -> Result<Vec<u8>> {
+        read_exact(&mut self.stream, len).await
+    }
+
     pub async fn write_all(&mut self, bytes: &[u8]) -> Result<()> {
-        self.stream.write_all(bytes).await?;
-        Ok(self.stream.flush().await?)
+        write_all(&mut self.stream, bytes).await
     }
 
     /// Its two directions, to read and write at once.
@@ -121,6 +125,22 @@ impl Redirection {
         let len = u32::from_le_bytes(header[5..9].try_into().unwrap());
         Ok((header[1], self.read_exact(len as usize).await?))
     }
+}
+
+/// `len` bytes of a message under way, unless the device hung on it or says it carries more than any message does.
+pub(crate) async fn read_exact(reader: &mut (impl AsyncRead + Unpin), len: usize) -> Result<Vec<u8>> {
+    if len > MOST {
+        return Err(Error::Protocol(format!("a {len}-byte message")));
+    }
+    let mut bytes = vec![0; len];
+    tokio::time::timeout(HUNG, reader.read_exact(&mut bytes)).await.map_err(|_| Error::Timeout)??;
+    Ok(bytes)
+}
+
+/// TLS may hold on to what we write until we flush, so we do.
+pub(crate) async fn write_all(writer: &mut (impl AsyncWrite + Unpin), bytes: &[u8]) -> Result<()> {
+    writer.write_all(bytes).await?;
+    Ok(writer.flush().await?)
 }
 
 /// Authentication fields travel as length-prefixed strings, both ways.

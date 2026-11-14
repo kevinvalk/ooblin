@@ -1,4 +1,4 @@
-//! A Supermicro BMC's Redfish: JSON over HTTPS with Basic on every request, one at a time.
+//! A Supermicro BMC's Redfish: JSON over HTTPS with Basic on every request.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering::Relaxed};
@@ -29,7 +29,7 @@ impl Connection {
         let pin = Pin::new(pin);
         Ok(Self {
             http: http(&pin)?,
-            url: format!("https://{}", target.host),
+            url: format!("https://{}", target.authority()),
             user: target.user.clone(),
             password: target.password.clone(),
             pin,
