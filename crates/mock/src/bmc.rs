@@ -27,6 +27,8 @@ pub struct Bmc {
     pub(crate) redfish: redfish::State,
     pub(crate) ikvm: ikvm::State,
     pub(crate) ipmi: Mutex<ipmi::Replay>,
+    /// A fixture without an `ipmi.txt` is of a BMC with IPMI off, which answers none unless we're recording it.
+    pub(crate) ipmi_off: bool,
     /// The BMC we ask what the replay can't answer, when recording its IPMI.
     pub(crate) ipmi_device: OnceLock<ooblin_core::ipmi::Session>,
     /// Where it answers IPMI, on 127.0.0.1: `serve_ipmi` answers on more.
@@ -43,15 +45,15 @@ impl Bmc {
     pub(crate) async fn serve(address: impl ToSocketAddrs, fixture: &Path, redfish: redfish::State) -> Arc<Self> {
         let listener = TcpListener::bind(address).await.unwrap();
         let ipmi = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let recording = std::fs::read_to_string(fixture.join("ipmi.txt"));
         let bmc = Arc::new(Self {
             port: listener.local_addr().unwrap().port(),
             requests: Mutex::default(),
             fixture: fixture.to_owned(),
             redfish,
             ikvm: ikvm::State::default(),
-            ipmi: Mutex::new(ipmi::Replay::read(
-                &std::fs::read_to_string(fixture.join("ipmi.txt")).unwrap_or_default(),
-            )),
+            ipmi_off: recording.is_err(),
+            ipmi: Mutex::new(ipmi::Replay::read(&recording.unwrap_or_default())),
             ipmi_device: OnceLock::new(),
             ipmi_port: ipmi.local_addr().unwrap().port(),
         });

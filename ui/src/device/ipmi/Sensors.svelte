@@ -26,11 +26,7 @@
       <h2>{title}</h2>
       <dl class="card">
         {#each sensors as sensor}
-          <div
-            class="data-[severity=Critical]:text-danger data-[severity=Warning]:text-asleep"
-            data-severity={sensor?.severity}
-            title={sensor?.severity}
-          >
+          <div data-severity={sensor?.severity} title={sensor?.severity}>
             <dt>{sensor?.name}</dt>
             <dd class="flex items-center gap-4">{#if sensor}
                 {@const { reading, unit, state, low, high } = sensor}

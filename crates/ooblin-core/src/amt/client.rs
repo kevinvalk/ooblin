@@ -74,8 +74,9 @@ impl Client {
             Err(Error::Fault(_) | Error::Unsupported) => return Ok(Vec::new()),
             reply => Some(wsman::parse_enumerate(&reply?)?),
         };
-        let mut instances = Vec::new();
+        let (mut instances, mut pages) = (Vec::new(), 0..PAGES);
         while let Some(current) = context {
+            pages.next().ok_or_else(endless)?;
             let envelope = wsman::pull(class, &current, self.next_message_id());
             let page = wsman::parse_pull(&self.read(envelope).await?)?;
             instances.extend(page.items);
@@ -97,6 +98,14 @@ impl Client {
         self.message_id += 1;
         self.message_id
     }
+}
+
+/// The most pages we read of anything a device lists, where AMT needs one or two: a list that goes on has no end, and
+/// would keep us, and everything waiting for this device, forever.
+pub(super) const PAGES: usize = 100;
+
+pub(super) fn endless() -> Error {
+    Error::Protocol("a list that doesn't end".into())
 }
 
 fn output(method: &str, reply: &str) -> Result<Instance> {

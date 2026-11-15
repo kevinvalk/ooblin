@@ -10,7 +10,7 @@
   import * as log from "@tauri-apps/plugin-log";
   import type { Snippet } from "svelte";
   import type { CommandError } from "../bindings/ooblin";
-  import { reason } from "./Device.svelte";
+  import { reason } from "../connection";
 
   let {
     kind,

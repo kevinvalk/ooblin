@@ -1,4 +1,4 @@
-//! A Supermicro BMC's Redfish: JSON over HTTPS with Basic on every request.
+//! A BMC's Redfish: JSON over HTTPS with Basic on every request.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering::Relaxed};
@@ -19,8 +19,11 @@ pub struct Connection {
     pub(super) user: String,
     pub(super) password: String,
     pub(super) pin: Arc<Pin>,
-    /// Set by a 401 or a refused web login: we send nothing more, a wrong password retried locks the account.
+    /// Set by a 401: we send nothing more, a wrong password retried locks the account.
     pub(super) refused: AtomicBool,
+    /// Set by a refused web login, which we don't try again either. Redfish goes on: it took the password, so the
+    /// pages refuse us for a reason of their own.
+    pub(super) web_refused: AtomicBool,
 }
 
 impl Connection {
@@ -34,6 +37,7 @@ impl Connection {
             password: target.password.clone(),
             pin,
             refused: AtomicBool::new(false),
+            web_refused: AtomicBool::new(false),
         })
     }
 

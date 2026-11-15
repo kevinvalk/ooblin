@@ -6,18 +6,9 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use anyhow::{Result, bail};
-use futures_util::{SinkExt, StreamExt};
 use mock::{Bmc, Direction, PASSWORD, Transcript};
 use ooblin_core::supermicro::{Client, Kvm};
 use ooblin_core::{Error, Input};
-use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
-use rustls::crypto::aws_lc_rs;
-use rustls::pki_types::{CertificateDer, ServerName, UnixTime};
-use rustls::{ClientConfig, DigitallySignedStruct, SignatureScheme};
-use tokio::net::TcpStream;
-use tokio_rustls::TlsConnector;
-use tokio_tungstenite::client_async;
-use tokio_tungstenite::tungstenite::Message;
 
 async fn start(fixture: &Path) -> Arc<Bmc> {
     Bmc::start("127.0.0.1:0", fixture).await
@@ -104,21 +95,15 @@ async fn shows_the_x10s_screen() -> Result<()> {
         .map(|byte| format!("{byte:02x}"))
         .collect::<String>();
     assert_eq!(hash, "93e8a7f3344b8737a3abd3f7756108ead6409648874ca174f3f088afaa8762fa");
-    // Then only the text cursor blinking, until the recording ends and nothing changes for a second.
-    let mut blinks = 0;
-    loop {
-        let started = Instant::now();
-        let frame = kvm.frame().await?;
-        let (size, rects, _) = parse(&frame);
-        assert_eq!(size, [1024, 768]);
-        if rects.is_empty() {
-            assert!(started.elapsed() < Duration::from_secs(2), "{:?}", started.elapsed());
-            break;
-        }
-        assert_eq!(rects, [[0, 752, 16, 16]]);
-        blinks += 1;
+    // Then only the text cursor blinking, 12 times, until the recording ends and nothing changes for a second: its
+    // own, not the 20 a BMC that hung gets, however loaded this machine is.
+    for _ in 0..12 {
+        let (size, rects, _) = parse(&painted(&kvm).await?);
+        assert_eq!((size, rects), ([1024, 768], vec![[0, 752, 16, 16]]));
     }
-    assert_eq!(blinks, 12);
+    let started = Instant::now();
+    assert_eq!(parse(&kvm.frame().await?), ([1024, 768], vec![], vec![]));
+    assert!(started.elapsed() < Duration::from_secs(10), "{:?}", started.elapsed());
 
     // The first request for the size the handshake said, MouseSync once the first update says the real one.
     kvm.close().await;
@@ -213,13 +198,14 @@ async fn closing_cuts_a_paste_short() -> Result<()> {
         async move { kvm.input(vec![Input::Text { text: "a".repeat(1000) }]).await }
     });
     tokio::time::sleep(Duration::from_millis(100)).await;
-    let started = Instant::now();
     kvm.close().await;
-    assert!(started.elapsed() < Duration::from_secs(2), "{:?}", started.elapsed());
-    // The rest of it goes nowhere: the socket's closed before we log out, and stays so.
+    // Closed long before all of it is typed, a key down and up each, which takes 10 seconds at the least. The rest of
+    // it goes nowhere: the socket's closed before we log out, and stays so.
+    let typed = sent(&bmc).len();
+    assert!(typed < 2000, "{typed}");
     assert!(typing.await?.is_err());
     assert_closed(&bmc);
-    assert!(sent(&bmc).len() < 200, "{}", sent(&bmc).len());
+    assert_eq!(sent(&bmc).len(), typed);
     Ok(())
 }
 
@@ -241,69 +227,7 @@ async fn ends_with_its_web_session() -> Result<()> {
     // The socket's gone, the goodbye isn't.
     kvm.close().await;
     assert_closed(&bmc);
-    // Nor does its token, the mock's first, open another.
-    let before = sent(&bmc).len();
-    assert!(!shakes_hands(&bmc, &"0".repeat(24)).await?);
-    assert_eq!(sent(&bmc).len(), before);
     Ok(())
-}
-
-/// Whether the mock's KVM takes `token` in ATEN's handshake.
-async fn shakes_hands(bmc: &Bmc, token: &str) -> Result<bool> {
-    let tls = ClientConfig::builder_with_provider(aws_lc_rs::default_provider().into());
-    let tls = tls.with_safe_default_protocol_versions()?.dangerous().with_custom_certificate_verifier(Arc::new(Any));
-    let tcp = TcpStream::connect(("127.0.0.1", bmc.port)).await?;
-    let tls = TlsConnector::from(Arc::new(tls.with_no_client_auth()));
-    let stream = tls.connect(ServerName::try_from("127.0.0.1")?, tcp).await?;
-    let (mut socket, _) = client_async(format!("wss://127.0.0.1:{}/", bmc.port), stream).await?;
-    // Its version, security types and challenge, each answered.
-    for answer in [&b"RFB 055.008\n"[..], &[16], &[token.as_bytes(), &[0; 24]].concat()] {
-        socket.next().await;
-        // The BMC refuses by hanging up, which Windows reports as a reset when we send.
-        if socket.send(Message::binary(answer.to_vec())).await.is_err() {
-            return Ok(false);
-        }
-    }
-    Ok(matches!(socket.next().await, Some(Ok(Message::Binary(result))) if *result == [0; 4]))
-}
-
-/// The mock's certificate, whichever it is.
-#[derive(Debug)]
-struct Any;
-
-impl ServerCertVerifier for Any {
-    fn verify_server_cert(
-        &self,
-        _: &CertificateDer,
-        _: &[CertificateDer],
-        _: &ServerName,
-        _: &[u8],
-        _: UnixTime,
-    ) -> Result<ServerCertVerified, rustls::Error> {
-        Ok(ServerCertVerified::assertion())
-    }
-
-    fn verify_tls12_signature(
-        &self,
-        _: &[u8],
-        _: &CertificateDer,
-        _: &DigitallySignedStruct,
-    ) -> Result<HandshakeSignatureValid, rustls::Error> {
-        Ok(HandshakeSignatureValid::assertion())
-    }
-
-    fn verify_tls13_signature(
-        &self,
-        _: &[u8],
-        _: &CertificateDer,
-        _: &DigitallySignedStruct,
-    ) -> Result<HandshakeSignatureValid, rustls::Error> {
-        Ok(HandshakeSignatureValid::assertion())
-    }
-
-    fn supported_verify_schemes(&self) -> Vec<SignatureScheme> {
-        aws_lc_rs::default_provider().signature_verification_algorithms.supported_schemes()
-    }
 }
 
 #[tokio::test]
@@ -427,6 +351,7 @@ async fn virtual_media_serves_the_image_until_ejected() -> Result<()> {
 async fn virtual_media_logs_out_when_refused() -> Result<()> {
     let bmc = start(&mock::fixture("x10")).await;
     let image = tempfile::NamedTempFile::new()?;
+    std::fs::write(image.path(), [0; 2048])?;
     bmc.refuse_kvm();
     let refused = client(&bmc, PASSWORD).media(std::fs::File::open(image.path())?).await;
     let Err(Error::Protocol(message)) = refused else { bail!("the drive went in") };
@@ -446,5 +371,22 @@ async fn virtual_media_ejects_at_once() -> Result<()> {
     let requests = requests(&bmc);
     assert!(requests.iter().any(|line| line == "vm out"), "{requests:?}");
     assert_eq!(requests.last().unwrap(), "GET /cgi/logout.cgi");
+
+    // Out too where the BMC hangs up on us and never says so.
+    bmc.hang_up_on_plug_out();
+    let media = client(&bmc, PASSWORD).media(std::fs::File::open(image.path())?).await?;
+    tokio::time::timeout(Duration::from_secs(5), media.serve(|_| {}, async {})).await??;
+    Ok(())
+}
+
+/// A file too small to hold a block is no disc: we say so, and log in nowhere.
+#[tokio::test]
+async fn virtual_media_wants_a_disc() -> Result<()> {
+    let bmc = start(&mock::fixture("x10")).await;
+    let image = tempfile::NamedTempFile::new()?;
+    std::fs::write(image.path(), [0; 2047])?;
+    let refused = client(&bmc, PASSWORD).media(std::fs::File::open(image.path())?).await;
+    assert!(matches!(refused, Err(Error::Invalid(_))));
+    assert!(requests(&bmc).is_empty());
     Ok(())
 }

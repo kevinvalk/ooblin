@@ -1,7 +1,7 @@
 <!-- What can be set over IPMI: the BMC's network, the server's settings, its FRU, and the BMC's users to read. -->
 <script lang="ts">
   import type { IpmiChange, IpmiSettings } from "../../bindings/core";
-  import type { Connection } from "../Device.svelte";
+  import type { Connection } from "../../connection";
   import Fru from "./Fru.svelte";
   import NetworkSettings from "./NetworkSettings.svelte";
   import Server from "./Server.svelte";

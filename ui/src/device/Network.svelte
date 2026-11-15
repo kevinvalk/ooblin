@@ -1,4 +1,5 @@
-<!-- A device's network ports, AMT's and a BMC's alike: its link, IPv4 and IPv6. While loading we show one wired port. -->
+<!-- A device's network ports, AMT's and a BMC's alike: its link, IPv4 and IPv6. While loading we show one wired
+     port. -->
 <script module lang="ts">
   /** How an IPv4 address is set, in words, AMT's settings' too. */
   export const CONFIGURATIONS = { Dhcp: "Automatic (DHCP)", Os: "Same as the OS", Manual: "Manual" };

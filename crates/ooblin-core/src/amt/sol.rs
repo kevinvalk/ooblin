@@ -53,16 +53,17 @@ impl Sol {
     /// What the device wrote to its serial port since, or nothing after a second.
     pub async fn read(&self) -> Result<Vec<u8>> {
         let mut reader = self.reader.lock().await;
+        // Before every read, not only after a quiet one: a device that keeps writing wants to hear from us too.
+        let mut writer = self.writer.lock().await;
+        if writer.sent.elapsed() > Duration::from_secs(2) {
+            writer.send(0x2B, &[]).await?; // keep-alive
+        }
+        drop(writer);
+
         loop {
             // Reading a byte gives up nothing when it times out.
             let kind = match tokio::time::timeout(Duration::from_secs(1), reader.read_u8()).await {
-                Err(_) => {
-                    let mut writer = self.writer.lock().await;
-                    if writer.sent.elapsed() > Duration::from_secs(2) {
-                        writer.send(0x2B, &[]).await?; // keep-alive
-                    }
-                    return Ok(Vec::new());
-                }
+                Err(_) => return Ok(Vec::new()),
                 Ok(kind) => kind?,
             };
             read_exact(&mut *reader, 7).await?; // padding and the sequence, which we don't check

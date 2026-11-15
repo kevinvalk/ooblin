@@ -49,12 +49,15 @@ export type BmcNetwork = { hostname: string | null, dhcp: boolean, address: stri
  * the time and sends its log, and the server's power restore policy, serial console and FRU, `None` where the BMC
  * doesn't say. An empty mode is one this BMC doesn't have.
  */
-export type BmcSettings = { network: BmcNetwork, services: Array<Service>, fan_mode: Mode, mouse_mode: Mode, ntp: Ntp, syslog: Syslog, power_restore: PowerRestore | null, sol: SolSettings | null, fru: Fru | null, };
+export type BmcSettings = { network: BmcNetwork, services: Array<Service>, 
+/**
+ * What it lets us redirect now, as `Info` said on login.
+ */
+remote_access: RemoteAccess, fan_mode: Mode, mouse_mode: Mode, ntp: Ntp, syslog: Syslog, power_restore: PowerRestore | null, sol: SolSettings | null, fru: Fru | null, };
 
 /**
- * What the server and its BMC are: the day its firmware (in `info`) was built, Redfish's version, the BIOS's and the
- * day it was released, and the server's own network ports. Dates are `2026-05-29`, empty where the BMC's pages don't
- * say.
+ * What the server and its BMC are: Redfish's version, the BIOS's, the server's own network ports, and what a vendor's
+ * own pages add where it has them: the day its firmware (in `info`) was built and the BIOS released, as `2026-05-29`.
  */
 export type BmcStatus = { info: Info, power: PowerState, system_id: string, firmware_built: string, redfish: string, bios: string, bios_released: string, lans: Array<Lan>, 
 /**
@@ -105,7 +108,7 @@ time: number, source: string, description: string, severity: Severity, };
 /**
  * What a device is, which says how we speak to it.
  */
-export type Flavor = "Amt" | "Supermicro" | "Ipmi";
+export type Flavor = "Amt" | "Supermicro" | "Ipmi" | "Redfish";
 
 /**
  * What a device says about itself before we log in: neither its name nor anything else that would need one. A BMC
@@ -118,14 +121,14 @@ export type Found = { host: string, flavor: Flavor, version: string,
 provisioned: boolean, };
 
 /**
- * A FRU's information, by area; an area the FRU doesn't have is None and can't be set. Strings as decoded (any
- * encoding), trimmed.
+ * A FRU's information, by area: one the FRU doesn't have is `None` and can't be set. Its strings as we decode them,
+ * whatever their encoding, trimmed.
  */
 export type Fru = { chassis: FruChassis | null, board: FruBoard | null, product: FruProduct | null, };
 
 export type FruBoard = { 
 /**
- * Unix seconds, None = unspecified.
+ * In Unix seconds, `None` where the FRU doesn't say.
  */
 manufactured: number | null, manufacturer: string, product: string, serial_number: string, part_number: string, };
 

@@ -8,6 +8,7 @@ use serde::Serialize;
 use ts_rs::TS;
 
 use super::Client;
+use super::client::{PAGES, endless};
 use super::wsman::method;
 use crate::{Error, Event, Result, Severity};
 
@@ -33,8 +34,9 @@ impl Client {
             first => first?,
         };
         let mut iteration = first.text("IterationIdentifier");
-        let mut events = Vec::new();
+        let (mut events, mut pages) = (Vec::new(), 0..PAGES);
         loop {
+            pages.next().ok_or_else(endless)?;
             // 390 is the most AMT returns at once.
             let page = self.query(&GetRecords { IterationIdentifier: &iteration, MaxReadRecords: 390 }).await?;
             let records: Vec<_> = page.all("RecordArray").collect();
@@ -47,8 +49,9 @@ impl Client {
     }
 
     pub async fn audit_log(&mut self) -> Result<Vec<AuditRecord>> {
-        let (mut records, mut read) = (Vec::new(), 0);
+        let (mut records, mut read, mut pages) = (Vec::new(), 0, 0..PAGES);
         loop {
+            pages.next().ok_or_else(endless)?;
             let page = self.query(&ReadRecords { StartIndex: read + 1 }).await?;
             let page_records: Vec<_> = page.all("EventRecords").collect();
             records.extend(page_records.iter().filter_map(|record| audit_record(&base64(record)?)));

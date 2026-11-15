@@ -1,6 +1,8 @@
 # Design
 
-Calm, native-feeling, one look everywhere. Tailwind's own scale, our colors from `src/style.css`, no one-off sizes.
+Calm, native-feeling, one look everywhere. Tailwind's own scale, our colors from `src/style.css`, no one-off sizes
+but these: the pill's `text-[10px]`, the consent code's `tracking-[0.5em]`, a fingerprint's `w-[48ch]` (16 bytes a
+line) and the connect form's `mt-[12vh]`. That form stands alone, so its title is `text-2xl` and its button 36px.
 
 ## Type
 
@@ -30,37 +32,40 @@ sidebar's device names and the footer included. MAC addresses are written `12:07
 - Tables span the page, their header stays in view.
 - Each flavor's pages show only what that flavor can say, they don't copy another's (a BMC's hardware isn't AMT's).
 - A device's kind is a pill in its color with its firmware version, white on the color: `AMT` in `amt`, `SMC` (a
-  Supermicro) and `IPMI` in `ipmi` (`src/flavors.ts`).
+  Supermicro) and `IPMI` in `ipmi` (`src/connection.ts`).
 - A reading with bounds (a sensor between its critical thresholds) has a native `<meter>` beside it, styled once in
   `src/style.css` in the color of its text.
 
 ## States
 
 - Values come from Rust as data, the page says them in words right where it shows them: `{mhz && `${mhz} MHz`}`,
-  Yes or No, times with `toLocaleString()` in the reader's own zone.
+  Yes or No, times with `toLocaleString()` in the reader's own zone. A number that can be 0 (a battery's charge) asks
+  `!== null` instead, as `&&` would print the 0.
 - A page that changes by the second (sensors) reads itself again a second after each read lands while it's shown,
   in place, without the gray bars.
 - Loading: the page itself, `aria-busy`, with gray bars where values go. Left out by the device: a dash. Both are CSS on
   empty `dt`, `dd`, `td` and `h3`, so markup just writes `{value}`. Not there at all (no battery): say so in words.
 - Waiting on the device after a click: a spinning `LoaderCircle` where the click was (button, sidebar entry).
-- The footer says what actions did for as long as it takes to read, and while the pointer is on it so it can be
-  selected, what's true now (a device not answering) for as long as it is. Then what the device on screen says: what
-  its screen or serial console waits for, and on the right its screen's size and, while a disk image is in the drive,
-  which parts of it were read and how fast it's read, its speed in a tooltip.
+- The footer says what actions did (naming a device that isn't the one on screen) for as long as it takes to read, and
+  while the pointer is on it so it can be selected, what's true now (a device not answering) for as long as it is. Then
+  what the device on screen says: what its screen or serial console waits for, and on the right its screen's size and,
+  while a disk image is in the drive, which parts of it were read and how fast it's read, its speed in a tooltip.
 - Errors: in the page with a way to try again, in the footer (in red) for actions and saving. A device that stops
   answering for two minutes is let go of, and the form says so, until then it's retried.
 
 ## Controls
 
-- Buttons are `btn` with `btn-primary` (the one main action), `btn-secondary`, or `bg-danger text-white` for what can't
-  be undone, 32px high, 28px (`h-7`) in a card title or a toolbar. A card title with buttons is as tall as they are, so
+- Buttons are `btn` with `btn-primary` (the one main action), `btn-secondary`, or `btn-danger` for what can't be
+  undone, 32px high, 28px (`h-7`) in a card title or a toolbar. A card title with buttons is as tall as they are, so
   they don't reach into the section title stuck above it, which would cover them.
-- Icons are 16px Lucide icons, icon-only buttons are `btn-icon` and have a `title`.
+- Icons are 16px Lucide icons, icon-only buttons are `btn-icon` and have a `title`. One inside a field or beside a tab
+  is 20px with a 14px icon.
 - Explanations go in a native `title` tooltip, not in the layout.
 - Settings that can change are a `Form` (`src/device/Form.svelte`, every flavor's) of `label` and field rows
   (checkboxes, `.field` inputs and selects), the settings being the fields' defaults. A switch or choice of its own
   saves as it changes. Fields that go together (a name, an address) save together, from a ✓ and ✕ at the right of their
   card title, there all along so it's clear what saves this way and enabled once something changed. Enter saves and
-  Escape cancels. Either way the footer says how it went, and the form then shows what the device took.
+  Escape cancels. Either way the footer says how it went, and the form then shows what the device took, as it does
+  once its page is read again.
 - Text fields for names and addresses don't capitalize or spell check (`autocapitalize="off" spellcheck="false"`).
-- Anything that can lose work asks first, in a `<dialog class="dialog">`, as do small forms (scheduling a wake-up).
+- Anything that can lose work asks first, in a `<dialog>`, as do small forms (scheduling a wake-up).

@@ -92,11 +92,51 @@ async fn saved_devices_we_cant_read_or_write_fail_the_login() {
     std::fs::write(dir.path().join("hosts.json"), "{").unwrap();
     assert!(connections(&dir).connect(target(&amt, "127.0.0.1"), None, false).await.is_err());
     assert_eq!(std::fs::read_to_string(dir.path().join("hosts.json")).unwrap(), "{");
+    assert!(connections(&dir).hosts().err().unwrap().to_string().contains("hosts.json"));
 
     // A file where their folder should be.
     let unwritable = Connections::new(dir.path().join("hosts.json/hosts.json"), "ooblin.test".into());
     assert!(unwritable.connect(target(&amt, "127.0.0.1"), None, false).await.is_err());
     assert!(unwritable.get("127.0.0.1").is_err());
+}
+
+/// A certificate other than the pinned one changes nothing we saved, until the user trusts it as `trust` does.
+#[tokio::test]
+async fn a_changed_certificate_is_refused_until_trusted() {
+    let (amt, dir) = (mock().await, tempfile::tempdir().unwrap());
+    let connections = connections(&dir);
+    connections.connect(target(&amt, "127.0.0.1"), None, false).await.unwrap();
+    let pin = connections.hosts().unwrap().pin("127.0.0.1").unwrap();
+    connections.close("127.0.0.1").await;
+    connections.edit(|hosts| hosts.trust("127.0.0.1", "AB".into())).unwrap();
+    let saved = std::fs::read(dir.path().join("hosts.json")).unwrap();
+
+    let refused = connections.connect(target(&amt, "127.0.0.1"), None, false).await;
+    let Err(CommandError::PinMismatch { expected, actual, .. }) = refused else { panic!("the certificate passed") };
+    assert_eq!((expected.as_str(), &actual), ("AB", &pin));
+    assert!(connections.get("127.0.0.1").is_err());
+    assert_eq!(std::fs::read(dir.path().join("hosts.json")).unwrap(), saved);
+
+    connections.edit(|hosts| hosts.trust("127.0.0.1", actual)).unwrap();
+    connections.connect(target(&amt, "127.0.0.1"), None, false).await.unwrap();
+}
+
+/// Quitting closes what's open on every device, and a login still underway comes to nothing.
+#[tokio::test]
+async fn quitting_closes_every_connection() {
+    let (amt, dir) = (mock().await, tempfile::tempdir().unwrap());
+    let connections = connections(&dir);
+    connections.connect(target(&amt, "127.0.0.1"), None, false).await.unwrap();
+    let open = async |client: &mut Client| client.kvm().await.map(Arc::new);
+    let screen = connections.open("127.0.0.1", |connection| &connection.kvm, open).await.unwrap();
+    let connection = connections.get("127.0.0.1").unwrap();
+
+    let (login, ()) =
+        tokio::join!(connections.connect(target(&amt, "localhost"), None, false), connections.close_all());
+    assert!(login.is_err());
+    assert!(connection.kvm.get(screen).await.is_err());
+    assert!(connections.get("127.0.0.1").is_err() && connections.get("localhost").is_err());
+    assert_eq!(saved(&connections), ["127.0.0.1"]);
 }
 
 #[tokio::test]
@@ -206,6 +246,16 @@ fn an_old_hosts_json_reads_as_amt() {
     std::fs::write(dir.path().join("hosts.json"), saved).unwrap();
     let hosts = Hosts::open(&dir.path().join("hosts.json"), "ooblin.test").unwrap();
     assert_eq!(hosts.flavor("127.0.0.1"), Some(Flavor::Amt));
+}
+
+/// A device whose password we don't keep has no login of ours, and the credential store isn't asked for one.
+#[test]
+fn a_device_not_remembered_has_no_login() {
+    let dir = tempfile::tempdir().unwrap();
+    let saved = r#"{"127.0.0.1": {"pin": "AB", "user": "admin", "remembered": false}}"#;
+    std::fs::write(dir.path().join("hosts.json"), saved).unwrap();
+    let hosts = Hosts::open(&dir.path().join("hosts.json"), "ooblin.test").unwrap();
+    assert_eq!(hosts.target("127.0.0.1").err().unwrap().to_string(), "No saved password for 127.0.0.1.");
 }
 
 /// A BMC as typed, its port in the host, and connected to.

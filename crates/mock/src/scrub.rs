@@ -3,7 +3,7 @@
 //! itself so the same original gets the same fake in every file. Fields can't list everything, so IPv4 addresses inside
 //! any longer text (AMT's access logs, say) go too. AMT's crawls are XML, a BMC's Redfish JSON.
 
-use std::net::Ipv4Addr;
+use std::net::{IpAddr, Ipv4Addr};
 
 use md5::{Digest, Md5};
 use roxmltree::Document;
@@ -109,6 +109,10 @@ fn addresses(text: &str) -> String {
 }
 
 pub(crate) fn fake(value: &str) -> String {
+    // No address is no trace of one, and says so only as it is.
+    if value.parse::<IpAddr>().is_ok_and(|address| address.is_unspecified()) {
+        return value.to_owned();
+    }
     let hash = Md5::digest(value);
     if value.parse::<Ipv4Addr>().is_ok() {
         return format!("192.0.2.{}", 1 + hash[0] % 254);
@@ -156,6 +160,7 @@ mod tests {
             "UUID": "00000000-0000-0000-0000-0CC47AC9FEB5",
             "IPv4Addresses": [{"Address": "10.1.2.3", "SubnetMask": "255.255.255.0"}],
             "NameServers": ["10.1.2.3", ""],
+            "IPv6DefaultGateway": "0:0:0:0:0:0:0:0",
             "Message": "[ OEM ] login from 10.1.2.3",
             "Model": "ASPEED",
         });
@@ -164,6 +169,7 @@ mod tests {
         assert!(address.starts_with("192.0.2."), "{address}");
         assert_eq!(value["NameServers"], json!([address, ""]), "the same value always gets the same fake");
         assert_eq!(value["Message"], format!("[ OEM ] login from {address}"));
+        assert_eq!(value["IPv6DefaultGateway"], "0:0:0:0:0:0:0:0", "no address stays none");
         assert_eq!(
             (&value["Model"], &value["IPv4Addresses"][0]["SubnetMask"]),
             (&json!("ASPEED"), &json!("255.255.255.0"))

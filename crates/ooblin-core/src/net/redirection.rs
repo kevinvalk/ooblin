@@ -71,7 +71,10 @@ impl Redirection {
     async fn handshake(&mut self, target: &Target, session: Session) -> Result<()> {
         self.write_all(&session.start()).await?;
         let reply = self.read_exact(13).await?;
-        if reply[0] != 0x11 || reply[1] != 0 {
+        if reply[0] != 0x11 {
+            return Err(Error::Protocol(format!("expected a redirection reply, got {:#04x}", reply[0])));
+        }
+        if reply[1] != 0 {
             return Err(Error::Protocol(format!("redirection refused (status {}), is it enabled?", reply[1])));
         }
         self.read_exact(usize::from(reply[12])).await?; // OEM data we have no use for
@@ -87,7 +90,9 @@ impl Redirection {
         let Ok([realm, nonce, qop]) = <[String; 3]>::try_from(decode_fields(&challenge)) else {
             return Err(Error::Protocol("not a Digest challenge".into()));
         };
-        // This is the session's second message, so its count is 2, the way MeshCommander has it.
+
+        // This is the session's second message, so its count is 2, the way MeshCommander has it: `respond` counts up
+        // from `nc` before it answers.
         let mut challenge = WwwAuthenticateHeader {
             domain: None,
             realm,
@@ -103,6 +108,7 @@ impl Redirection {
         let digest = challenge
             .respond(&AuthContext::new_post(user, &target.password, uri, None::<&[u8]>))
             .map_err(|error| Error::Protocol(error.to_string()))?;
+
         let (cnonce, nc) = (digest.cnonce.unwrap_or_default(), format!("{:08x}", digest.nc));
         let answer = encode_fields(&[user, &digest.realm, &digest.nonce, uri, &cnonce, &nc, &digest.response, &qop]);
         match self.authenticate(DIGEST, &answer).await? {

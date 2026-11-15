@@ -56,6 +56,9 @@ const RGB565: [u8; 13] = [16, 16, 0, 1, 0, 31, 0, 63, 0, 31, 11, 5, 0];
 /// `LARGEST` bytes, the most AMT keeps (MeshCommander's limit): beyond 4K and AMT 18 on.
 const RGB332: [u8; 13] = [8, 8, 0, 1, 0, 7, 0, 7, 0, 3, 5, 2, 0];
 const LARGEST: usize = 9_216_000;
+/// The most a frame may be, which no screen's is (8K whole is 133 MB of RGBA): an update of rectangle after rectangle
+/// can't fill our memory.
+const MOST: usize = 1 << 28;
 
 /// The device's screens KVM can show, by number from 0, and the one it shows. Like MeshCommander, there's a choice once
 /// more than one is active.
@@ -76,7 +79,7 @@ impl Client {
         let settings = self.get("IPS_KVMRedirectionSettingData").await?;
         let screens = self.enumerate("IPS_ScreenSettingData").await?;
         let active = screens.first().into_iter().flat_map(|screens| screens.all("IsActive"));
-        let active = active.zip(0..).filter(|(active, _)| *active == "true").map(|(_, screen)| screen).collect();
+        let active = active.zip(0..=255).filter(|(active, _)| *active == "true").map(|(_, screen)| screen).collect();
         Ok(Screens { active, shown: settings.parse("DefaultScreen").unwrap_or_default() })
     }
 
@@ -95,18 +98,21 @@ impl Kvm {
         redirection.write_all(&[0x40, 0, 0, 0, 0, 0, 0, 0]).await?;
         redirection.read_exact(8 + 12).await?;
         redirection.write_all(b"RFB 003.008\n").await?;
+
         let types = redirection.read_exact(1).await?[0];
         redirection.read_exact(types.into()).await?;
         redirection.write_all(&[1]).await?;
         if redirection.read_exact(4).await? != [0; 4] {
             return Err(Error::Protocol("the device refused the KVM session".into()));
         }
+
         redirection.write_all(&[1]).await?;
         let init = redirection.read_exact(24).await?;
         redirection.read_exact(u32::from_be_bytes(init[20..24].try_into().unwrap()) as usize).await?; // its name
         if init[4..17] != RGB565 {
             return Err(Error::Protocol(format!("a pixel format we don't decode: {:?}", &init[4..17])));
         }
+
         // ZRLE, Raw (AMT insists on it) and the DesktopSize pseudo-encoding.
         redirection.write_all(&[2, 0, 0, 3, 0, 0, 0, 16, 0, 0, 0, 0, 0xFF, 0xFF, 0xFF, 0x21]).await?;
 
@@ -194,7 +200,11 @@ impl Kvm {
                 }
                 encoding => return Err(Error::Protocol(format!("a {width} by {height} rectangle in {encoding}"))),
             }
+            if frame.len() > MOST {
+                return Err(Error::Protocol(format!("an update of more than {MOST} bytes")));
+            }
         }
+
         if frame.len() > 4 && !std::mem::take(&mut screen.answer) {
             screen.changed = Some(Instant::now());
         }
@@ -245,10 +255,15 @@ impl Kvm {
         let _ = tokio::time::timeout(GOODBYE, goodbye).await;
     }
 
+    /// The keyboard is ours for one input at a time, text a character at a time: typing it takes a while, in which
+    /// the screen asks for updates, other input comes and `close` says goodbye.
     pub async fn input(&self, inputs: Vec<Input>) -> Result<()> {
-        let mut keyboard = self.keyboard.lock().await;
-        for input in inputs {
-            keyboard.input(input).await?;
+        let singly = inputs.into_iter().flat_map(|input| match input {
+            Input::Text { text } => text.chars().map(|char| Input::Text { text: char.into() }).collect(),
+            input => vec![input],
+        });
+        for input in singly {
+            self.keyboard.lock().await.input(input).await?;
         }
         Ok(())
     }

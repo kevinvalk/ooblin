@@ -22,10 +22,8 @@ pub struct Kvm {
 
 struct Screen {
     receiver: Receiver,
-    /// The picture so far, `width` by `height`.
+    /// The picture so far.
     decoder: Decoder,
-    width: u16,
-    height: u16,
     /// When we ask again for an update that hasn't come, a second after we asked, and the next a second after the BMC
     /// said it has no picture (the host's screen is off, say), as the viewer does. Whether it's for the whole screen.
     ask_at: Instant,
@@ -51,14 +49,12 @@ const SECOND: Duration = Duration::from_secs(1);
 impl Client {
     /// Opens the BMC's screen, in a web session of its own.
     pub async fn kvm(&mut self) -> Result<Kvm> {
-        let Ikvm { web, receiver, sender, width, height } = Ikvm::open(&self.connection).await?;
+        let Ikvm { web, receiver, sender, width, height } = Ikvm::open(&self.redfish.connection).await?;
         // A placeholder the first update corrects (the X10's is 640 × 480), which we don't take beyond what fits.
         let (width, height) = if fits(width, height) { (width, height) } else { (640, 480) };
         let screen = Screen {
             receiver,
             decoder: Decoder::new(width, height),
-            width,
-            height,
             ask_at: Instant::now(),
             whole: true,
             dark: false,
@@ -105,17 +101,18 @@ impl Kvm {
                         if std::mem::replace(&mut screen.dark, true) {
                             continue;
                         }
-                        screen.decoder = Decoder::new(screen.width, screen.height);
-                        return Ok(screen.frame(&[[0, 0, screen.width, screen.height]]));
+                        let Decoder { width, height, .. } = screen.decoder;
+                        screen.decoder = Decoder::new(width, height);
+                        return Ok(screen.frame(&[[0, 0, width, height]]));
                     }
                     if field(11) != 87 {
                         self.ask(&mut screen).await?;
                         continue; // not AST2100, which is all the viewer decodes
                     }
-                    let (width, height) =
-                        if fits(width, height) { (width, height) } else { (screen.width, screen.height) };
-                    if (width, height) != (screen.width, screen.height) || screen.dark {
-                        (screen.decoder, screen.width, screen.height) = (Decoder::new(width, height), width, height);
+                    let size = (screen.decoder.width, screen.decoder.height);
+                    let (width, height) = if fits(width, height) { (width, height) } else { size };
+                    if (width, height) != size || screen.dark {
+                        screen.decoder = Decoder::new(width, height);
                         (screen.whole, screen.dark) = (true, false);
                         self.keyboard.lock().await.sender.sync_mouse().await?;
                     }
@@ -172,7 +169,7 @@ impl Kvm {
 
     /// Asks for the next update, and again a second later unless it came.
     async fn ask(&self, screen: &mut Screen) -> Result<()> {
-        self.keyboard.lock().await.sender.update(screen.whole, screen.width, screen.height).await?;
+        self.keyboard.lock().await.sender.update(screen.whole, screen.decoder.width, screen.decoder.height).await?;
         screen.ask_at = Instant::now() + SECOND;
         Ok(())
     }
@@ -212,11 +209,12 @@ impl Kvm {
 impl Screen {
     /// The screen's size, then `rects` with their pixels, as `amt::Kvm::frame` says it.
     fn frame(&self, rects: &[[u16; 4]]) -> Vec<u8> {
-        let mut frame = [self.width.to_le_bytes(), self.height.to_le_bytes()].concat();
+        let width = self.decoder.width;
+        let mut frame = [width.to_le_bytes(), self.decoder.height.to_le_bytes()].concat();
         for &[x, y, w, h] in rects {
             frame.extend([x, y, w, h].iter().flat_map(|value| value.to_le_bytes()));
             for row in y..y + h {
-                let at = 4 * (usize::from(row) * usize::from(self.width) + usize::from(x));
+                let at = 4 * (usize::from(row) * usize::from(width) + usize::from(x));
                 frame.extend_from_slice(&self.decoder.image()[at..at + 4 * usize::from(w)]);
             }
         }

@@ -48,17 +48,20 @@ impl Client {
         {
             self.invoke(&KvmStateChange { RequestedState: if on { 2 } else { 3 } }).await?;
         }
+
         let mut service = self.get("AMT_RedirectionService").await?;
         let state = 32768 | u16::from(access.ider) | u16::from(access.sol) << 1;
         if service.parse("EnabledState") != Some(state) {
             self.invoke(&RedirectionStateChange { RequestedState: state }).await?;
             service.set("EnabledState", state);
         }
+
         let listening = access.kvm == Some(true) || access.sol || access.ider;
         if service.parse("ListenerEnabled") != Some(listening) {
             service.set("ListenerEnabled", listening);
             self.put("AMT_RedirectionService", &service).await?;
         }
+
         let mut opt_in = self.get("IPS_OptInService").await?;
         if !access.consent_fixed && opt_in.parse("OptInRequired") != Some(access.consent.required()) {
             opt_in.set("OptInRequired", access.consent.required());
@@ -78,6 +81,7 @@ impl Client {
         if !on {
             return Err(Error::Off);
         }
+
         // Like MeshCommander: unless consent was given (3) or is in use (4).
         let required = match access.consent {
             Consent::None => false,

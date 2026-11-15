@@ -6,6 +6,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Result, bail};
+use mock::ipmi::Fault;
 use mock::{Bmc, PASSWORD, USER, hex};
 use ooblin_core::ipmi::{self, Change, Client, Fru, Network, PowerRestore};
 use ooblin_core::{
@@ -38,6 +39,10 @@ async fn finds_the_x10_by_its_presence_pong() -> Result<()> {
     discover("127.0.0.1", bmc.ipmi_port, |device| found.push(device)).await?;
     let x10 = Found { host: "127.0.0.1".into(), flavor: Flavor::Ipmi, version: String::new(), provisioned: true };
     assert_eq!(found, [x10]);
+
+    // A range the wrong way round holds no address: we say so rather than find nothing in it.
+    let backwards = discover("127.0.0.9-127.0.0.1", bmc.ipmi_port, |_| ()).await;
+    assert!(matches!(backwards, Err(Error::Invalid(_))), "{backwards:?}");
     Ok(())
 }
 
@@ -67,6 +72,48 @@ async fn logs_in_with_rakp_and_closes_the_session() -> Result<()> {
         assert!(matches!(refused, Err(Error::Unauthorized)), "{user}: {refused:?}");
     }
     assert_eq!(asked(&bmc), Vec::<String>::new());
+
+    // A name IPMI has no room for can't be a user's: we say so rather than send its start.
+    let long = Target { user: "a".repeat(17), ..bmc.target(PASSWORD) };
+    assert!(matches!(ipmi::with(&long, ipmi::chassis).await, Err(Error::Invalid(_))));
+    Ok(())
+}
+
+/// A request whose answer is lost goes again.
+#[tokio::test]
+async fn resends_a_request_the_bmc_lost() -> Result<()> {
+    let bmc = x10().await;
+    bmc.fault("IPMI 00 01", Fault::Lost);
+    assert!(ipmi::with(&bmc.target(PASSWORD), ipmi::chassis).await?.on);
+    assert_eq!(asked(&bmc), ["IPMI 00 01 []", "IPMI 00 01 []", "IPMI 06 3c [12, 04, 00, 00]"]);
+    Ok(())
+}
+
+/// A BMC still at a request when we send it again says the resend is a duplicate (0xCF), then answers: that's the
+/// answer, not the duplicate's nothing, which would have the server off.
+#[tokio::test]
+async fn waits_for_the_answer_past_a_duplicate() -> Result<()> {
+    let bmc = x10().await;
+    bmc.fault("IPMI 00 01", Fault::Late);
+    assert!(ipmi::with(&bmc.target(PASSWORD), ipmi::chassis).await?.on);
+
+    let bmc = recorded("00 01  -> 21\n").await;
+    let short = ipmi::with(&bmc.target(PASSWORD), ipmi::chassis).await;
+    assert!(matches!(short, Err(Error::Protocol(_))), "{short:?}");
+    Ok(())
+}
+
+/// A BMC that answers none of a request's tries is gone: what we'd ask it next fails at once, with no goodbye, rather
+/// than each waiting its turn.
+#[tokio::test]
+async fn gives_up_on_a_bmc_that_stopped_answering() -> Result<()> {
+    let bmc = x10().await;
+    for _ in 0..3 {
+        bmc.fault("IPMI 06 42 [01]", Fault::Lost);
+    }
+    let settings = Client::new(&bmc.target(PASSWORD)).settings().await;
+    assert!(matches!(settings, Err(Error::Timeout)), "{settings:?}");
+    assert_eq!(asked(&bmc), ["IPMI 06 42 [01]"; 3]);
     Ok(())
 }
 
@@ -194,10 +241,78 @@ async fn opens_the_serial_console() -> Result<()> {
     })
     .await??;
     sol.close().await;
-    let asked = asked(&bmc);
-    assert_eq!(asked[0], "IPMI 06 48 [01, 01, c4, 00, 00, 00]");
-    assert_eq!(asked[1..3], [r#"SOL "root\r""#, r#"SOL "ls\r""#]);
-    assert_eq!(asked[3..], ["IPMI 06 49 [01, 01, 00, 00, 00, 00]", "IPMI 06 3c [12, 04, 00, 00]"]);
+    // Each packet of the BMC's acknowledged by its number and length: the login prompt and both echoes.
+    assert_eq!(
+        asked(&bmc),
+        [
+            "IPMI 06 48 [01, 01, c4, 00, 00, 00]",
+            "SOL ack [01, 2d]",
+            r#"SOL "root\r""#,
+            "SOL ack [02, 06]",
+            r#"SOL "ls\r""#,
+            "SOL ack [03, 04]",
+            "IPMI 06 49 [01, 01, 00, 00, 00, 00]",
+            "IPMI 06 3c [12, 04, 00, 00]"
+        ]
+    );
+    Ok(())
+}
+
+/// The serial console with the login prompt read.
+async fn console(bmc: &Bmc) -> Result<ipmi::Sol> {
+    let sol = ipmi::Sol::open(&bmc.target(PASSWORD)).await?;
+    assert!(sol.read().await?.ends_with(b"login: "));
+    Ok(sol)
+}
+
+/// A BMC sends a packet again until we acknowledge it, with what the server wrote meanwhile after it: we read each
+/// character once and acknowledge every time. When it says SOL is over, so do we.
+#[tokio::test]
+async fn reads_a_packet_sent_again_once() -> Result<()> {
+    let bmc = x10().await;
+    let sol = console(&bmc).await?;
+    let packet = |text: &str| [&[9, 0, 0, 0][..], text.as_bytes()].concat();
+    bmc.fault("SOL", Fault::Answered(vec![vec![0, 1, 1, 0], packet("abc"), packet("abc"), packet("abcde")]));
+    sol.write(b"x").await?;
+    assert_eq!((sol.read().await?, sol.read().await?), (b"abc".to_vec(), b"de".to_vec()));
+
+    bmc.fault("SOL", Fault::Answered(vec![vec![0, 2, 1, 0x10]]));
+    sol.write(b"y").await?;
+    assert!(matches!(sol.read().await, Err(Error::Ended(_))));
+    let acknowledged = ["SOL ack [09, 03]", "SOL ack [09, 03]", "SOL ack [09, 05]"];
+    assert_eq!(asked(&bmc)[1..], [&["SOL ack [01, 2d]", r#"SOL "x""#][..], &acknowledged, &[r#"SOL "y""#]].concat());
+    Ok(())
+}
+
+/// What the BMC took only part of goes on from there, as a packet of its own; what it took none of, refused (NACK) or
+/// not, goes again whole after a second.
+#[tokio::test]
+async fn types_again_what_the_bmc_did_not_take() -> Result<()> {
+    let bmc = x10().await;
+    let sol = console(&bmc).await?;
+    let read = async |until: &str| -> Result<()> {
+        let mut text = String::new();
+        while !text.contains(until) {
+            text += &String::from_utf8_lossy(&sol.read().await?);
+        }
+        Ok(())
+    };
+    bmc.fault("SOL", Fault::Answered(vec![vec![0, 1, 2, 0]]));
+    sol.write(b"abcd").await?;
+    read("cd").await?;
+
+    for answer in [[0, 3, 0, 0x40], [0, 3, 0, 0], [0, 3, 1, 0]] {
+        bmc.fault("SOL", Fault::Answered(vec![answer.to_vec()]));
+    }
+    sol.write(b"e").await?;
+    // Typing on waits for the BMC to take it, which `read` hears.
+    let typing = async { tokio::join!(sol.write(b"f"), read("f")) };
+    let (typed, echoed) = tokio::time::timeout(Duration::from_secs(5), typing).await?;
+    typed?;
+    echoed?;
+    let typed: Vec<_> = asked(&bmc).into_iter().filter(|asked| asked.starts_with("SOL \"")).collect();
+    let again = [r#"SOL "e""#; 3];
+    assert_eq!(typed, [&[r#"SOL "abcd""#, r#"SOL "cd""#][..], &again, &[r#"SOL "f""#]].concat());
     Ok(())
 }
 
@@ -252,6 +367,21 @@ async fn reads_what_the_x10_says_over_ipmi() -> Result<()> {
     Ok(())
 }
 
+/// The SDR repository read in parts: when the BMC says our reservation is gone (0xC5) we reserve again and go on, and
+/// when a part is more than it sends at once (0xCA) we ask for less.
+#[tokio::test]
+async fn reads_sensor_records_a_bmc_makes_hard_to_read() -> Result<()> {
+    let bmc = x10().await;
+    let part = |offset: u8, count: u8| format!("IPMI 0a 23 [14, 00, 00, 00, {offset:02x}, {count:02x}]");
+    bmc.fault(&part(0x05, 0x10), Fault::Refused(0xCA));
+    bmc.fault(&part(0x11, 0x0C), Fault::Refused(0xC5));
+    assert_eq!(Client::new(&bmc.target(PASSWORD)).sensors().await?.len(), 20);
+    let asked = asked(&bmc);
+    let reads = [part(0x05, 0x10), part(0x05, 0x0C), part(0x11, 0x0C), "IPMI 0a 22 []".into(), part(0x11, 0x0C)];
+    assert!(asked.windows(5).any(|window| window == reads), "{asked:?}");
+    Ok(())
+}
+
 /// The FRU as the X10's own pages show it, and changed: its product area grows into the room after it, its board area
 /// stays, and an area it has none of can't be set.
 #[tokio::test]
@@ -272,6 +402,67 @@ async fn changes_the_fru() -> Result<()> {
         Err(Error::Invalid(message)) => assert_eq!(message, "This FRU has no chassis area."),
         other => bail!("expected a refusal, got {other:?}"),
     }
+    Ok(())
+}
+
+/// A FRU that ends before the size it says, with a refusal, still reads. And an area whose write fails half way gets
+/// what it held back: half of it would fail its checksum, which we'd leave alone ever after.
+#[tokio::test]
+async fn copes_with_a_fru_that_refuses() -> Result<()> {
+    let bmc = x10().await;
+    let client = Client::new(&bmc.target(PASSWORD));
+    let read = client.fru().await?;
+    bmc.fault("IPMI 0a 11 [00, e0, 00", Fault::Refused(0xC9));
+    assert_eq!(client.fru().await?, read);
+
+    let mut fru = read.clone();
+    let product = fru.product.as_mut().unwrap();
+    (product.name, product.asset_tag) = ("Homelab".into(), "rack-2".into());
+    asked(&bmc);
+    client.change(Change::Fru(fru.clone())).await?;
+    let writes: Vec<_> = asked(&bmc).into_iter().filter(|asked| asked.starts_with("IPMI 0a 12")).collect();
+    assert!(writes.len() > 1, "{writes:?}");
+
+    // The same change to a BMC that refuses its second write, by where it starts.
+    let bmc = x10().await;
+    let client = Client::new(&bmc.target(PASSWORD));
+    bmc.fault(&writes[1][..22], Fault::Refused(0xFF));
+    assert!(matches!(client.change(Change::Fru(fru)).await, Err(Error::Refused(0xFF))));
+    assert_eq!(client.fru().await?, read);
+    Ok(())
+}
+
+/// What IPMI does to the power is one Chassis Control, sent once, and the chassis says what came of it.
+#[tokio::test]
+async fn changes_the_power_over_ipmi() -> Result<()> {
+    use PowerAction::*;
+    let bmc = x10().await;
+    let client = Client::new(&bmc.target(PASSWORD));
+    let controls = [(Off, 0), (On, 1), (Cycle, 2), (Reset, 3), (Nmi, 4), (SoftOff, 5)];
+    let boots = [(OnToBios, 1), (ResetToBios, 3), (OnToPxe, 1), (ResetToPxe, 3)];
+    for (action, control) in controls.into_iter().chain(boots) {
+        asked(&bmc);
+        client.set_power(action).await?;
+        let sent: Vec<_> = asked(&bmc).into_iter().filter(|asked| asked.starts_with("IPMI 00 02")).collect();
+        assert_eq!(sent, [format!("IPMI 00 02 [{control:02x}]")], "{action:?}");
+        match action {
+            Off => assert_eq!(client.power().await?.state, PowerState::Off),
+            On => assert_eq!(client.power().await?.state, PowerState::On),
+            _ => {}
+        }
+    }
+    assert!(matches!(client.set_power(Sleep).await, Err(Error::Unsupported)));
+    Ok(())
+}
+
+/// A BMC that doesn't answer a Chassis Control isn't sent it again: it may well have done it, and would do it twice.
+#[tokio::test]
+async fn sends_a_chassis_control_once() -> Result<()> {
+    let bmc = x10().await;
+    bmc.fault("IPMI 00 02", Fault::Lost);
+    let reset = Client::new(&bmc.target(PASSWORD)).set_power(PowerAction::Reset).await;
+    assert!(matches!(reset, Err(Error::Timeout)), "{reset:?}");
+    assert_eq!(asked(&bmc), ["IPMI 00 02 [03]"]);
     Ok(())
 }
 
@@ -302,13 +493,20 @@ async fn changes_the_network() -> Result<()> {
     client.change(Change::Network(network.clone())).await?;
     assert_eq!(client.settings().await?.network, Some(network.clone()));
 
-    // Its VLAN only where it changes, as not every BMC has one.
+    // In progress, then its source, mask and gateway, its address last, as the BMC may answer no more once it
+    // changes, then committed and complete. Its VLAN only where it changes, as not every BMC has one.
+    let set = |bmc: &Bmc| -> Vec<_> {
+        asked(bmc).into_iter().filter_map(|asked| Some(asked.strip_prefix("IPMI 0c 01 [01, ")?.to_owned())).collect()
+    };
     network.address = "192.0.2.11".into();
     asked(&bmc);
     client.change(Change::Network(network.clone())).await?;
-    let asked = asked(&bmc);
-    assert!(asked.contains(&"IPMI 0c 01 [01, 03, c0, 00, 02, 0b]".into()), "{asked:?}");
-    assert!(!asked.iter().any(|asked| asked.starts_with("IPMI 0c 01 [01, 14")), "{asked:?}");
+    let sent = ["00, 01]", "04, 01]", "06, ff, ff, ff, 00]", "0c, c0, 00, 02, f1]", "03, c0, 00, 02, 0b]"];
+    assert_eq!(set(&bmc), [&sent[..], &["00, 02]", "00, 00]"]].concat());
+
+    // DHCP sets no address, mask or gateway, whatever they say.
+    client.change(Change::Network(Network { dhcp: true, ..network.clone() })).await?;
+    assert_eq!(set(&bmc), ["00, 01]", "04, 02]", "00, 02]", "00, 00]"]);
 
     network.vlan = Some(4095);
     assert!(matches!(client.change(Change::Network(network.clone())).await, Err(Error::Invalid(_))));
@@ -429,5 +627,9 @@ async fn copes_with_an_empty_bmc() -> Result<()> {
     let client = Client::new(&bmc.target(PASSWORD));
     assert!(matches!(client.sensors().await, Err(Error::Refused(0xC1))));
     assert!(client.event_log().await?.is_empty());
+
+    // A full sensor record cut off after two bytes is no sensor, rather than one that reads zero.
+    let bmc = recorded("0a 22  -> 0100\n0a 23 0000000000ff -> ffff0000510102aabb\n").await;
+    assert!(Client::new(&bmc.target(PASSWORD)).sensors().await?.is_empty());
     Ok(())
 }

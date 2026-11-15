@@ -19,9 +19,11 @@
   } = $props();
   const id = $props.id();
 
-  /** While the form is edited: only a manual configuration takes addresses, only a VLAN that's on its ID. */
-  let dhcp = $derived(network?.dhcp ?? true);
-  let vlan = $derived(network?.vlan != null);
+  /** While the form is `edited`: only a manual configuration takes addresses, only a VLAN that's on its ID. An edit
+   * outlasts the settings, which land again after every save, one that failed too. */
+  let edited = $state<{ dhcp?: boolean; vlan?: boolean }>({});
+  let dhcp = $derived(edited.dhcp ?? network?.dhcp ?? true);
+  let vlan = $derived(edited.vlan ?? network?.vlan != null);
 
   async function change(fields: FormData) {
     const changed: Network = {
@@ -51,8 +53,8 @@
   <Form
     title="Network"
     {busy}
-    save={(fields) => change(fields)}
-    reset={() => ((dhcp = network?.dhcp ?? true), (vlan = network?.vlan != null))}
+    save={change}
+    reset={() => (edited = {})}
   >
     {#if network?.hostname !== null}
       {@render field("hostname", "Host name", network?.hostname ?? undefined)}
@@ -63,7 +65,7 @@
         id="{id}-configuration"
         name="configuration"
         class="field"
-        oninput={(event) => (dhcp = event.currentTarget.value === "dhcp")}
+        oninput={(event) => (edited.dhcp = event.currentTarget.value === "dhcp")}
       >
         {@render choices(network && (network.dhcp ? "dhcp" : "manual"), { dhcp: "Automatic (DHCP)", manual: "Manual" })}
       </select>
@@ -77,7 +79,7 @@
     <div title="Tagged frames on this VLAN only: the switch port has to carry it, or the BMC is gone from the network.">
       <label for="{id}-vlan">VLAN</label>
       <span class="flex items-center gap-4">
-        <input id="{id}-vlan" name="vlan" type="checkbox" defaultChecked={network?.vlan != null} oninput={(event) => (vlan = event.currentTarget.checked)} />
+        <input id="{id}-vlan" name="vlan" type="checkbox" defaultChecked={network?.vlan != null} oninput={(event) => (edited.vlan = event.currentTarget.checked)} />
         <input
           name="vlan_id"
           type="number"

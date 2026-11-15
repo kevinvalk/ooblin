@@ -11,7 +11,7 @@
   import { LoaderCircle } from "@lucide/svelte";
   import { untrack } from "svelte";
   import type { CommandError, Device } from "./bindings/ooblin";
-  import { FLAVORS } from "./flavors";
+  import { FLAVORS } from "./connection";
 
   let {
     device,
@@ -24,7 +24,7 @@
     connecting: boolean;
     error?: CommandError;
     onsubmit: (login: Login) => void;
-    ontrust: (host: string, fingerprint: string) => Promise<unknown>;
+    ontrust: (login: Login, fingerprint: string) => void;
   } = $props();
 
   // The form starts from the device and goes its own way, App gives us a fresh one for another device.
@@ -49,7 +49,7 @@
   <label class="grid gap-1.5 font-medium">
     Host <input bind:value={login.host} class="field font-mono font-normal" autocapitalize="off" spellcheck="false" placeholder="192.168.1.50" required autofocus={!device} />
   </label>
-  <label class="grid gap-1.5 font-medium" title="How we speak to it. Automatic tries Intel AMT, then a Supermicro's Redfish, then IPMI, sending the password only to what answers as one.">
+  <label class="grid gap-1.5 font-medium" title="How we speak to it. Automatic tries Intel AMT, then a Supermicro's Redfish, then IPMI, then another BMC's Redfish, sending the password only to what answers as one.">
     Kind
     <select bind:value={login.flavor} class="field font-normal">
       <option value={null}>Automatic</option>
@@ -93,8 +93,8 @@
       </dl>
       <button
         type="button"
-        class="btn justify-self-start bg-danger text-white hover:bg-danger/90"
-        onclick={() => ontrust(login.host, error.actual).then(() => onsubmit(login))}
+        class="btn btn-danger justify-self-start"
+        onclick={() => ontrust(login, error.actual)}
       >
         Trust the new certificate
       </button>

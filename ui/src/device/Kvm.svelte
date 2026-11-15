@@ -8,7 +8,7 @@
   import { invoke } from "@tauri-apps/api/core";
   import { getCurrentWindow } from "@tauri-apps/api/window";
   import type { Input, Screens } from "../bindings/core";
-  import { reason } from "./Device.svelte";
+  import { reason } from "../connection";
   import Redirection from "./Redirection.svelte";
 
   let {
@@ -55,7 +55,8 @@
   let painted = 0;
   $effect(() => {
     const counting = setInterval(() => {
-      measured(hidden || !canvas.width ? undefined : { width: canvas.width, height: canvas.height, fps: painted });
+      // Not the canvas's own width, which is 300 before its first frame.
+      measured(hidden || !width ? undefined : { width, height: canvas.height, fps: painted });
       painted = 0;
     }, 1000);
     return () => (clearInterval(counting), measured());
@@ -227,8 +228,12 @@
         {/each}
       </select>
     {/if}
-    <!-- A native menu, looking like our buttons. -->
-    <label class="btn btn-secondary relative h-7 px-2.5">
+    <!-- A native menu, looking like our buttons. It says where the keys go, as a tooltip on the screen would cover
+         it. -->
+    <label
+      class="btn btn-secondary relative h-7 px-2.5"
+      title="Keys this computer keeps to itself. Every other key goes to the device while its screen has focus, a click outside it takes them back."
+    >
       Send keys <ChevronDown class="size-4" />
       <select
         class="absolute inset-0 opacity-0"
@@ -281,7 +286,6 @@
       ]}
       role="application"
       aria-label="The device's screen"
-      title="Every key goes to the device while it has focus, a click outside it takes them back."
       tabindex="0"
       onkeydown={key}
       onkeyup={key}

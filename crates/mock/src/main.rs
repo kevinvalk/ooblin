@@ -11,7 +11,8 @@ enum Command {
     /// presence pings on UDP 623, where a BMC answers IPMI too.
     Run { fixture: String },
     /// Record a device into a fixture, read-only: an AMT's WS-Man data (scrubbed) and a short SOL, KVM and IDER
-    /// session, a BMC's Redfish and IPMI (scrubbed) and a short KVM session.
+    /// session, a Supermicro's Redfish and IPMI (scrubbed) and a short KVM session, another BMC's IPMI, or its
+    /// Redfish where it has IPMI off.
     Record {
         fixture: String,
         host: String,
@@ -34,7 +35,7 @@ async fn main() -> anyhow::Result<()> {
                     Amt::start("127.0.0.1:16993", "127.0.0.1:16995", &dir).await;
                     ("127.0.0.1", None)
                 }
-                Flavor::Supermicro | Flavor::Ipmi => {
+                Flavor::Supermicro | Flavor::Ipmi | Flavor::Redfish => {
                     ("127.0.0.1:16443", Some(Bmc::start("127.0.0.1:16443", &dir).await))
                 }
             };
@@ -66,11 +67,12 @@ async fn main() -> anyhow::Result<()> {
             match Client::login(&target, None, None).await?.1.flavor {
                 Flavor::Amt => mock::record(&target, &dir).await,
                 Flavor::Supermicro => {
-                    mock::redfish::record(&target, &dir).await?;
+                    mock::redfish::record(&target, &dir, Flavor::Supermicro).await?;
                     mock::ipmi::record(&target, &dir).await?;
                     mock::ikvm::record(&target, &dir).await
                 }
                 Flavor::Ipmi => mock::ipmi::record(&target, &dir).await,
+                Flavor::Redfish => mock::redfish::record(&target, &dir, Flavor::Redfish).await,
             }
         }
     }

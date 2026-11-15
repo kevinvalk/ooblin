@@ -3,9 +3,9 @@
 //! log (`sel`) and FRU (`fru`) too, each with what ipmitool knows that the specification doesn't say.
 
 mod client;
-pub mod fru;
-pub mod sdr;
-pub mod sel;
+mod fru;
+mod sdr;
+pub(crate) mod sel;
 mod sol;
 
 pub use client::{Change, Client, IpmiSettings, IpmiStatus, User};
@@ -109,7 +109,9 @@ pub async fn with<T>(target: &Target, what: impl AsyncFnOnce(&Session) -> Result
 
 pub async fn chassis(session: &Session) -> Result<Chassis> {
     let status = session.request(CHASSIS, 0x01, &[]).await?;
-    let (power, misc) = (status.first().copied().unwrap_or(0), status.get(2).copied().unwrap_or(0));
+    let &[power, _, misc, ..] = &status[..] else {
+        return Err(Error::Protocol("a short chassis status".into()));
+    };
     Ok(Chassis {
         on: power & 1 != 0,
         // Lit for a while (1) or until turned off (2). OpenBMC says 3, reserved, until it's first asked to identify.

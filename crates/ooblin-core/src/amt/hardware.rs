@@ -56,7 +56,7 @@ impl Client {
             model: package.text("Model"),
             serial_number: package.text("SerialNumber"),
             // MaxMediaSize is in kilobytes.
-            bytes: disk.parse::<u64>("MaxMediaSize").map(|kilobytes| kilobytes * 1000),
+            bytes: disk.parse::<u64>("MaxMediaSize").map(|kilobytes| kilobytes.saturating_mul(1000)),
         });
         let batteries = batteries.iter().map(|battery| Battery {
             name: battery.text("DeviceID"),
@@ -103,7 +103,8 @@ impl Client {
     }
 }
 
-/// DMTF value maps, as MeshCommander shows them (Apache-2.0) and extended to what AMT 19 reports.
+// DMTF value maps, as MeshCommander shows them (Apache-2.0) and extended to what AMT 19 reports.
+
 const CPU_STATUS: &[&str] =
     &["Unknown", "Enabled", "Disabled by user", "Disabled by BIOS (POST error)", "Idle", "Other"];
 const MEMORY_TYPE: &[&str] = &[

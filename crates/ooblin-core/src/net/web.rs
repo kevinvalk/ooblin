@@ -18,9 +18,9 @@ pub struct Web {
 
 impl Web {
     /// Logs in as the login page does, but in plain text where its script sends base64: the X10 takes it, as it does
-    /// from the other native viewers. No session means a wrong password, which we don't try again.
+    /// from the other native viewers. No session is a login refused, a wrong password say, which we don't try again.
     pub async fn login(connection: &Connection) -> Result<Self> {
-        if connection.refused.load(Relaxed) {
+        if connection.refused.load(Relaxed) || connection.web_refused.load(Relaxed) {
             return Err(Error::Unauthorized);
         }
         let form = form_urlencoded::Serializer::new(String::new())
@@ -36,7 +36,7 @@ impl Web {
         let sid =
             cookies.filter_map(|cookie| cookie.strip_prefix("SID=")?.split(';').next()).rfind(|sid| !sid.is_empty());
         let Some(sid) = sid else {
-            connection.refused.store(true, Relaxed);
+            connection.web_refused.store(true, Relaxed);
             return Err(Error::Unauthorized);
         };
         Ok(Self { http: connection.http.clone(), url: connection.url.clone(), sid: sid.to_owned() })

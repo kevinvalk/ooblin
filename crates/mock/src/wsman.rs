@@ -1,9 +1,8 @@
 //! WS-Man on HTTPS: answers from the fixture's `wsman/` where it has the reply (see `reply`), by the spec otherwise.
 
-use std::convert::Infallible;
-use std::fmt;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
+use std::{fmt, io};
 
 use http_body_util::{BodyExt, Full};
 use hyper::body::{Bytes, Incoming};
@@ -29,16 +28,19 @@ pub async fn serve(listener: TcpListener, tls: TlsAcceptor, amt: Arc<Amt>) {
             let Ok(stream) = tls.accept(tcp).await else { return };
             let service = service_fn(move |request| {
                 let amt = amt.clone();
-                async move { Ok::<_, Infallible>(respond(&amt, request).await) }
+                async move { respond(&amt, request).await }
             });
             let _ = hyper::server::conn::http1::Builder::new().serve_connection(TokioIo::new(stream), service).await;
         });
     }
 }
 
-async fn respond(amt: &Amt, request: Request<Incoming>) -> Response<Full<Bytes>> {
-    assert!(request.headers().contains_key("content-length"), "AMT needs a Content-Length");
-    assert!(!request.headers().contains_key("transfer-encoding"), "AMT rejects chunked bodies");
+/// Answers a request, or hangs up on it with an error.
+async fn respond(amt: &Amt, request: Request<Incoming>) -> io::Result<Response<Full<Bytes>>> {
+    // AMT needs a Content-Length, which a chunked body goes without.
+    if !request.headers().contains_key("content-length") {
+        return Ok(Response::builder().status(StatusCode::LENGTH_REQUIRED).body(Full::default()).unwrap());
+    }
 
     let authorization = request.headers().get("authorization").and_then(|value| value.to_str().ok());
     if !authorization.is_some_and(|header| authorized(amt, header)) {
@@ -46,24 +48,32 @@ async fn respond(amt: &Amt, request: Request<Incoming>) -> Response<Full<Bytes>>
         let nonce = amt.nonce.lock().unwrap().clone();
         let challenge = format!(r#"Digest realm="{REALM}", nonce="{nonce}", stale="false", qop="auth""#);
         let response = Response::builder().status(StatusCode::UNAUTHORIZED).header("www-authenticate", challenge);
-        return response.body(Full::default()).unwrap();
+        return Ok(response.body(Full::default()).unwrap());
     }
 
-    let body = String::from_utf8(request.into_body().collect().await.unwrap().to_bytes().to_vec()).unwrap();
-    let (status, xml) =
-        answer(amt, &body).await.unwrap_or_else(|| (StatusCode::BAD_REQUEST, envelope(Fault::unreachable())));
+    let body = request.into_body().collect().await.map_err(io::Error::other)?.to_bytes();
+    let body = String::from_utf8_lossy(&body).into_owned();
+    let response = match amt.hangs_up.swap(false, Ordering::SeqCst) {
+        true => Err(io::ErrorKind::ConnectionAborted.into()),
+        false => {
+            let (status, xml) =
+                answer(amt, &body).await.unwrap_or_else(|| (StatusCode::BAD_REQUEST, envelope(Fault::unreachable())));
+            Ok(Response::builder().status(status).body(Full::new(xml.into())).unwrap())
+        }
+    };
     amt.requests.lock().unwrap().push(body);
-    Response::builder().status(status).body(Full::new(xml.into())).unwrap()
+    response
 }
 
 /// What we answer to a request we can read: what was recorded, or what the spec says.
 async fn answer(amt: &Amt, body: &str) -> Option<(StatusCode, String)> {
     let doc = roxmltree::Document::parse(body).ok()?;
     let text = |name| doc.descendants().find(|node| node.has_tag_name(name)).and_then(|node| node.text());
-    let class = text("ResourceURI")?.rsplit('/').next().filter(|class| plain(class))?;
-    let action = text("Action")?.rsplit('/').next().filter(|action| plain(action))?;
+    let uri = text("ResourceURI")?;
+    let class = uri.rsplit('/').next().filter(|class| plain(class) && uri == resource_uri(class))?;
+    let (of, action) = text("Action")?.rsplit_once('/').filter(|(_, action)| plain(action))?;
     if let Some(device) = &amt.device {
-        return Some(forward(amt, device, class, action, body).await);
+        return Some(forward(amt, &device.connection, class, action, body).await);
     }
 
     // A device we recorded has the reply under its `reply` name, Intel's samples have one per class and action.
@@ -93,9 +103,28 @@ async fn answer(amt: &Amt, body: &str) -> Option<(StatusCode, String)> {
             }
             ok(xml)
         }
-        // Methods we have no reply for (the ones that change something) simply succeed.
-        method => ok(recorded(method).unwrap_or_else(|| envelope(Output { method, class }))),
+        // A Put carries the instance, a Delete nothing, a method its input in its class's namespace, which its action
+        // is in too. What we have no reply for (the ones that change something) simply succeeds, on a class we have.
+        action => {
+            let input = doc.descendants().find(|node| node.has_tag_name("Body"))?.first_element_child();
+            let input = input.map(|input| input.tag_name());
+            let fits = match action {
+                "Delete" => input.is_none(),
+                "Put" => input == Some((uri, class).into()),
+                method => of == uri && input == Some((uri, &*format!("{method}_INPUT")).into()),
+            };
+            (fits && has(amt, class))
+                .then(|| recorded(action).unwrap_or_else(|| envelope(Output { method: action, class })))
+                .and_then(ok)
+        }
     }
+}
+
+/// Whether the fixture holds anything of `class`, so the device has it.
+fn has(amt: &Amt, class: &str) -> bool {
+    let mut recorded = std::fs::read_dir(amt.fixture.join("wsman")).into_iter().flatten().flatten();
+    amt.samples.keys().any(|(sample, _)| sample == class)
+        || recorded.any(|file| file.file_name().to_string_lossy().starts_with(&format!("{class}.")))
 }
 
 /// Class, method and field names as AMT has them: letters, digits and underscores.
@@ -127,7 +156,9 @@ fn authorized(amt: &Amt, header: &str) -> bool {
     else {
         return false;
     };
-    nonce == *amt.nonce.lock().unwrap() && response == digest("/wsman", nonce, nc, cnonce, "auth")
+    param("uri") == Some("/wsman")
+        && nonce == *amt.nonce.lock().unwrap()
+        && response == digest("/wsman", nonce, nc, cnonce, "auth")
 }
 
 const SOAP: &str = "http://www.w3.org/2003/05/soap-envelope";
@@ -207,7 +238,7 @@ impl<'a> Fault<'a> {
         Self { Reason: Reason { Text: reason } }
     }
 
-    /// What AMT says for a class it doesn't have.
+    /// What AMT says for a class it doesn't have, and we for anything else we can't answer.
     fn unreachable() -> Self {
         Self::new("No route can be determined to reach the destination role defined by the WSAddressing To.")
     }

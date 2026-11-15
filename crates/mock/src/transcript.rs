@@ -1,5 +1,5 @@
-//! A redirection session as recorded after its handshake: who said what, in order. On disk each record is a direction
-//! byte (`>` we sent, `<` the device sent), a little-endian u32 length and the bytes.
+//! A session as recorded after its handshake, AMT's redirection or a BMC's KVM: who said what, in order. On disk each
+//! record is a direction byte (`>` we sent, `<` the device sent), a little-endian u32 length and the bytes.
 
 use std::io;
 use std::path::Path;
@@ -8,6 +8,14 @@ use std::path::Path;
 pub enum Direction {
     Sent,
     Received,
+}
+
+pub fn sent(bytes: &[u8]) -> (Direction, Vec<u8>) {
+    (Direction::Sent, bytes.to_vec())
+}
+
+pub fn received(bytes: &[u8]) -> (Direction, Vec<u8>) {
+    (Direction::Received, bytes.to_vec())
 }
 
 #[derive(Debug, Default, PartialEq, Eq)]

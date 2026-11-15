@@ -7,7 +7,7 @@ use super::{STORAGE, Session};
 use crate::{Error, Event, Result, Severity};
 
 /// The log, newest first, each sensor named by its record in `records` where it has one.
-pub async fn events(session: &Session, records: &[Record]) -> Result<Vec<Event>> {
+pub(super) async fn events(session: &Session, records: &[Record]) -> Result<Vec<Event>> {
     let (mut events, mut seen, mut id) = (Vec::new(), HashSet::new(), 0u16);
     while id != 0xFFFF && seen.insert(id) {
         let [low, high] = id.to_le_bytes();

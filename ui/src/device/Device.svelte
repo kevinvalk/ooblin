@@ -1,33 +1,15 @@
-<!-- A device we're connected to: its power, the disk image in its drive and a tab at a time. There's one per open device, shown or
-     not, so all of it stays as it was while another one is: pages until refreshed, the screen and serial console open.
-     Whether a device that doesn't answer is gone is App's to say. -->
+<!-- A device we're connected to: its power, the disk image in its drive and a tab at a time. There's one per open
+     device, shown or not, so all of it stays as it was while another one is: pages until refreshed, the screen and
+     serial console open. Whether a device that doesn't answer is gone is App's to say. -->
 <script module lang="ts">
-  import type { Component, Snippet } from "svelte";
+  import type { Component } from "svelte";
   import type { Changed, CommandError, Drive, Mounted } from "../bindings/ooblin";
-  import type { BmcChange, BmcSettings as BmcSettingsData, Change, Flavor, IpmiChange, Info, Power, PowerAction, PowerState, Settings as SettingsData } from "../bindings/core";
-
-  /** What App shows of a connection too: in the sidebar, the title and the footer. */
-  export interface Connection {
-    host: string;
-    info: Info;
-    power?: Power;
-    /** Since when it hasn't answered, see Device's `readPower`. */
-    silent?: number;
-    /** Set from a power change until the state moves or a minute has passed, a reset never shows as another state. */
-    changing?: { from: PowerState; until: number };
-    /** What it says in the footer while it's on screen. */
-    footer?: Snippet;
-  }
+  import type { BmcChange, Change, Flavor, IpmiChange, Power, PowerAction, Settings as SettingsData } from "../bindings/core";
 
   /** The stretches a disk image is shown in, as read, and the meter's top speed in bytes a second: how fast AMT reads
    * one at most, as we know no BMC's. */
   const CELLS = 128;
   const TOP = 1.1e6;
-
-  /** Our commands fail with a `CommandError`, Tauri itself with a string. */
-  export function reason(error: unknown) {
-    return (error as CommandError).message ?? String(error);
-  }
 </script>
 
 <script lang="ts">
@@ -35,6 +17,7 @@
   import { Channel, invoke } from "@tauri-apps/api/core";
   import { untrack } from "svelte";
   import { SvelteMap } from "svelte/reactivity";
+  import { reason, type Connection } from "../connection";
   import AuditLog from "./amt/AuditLog.svelte";
   import AmtHardware from "./amt/Hardware.svelte";
   import AmtSettings from "./amt/Settings.svelte";
@@ -47,14 +30,14 @@
   import Panel from "./ipmi/Panel.svelte";
   import Sensors from "./ipmi/Sensors.svelte";
   import Sol from "./Sol.svelte";
-  import BmcHardware from "./supermicro/Hardware.svelte";
+  import RedfishHardware from "./redfish/Hardware.svelte";
+  import RedfishStatus from "./redfish/Status.svelte";
   import BmcSettings from "./supermicro/Settings.svelte";
-  import BmcStatus from "./supermicro/Status.svelte";
 
   let {
     connection = $bindable(),
     hidden,
-    say,
+    say: tell,
     lost,
   }: {
     connection: Connection;
@@ -68,10 +51,12 @@
   let amt = $derived(connection.info.flavor === "Amt");
   /** Its name, or the address we reach it at for a device without one. */
   let title = $derived(connection.info.name || connection.host);
+  /** What we say while another device is on screen names us. */
+  const say = (text: string, failed?: boolean) => tell(hidden ? `${title}: ${text}` : text, failed);
 
-  /** A flavor's tabs, its pages in its own folder: named after the commands that read them, its settings last. All
-   * but the hardware (`fixed`) change often enough to want a refresh, sensors so often we read them `every` so many ms
-   * while they're shown. The KVM and serial console are screens of their own. */
+  /** A flavor's tabs, its pages in its own folder or the one of the standard it speaks: named after the commands that
+   * read them, its settings last where it has them, which is how we tell them. All but the hardware (`fixed`) change often enough to want a refresh, sensors so often we
+   * read them `every` so many ms while they're shown. The KVM and serial console are screens of their own. */
   const TABS: Record<Flavor, Record<string, { label: string; page: Component<any>; fixed?: true; every?: number }>> = {
     Amt: {
       status: { label: "Status", page: AmtStatus },
@@ -81,11 +66,18 @@
       settings: { label: "Settings", page: AmtSettings },
     },
     Supermicro: {
-      bmc_status: { label: "Status", page: BmcStatus },
-      hardware: { label: "Hardware", page: BmcHardware, fixed: true },
+      bmc_status: { label: "Status", page: RedfishStatus },
+      hardware: { label: "Hardware", page: RedfishHardware, fixed: true },
       event_log: { label: "Event log", page: EventLog },
       sensors: { label: "Sensors", page: Sensors, every: 1000 },
       bmc_settings: { label: "Settings", page: BmcSettings },
+    },
+    Redfish: {
+      bmc_status: { label: "Status", page: RedfishStatus },
+      hardware: { label: "Hardware", page: RedfishHardware, fixed: true },
+      event_log: { label: "Event log", page: EventLog },
+      // A resource a sensor: a read takes a BMC a while.
+      sensors: { label: "Sensors", page: Sensors, every: 5000 },
     },
     Ipmi: {
       ipmi_status: { label: "Status", page: IpmiStatus },
@@ -128,8 +120,8 @@
   async function save(done: string, change: Change | BmcChange | IpmiChange) {
     saving = true;
     try {
-      const command = { Amt: "change", Supermicro: "bmc_change", Ipmi: "ipmi_change" }[connection.info.flavor];
-      const { error, settings } = await invoke<Changed<unknown>>(command, {
+      const commands: Partial<Record<Flavor, string>> = { Amt: "change", Supermicro: "bmc_change", Ipmi: "ipmi_change" };
+      const { error, settings } = await invoke<Changed<unknown>>(commands[connection.info.flavor]!, {
         host: connection.host,
         change,
       });
@@ -152,31 +144,23 @@
     names.filter((name) => tabs[name].fixed).forEach((name) => pages.delete(name));
     landed(data);
     const { kvm, sol, ider } = connection.info.remote_access;
-    opened.kvm &&= !!kvm;
-    opened.sol &&= sol;
+    if (!kvm) close("kvm");
+    if (!sol) close("sol");
     if (amt && !ider) image = undefined;
   }
 
-  /** What the settings, read or saved, say of the device: AMT's its name and what it lets us redirect, a BMC's whether
-   * its KVM and virtual media serve. */
+  /** What the settings, read or saved, say of the device: AMT's its name, and what it lets us redirect. */
   function landed(data: unknown) {
-    if (amt) {
-      const { general, remote_access } = data as SettingsData;
-      connection.info.name = general.name;
-      connection.info.remote_access = remote_access;
-    } else if (connection.info.flavor === "Supermicro") {
-      const access = connection.info.remote_access;
-      const enabled = (name: string) =>
-        (data as BmcSettingsData).services.find((service) => service.name === name)?.enabled;
-      access.kvm = enabled("KVMIP") ?? access.kvm;
-      access.ider = enabled("VirtualMedia") ?? access.ider;
-    }
+    const { general, remote_access } = data as Partial<SettingsData>;
+    if (general) connection.info.name = general.name;
+    if (remote_access) connection.info.remote_access = remote_access;
   }
 
   /** Why the screen, serial console or a disk image can't open, if it can't. */
   function off(kind: "kvm" | "sol" | "ider") {
     const access = connection.info.remote_access;
     if (kind === "kvm" && access.kvm === null) return "This device has no KVM.";
+    if (kind === "sol" && connection.info.flavor === "Redfish") return "A BMC's serial console is IPMI's, which this one has off.";
     if (access[kind]) return;
     const what = { kvm: "KVM is", sol: "The serial console is", ider: "Disk images are" }[kind];
     const where =
@@ -185,7 +169,7 @@
   }
 
   /** Reads the tab afresh. It starts blank, so a refresh shows it happened, unless `quietly` (the next of a tab read
-   * `every` so often), and only the last read lands. */
+   * `every` so often), and only the last read lands: one whose page is still the one it found, `before`. */
   async function read(name = tab, quietly = false) {
     const before = quietly ? pages.get(name) : {};
     if (!quietly) pages.set(name, before!);
@@ -309,10 +293,12 @@
   });
 
   let asks = $derived(amt ? ", while AMT can ask it" : "");
+  let acting = $state(false);
 
   /** Powering on needs no second thought, everything else does. */
   async function choose(action: PowerAction, label: string) {
     if (!action.startsWith("On") && !(await ask(`${label} ${title}?`, [label]))) return;
+    acting = true;
     try {
       await invoke("set_power", { host: connection.host, action });
       if (connection.power) connection.changing = { from: connection.power.state, until: Date.now() + 60_000 };
@@ -321,6 +307,8 @@
       if (action.endsWith("Serial")) show("sol");
     } catch (error) {
       say(reason(error), true);
+    } finally {
+      acting = false;
     }
   }
 
@@ -328,6 +316,8 @@
    * when it last read each of its `CELLS` stretches (`Date.now()`, 0 for never). And whether one is on its way in. */
   let image: (Mounted & { read: number; rate: number; cells: number[] }) | undefined = $state();
   let mounting = $state(false);
+  // Gone with us: a disconnect closes its drive, which is then nothing to say.
+  $effect(() => () => (image = undefined));
 
   /** The image is read from here as the device asks for it, the file never goes through the webview. Rust tells us what
    * of it each read was, how fast it reads we work out every second while it does. */
@@ -380,7 +370,8 @@
     image = undefined;
   }
 
-  /** Moves between the tabs as tabs do: the arrow keys to the one before or after, Home and End to the first or last. */
+  /** Moves between the tabs as tabs do: the arrow keys to the one before or after, Home and End to the first or
+   * last. */
   function arrows(event: KeyboardEvent & { currentTarget: HTMLElement }) {
     const buttons = [...event.currentTarget.querySelectorAll<HTMLElement>("[role=tab]")];
     const at = buttons.indexOf(document.activeElement as HTMLElement);
@@ -392,12 +383,9 @@
     next.click();
   }
 
-  // ⌘R would reload the whole app, we read the tab on screen again instead.
+  // ⌘R reads the tab on screen again, App keeps it from reloading the whole app.
   function keydown(event: KeyboardEvent) {
-    if (!hidden && (event.metaKey || event.ctrlKey) && event.key === "r") {
-      event.preventDefault();
-      if (live) read();
-    }
+    if (!hidden && live && (event.metaKey || event.ctrlKey) && event.key === "r") read();
   }
 </script>
 
@@ -406,13 +394,14 @@
 <!-- A tab that's `off` looks it, and says why when clicked. Only the one shown is in the tab order, the arrow keys move
      between them (see `arrows`). -->
 {#snippet tabButton(name: typeof tab, label: string, off?: string)}
+  {@const panel = name === "kvm" || name === "sol" ? opened[name] && name : tabs[tab] && "page"}
   <button
     type="button"
     role="tab"
     id="{id}-{name}"
     class="-mb-px h-10 border-b-2 border-transparent text-muted hover:text-ink aria-selected:border-accent aria-selected:text-ink"
     aria-selected={name === tab}
-    aria-controls="{id}-{name === 'kvm' || name === 'sol' ? name : 'page'}-panel"
+    aria-controls={panel ? `${id}-${panel}-panel` : undefined}
     aria-disabled={!!off}
     tabindex={name === tab ? 0 : -1}
     title={off}
@@ -517,7 +506,7 @@
         <span class="truncate">{image.name}</span>
         <button type="button" class="btn-icon size-7 flex-none" title="Eject" onclick={eject}><X class="size-4" /></button>
       </span>
-    {:else if connection.info.flavor !== "Ipmi"}
+    {:else if amt || connection.info.flavor === "Supermicro"}
       <button
         type="button"
         class="btn btn-secondary"
@@ -530,8 +519,8 @@
       </button>
     {/if}
     {#if !amt}<Panel host={connection.host} {hidden} {say} />{/if}
-    <button type="button" class="btn btn-secondary" popovertarget="{id}-power">
-      Power <ChevronDown class="size-4" />
+    <button type="button" class="btn btn-secondary" popovertarget="{id}-power" disabled={acting}>
+      Power {#if acting}<LoaderCircle class="size-4 animate-spin" />{:else}<ChevronDown class="size-4" />{/if}
     </button>
     <!-- Grouped: power on, asking the OS, acting at once, and booting elsewhere this once. -->
     <div
@@ -620,8 +609,12 @@
             <button type="button" class="btn btn-secondary" onclick={() => read()}>Try again</button>
           </div>
         {:else}
-          <!-- Each page knows the shape of its own data, the ones that change something take the rest too. -->
-          <Page data={page?.data as never} {connection} {title} {say} {ask} {save} busy={!page?.data || saving} />
+          <!-- Each page knows the shape of its own data, the ones that change something take the rest too. Read
+               afresh it starts afresh, forms and all: a select falls back to what the device says, what was typed
+               doesn't. -->
+          {#key !page?.data}
+            <Page data={page?.data as never} {connection} {title} {say} {ask} {save} busy={!page?.data || saving} />
+          {/key}
           <!-- What the settings don't have is in the device's own web pages. -->
           {#if tab === names.at(-1)}
             <p class="text-center text-muted">
@@ -648,7 +641,7 @@
       <button value="" class="btn btn-secondary">Cancel</button>
       {#each asking.answers as answer, i (answer)}
         {@const last = i === asking.answers.length - 1}
-        <button value={answer} class={["btn", !last ? "btn-secondary" : asking.safe ? "btn-primary" : "bg-danger text-white hover:bg-danger/90"]}>
+        <button value={answer} class={["btn", !last ? "btn-secondary" : asking.safe ? "btn-primary" : "btn-danger"]}>
           {answer}
         </button>
       {/each}
@@ -656,8 +649,8 @@
   </form>
 </dialog>
 
-<!-- Escape is a no, like Cancel. -->
-<dialog bind:this={consentDialog} oncancel={decline}>
+<!-- Escape is a no, like Cancel, but not once the code is on its way: the device may take it. -->
+<dialog bind:this={consentDialog} oncancel={(event) => (consenting.sending ? event.preventDefault() : decline())}>
   <form class="grid gap-4" onsubmit={sendCode}>
     <p class="font-medium">Ask someone at {title}</p>
     <p>
@@ -669,12 +662,20 @@
       class="field w-full text-center text-lg tracking-[0.5em] tabular-nums"
       inputmode="numeric"
       autocomplete="off"
+      aria-label="Code"
       placeholder="000000"
       required
     />
     {#if consenting.error}<p class="text-danger">{consenting.error}</p>{/if}
     <div class="flex justify-end gap-2">
-      <button type="button" class="btn btn-secondary" onclick={() => (consentDialog.close(), decline())}>Cancel</button>
+      <button
+        type="button"
+        class="btn btn-secondary"
+        disabled={consenting.sending}
+        onclick={() => (consentDialog.close(), decline())}
+      >
+        Cancel
+      </button>
       <button class="btn btn-primary" disabled={consenting.sending}>
         {#if consenting.sending}<LoaderCircle class="size-4 animate-spin" />{/if} Send
       </button>

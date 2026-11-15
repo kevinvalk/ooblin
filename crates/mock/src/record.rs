@@ -4,19 +4,19 @@
 //!   read-only by spec. Classes the device lacks answer with a fault and we skip them, the replay answers those the same
 //!   way. Then the app's own reads that call methods (the clock, accounts, the logs), through a forwarding mock that
 //!   keeps each reply under the name its replay will look for.
-//! - Redirection: a short SOL, KVM and IDER session, saved as transcripts. SOL presses Enter once to get a prompt, KVM
-//!   fetches one full frame (a screenshot, mind what's on screen), IDER only opens the session, so no drive ever shows
-//!   up on the host. Message layouts from MeshCommander (Apache-2.0).
+//! - Redirection: a short SOL, KVM and IDER session as the app's own client has them, through the same mock, saved as
+//!   transcripts. SOL presses Enter once to get a prompt, KVM fetches one full frame (a screenshot, mind what's on
+//!   screen), IDER puts an empty disc in for the device's next boot and takes it out at once, so no drive shows up on
+//!   a host that keeps running.
 
 use std::io::Write as _;
 use std::path::Path;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
-use ooblin_core::amt::{Client, Connection, Redirection, Session, wsman};
+use ooblin_core::amt::{Client, Connection, Sol, wsman};
 use ooblin_core::{Error, Target};
 
 use crate::scrub::scrub;
-use crate::transcript::{Direction, Transcript};
 use crate::{Amt, PASSWORD};
 
 /// Every class MeshCommander or go-wsman-messages knows of. A crawl is cheap, so we'd rather ask for one too many.
@@ -290,11 +290,10 @@ const CLASSES: &[&str] = &[
 pub async fn record(target: &Target, fixture: &Path) -> anyhow::Result<()> {
     let mut device = Connection::new(target, None)?;
     crawl(&mut device, &fixture.join("wsman")).await?;
-    let pin = device.fingerprint();
-    eprintln!("Certificate {}", pin.as_deref().unwrap_or_default());
+    eprintln!("Certificate {}", device.fingerprint().unwrap_or_default());
 
     eprint!("methods  recording…");
-    let proxy = Amt::forward(device, fixture).await;
+    let proxy = Amt::forward(device, target, fixture).await;
     let mut client = Client::new(&proxy.target(PASSWORD), None)?;
     let reads = [
         client.status().await.err(),
@@ -307,14 +306,35 @@ pub async fn record(target: &Target, fixture: &Path) -> anyhow::Result<()> {
         Some(error) => eprintln!("\rmethods  incomplete, {error}"),
     }
 
-    for (session, name) in [(Session::Sol, "sol"), (Session::Kvm, "kvm"), (Session::Ider, "ider")] {
+    for name in ["sol", "kvm", "ider"] {
         eprint!("{name:>6}  recording…");
-        // A session the device refuses (not enabled, say) is skipped, the replay refuses it the same way.
-        match Recording::run(target, pin.clone(), session).await {
-            Ok(transcript) => {
-                transcript.save(&fixture.join(format!("{name}.transcript")))?;
-                eprintln!("\r{name:>6}  {} bytes", transcript.0.iter().map(|(_, data)| data.len()).sum::<usize>());
+        let session = async {
+            match name {
+                "sol" => {
+                    let sol = client.sol().await?;
+                    sol.write(b"\r").await?;
+                    listen(&sol, tokio::time::sleep(Duration::from_secs(3))).await
+                }
+                "kvm" => {
+                    let kvm = client.kvm().await?;
+                    // AMT 19 first says only how large its screen is: a frame of a size alone.
+                    let (started, mut frame) = (Instant::now(), kvm.frame().await);
+                    while frame.as_ref().is_ok_and(|frame| frame.len() == 4) && started.elapsed().as_secs() < 10 {
+                        frame = kvm.frame().await;
+                    }
+                    kvm.close().await;
+                    frame.map(drop)
+                }
+                _ => {
+                    let disc = tempfile::tempfile()?;
+                    disc.set_len(2048)?;
+                    client.ider(disc).await.map(drop)
+                }
             }
+        };
+        // A session the device refuses (not enabled, say) is skipped, the replay refuses it the same way.
+        match session.await {
+            Ok(()) => save(&proxy, fixture, name).await?,
             Err(error) => eprintln!("\r{name:>6}  skipped, {error}"),
         }
     }
@@ -324,16 +344,33 @@ pub async fn record(target: &Target, fixture: &Path) -> anyhow::Result<()> {
 /// Records only a serial console session into `fixture`, for as long as it takes to make the device write something
 /// (mount a disk image, say), until Enter is pressed here.
 pub async fn record_sol(target: &Target, fixture: &Path) -> anyhow::Result<()> {
-    let redirection = Redirection::open(target, None, Session::Sol).await?;
-    let mut recording = Recording { redirection, transcript: Transcript::default() };
-    recording.start_sol().await?;
-    eprintln!("   SOL  recording, press Enter to stop");
+    let proxy = Amt::forward(Connection::new(target, None)?, target, fixture).await;
+    let sol = Client::new(&proxy.target(PASSWORD), None)?.sol().await?;
+    eprint!("   sol  recording, press Enter to stop");
     // The terminal hands us the line once Enter is pressed.
-    recording.listen(tokio::io::AsyncReadExt::read_u8(&mut tokio::io::stdin())).await?;
+    listen(&sol, tokio::io::AsyncReadExt::read_u8(&mut tokio::io::stdin())).await?;
     std::fs::create_dir_all(fixture)?;
-    recording.transcript.save(&fixture.join("sol.transcript"))?;
-    let bytes: usize = recording.transcript.0.iter().map(|(_, data)| data.len()).sum();
-    eprintln!("   SOL  {bytes} bytes");
+    save(&proxy, fixture, "sol").await
+}
+
+/// Everything the device writes to its serial console until `done`.
+async fn listen(sol: &Sol, done: impl Future) -> Result<(), Error> {
+    tokio::pin!(done);
+    loop {
+        tokio::select! {
+            read = sol.read() => drop(read?),
+            _ = &mut done => break,
+        }
+    }
+    sol.close().await;
+    Ok(())
+}
+
+/// Saves the session `proxy` forwarded last as the transcript `name` in `fixture`.
+async fn save(proxy: &Amt, fixture: &Path, name: &str) -> anyhow::Result<()> {
+    let transcript = proxy.forwarded().await;
+    transcript.save(&fixture.join(format!("{name}.transcript")))?;
+    eprintln!("\r{name:>6}  {} bytes\x1b[K", transcript.0.iter().map(|(_, data)| data.len()).sum::<usize>());
     Ok(())
 }
 
@@ -373,163 +410,5 @@ async fn fetch(device: &mut Connection, envelope: String) -> Result<Option<Strin
         Ok(xml) => Ok(Some(xml)),
         Err(Error::Fault(_) | Error::Http(_)) => Ok(None),
         Err(error) => Err(error),
-    }
-}
-
-/// A redirection session that keeps a transcript of everything after the handshake.
-struct Recording {
-    redirection: Redirection,
-    transcript: Transcript,
-}
-
-impl Recording {
-    async fn run(target: &Target, pin: Option<String>, session: Session) -> Result<Transcript, Error> {
-        let redirection = Redirection::open(target, pin, session).await?;
-        let mut recording = Self { redirection, transcript: Transcript::default() };
-        match session {
-            Session::Sol => recording.sol().await?,
-            Session::Kvm => recording.kvm().await?,
-            Session::Ider => recording.ider().await?,
-        }
-        Ok(recording.transcript)
-    }
-
-    async fn send(&mut self, bytes: &[u8]) -> Result<(), Error> {
-        self.transcript.0.push((Direction::Sent, bytes.to_vec()));
-        self.redirection.write_all(bytes).await
-    }
-
-    async fn receive(&mut self, len: usize) -> Result<Vec<u8>, Error> {
-        let bytes = self.redirection.read_exact(len).await?;
-        if len > 0 {
-            self.transcript.0.push((Direction::Received, bytes.clone()));
-        }
-        Ok(bytes)
-    }
-
-    /// Everything the device writes to its serial console until `done`, as it arrives. We keep the session alive
-    /// meanwhile, AMT drops one it doesn't hear from in 10 seconds, and leave that out: the replay needn't wait on it.
-    async fn listen(&mut self, done: impl Future) -> Result<(), Error> {
-        tokio::pin!(done);
-        let mut buf = vec![0; 64 * 1024];
-        let mut alive = tokio::time::interval(Duration::from_secs(2));
-        // Our first messages were the start, its settings and a key, these come after.
-        let mut sequence = 4u32;
-        loop {
-            tokio::select! {
-                read = self.redirection.read(&mut buf) => match read? {
-                    0 => break,
-                    len => self.transcript.0.push((Direction::Received, buf[..len].to_vec())),
-                },
-                _ = alive.tick() => {
-                    self.redirection.write_all(&[&[0x2B, 0, 0, 0][..], &sequence.to_le_bytes()].concat()).await?;
-                    sequence += 1;
-                }
-                _ = &mut done => break,
-            }
-        }
-        Ok(())
-    }
-
-    /// Start SOL with MeshCommander's settings, press Enter and listen.
-    async fn sol(&mut self) -> Result<(), Error> {
-        self.start_sol().await?;
-        self.send(&[0x28, 0, 0, 0, 3, 0, 0, 0, 1, 0, b'\r']).await?;
-        self.listen(tokio::time::sleep(Duration::from_secs(3))).await
-    }
-
-    async fn start_sol(&mut self) -> Result<(), Error> {
-        let mut start = vec![0x20, 0, 0, 0, 1, 0, 0, 0];
-        // Max tx buffer, then the tx, tx overflow, rx and rx flush timeouts, then the heartbeat.
-        for setting in [10000u16, 100, 0, 10000, 100, 0] {
-            start.extend_from_slice(&setting.to_le_bytes());
-        }
-        start.extend_from_slice(&[0, 0, 0, 0]);
-        self.send(&start).await?;
-        self.receive(23).await?;
-        self.send(&[0x27, 0, 0, 0, 2, 0, 0, 0, 0, 0, 0x1B, 0, 0, 0]).await
-    }
-
-    /// Start KVM, do the RFB handshake the way our client does and fetch one full frame.
-    async fn kvm(&mut self) -> Result<(), Error> {
-        self.send(&[0x40, 0, 0, 0, 0, 0, 0, 0]).await?;
-        self.receive(8).await?;
-        self.receive(12).await?; // AMT 19 says RFB 004.000
-        self.send(b"RFB 003.008\n").await?;
-        let count = self.receive(1).await?[0];
-        self.receive(usize::from(count)).await?;
-        self.send(&[1]).await?; // no RFB security, the redirection handshake already authenticated us
-        self.receive(4).await?;
-        self.send(&[1]).await?; // shared
-        let init = self.receive(24).await?;
-        self.receive(u32::from_be_bytes(init[20..24].try_into().unwrap()) as usize).await?;
-        let (mut width, mut height) = ([init[0], init[1]], [init[2], init[3]]);
-        let bytes_per_pixel = usize::from(init[4] / 8);
-
-        // ZRLE, Raw (AMT insists on it) and the DesktopSize pseudo-encoding.
-        self.send(&[2, 0, 0, 3, 0, 0, 0, 16, 0, 0, 0, 0, 0xFF, 0xFF, 0xFF, 0x21]).await?;
-        // AMT 19 answers the first request with only its desktop size, so we ask again until pixels arrive.
-        for _ in 0..3 {
-            self.send(&[&[3, 0, 0, 0, 0, 0], &width[..], &height[..]].concat()).await?;
-            self.update().await?;
-            let mut pixels = false;
-            let update = self.receive(3).await?;
-            for _ in 0..u16::from_be_bytes([update[1], update[2]]) {
-                let rect = self.receive(12).await?;
-                let (w, h) = ([rect[4], rect[5]], [rect[6], rect[7]]);
-                match i32::from_be_bytes(rect[8..12].try_into().unwrap()) {
-                    0 => {
-                        let size = usize::from(u16::from_be_bytes(w)) * usize::from(u16::from_be_bytes(h));
-                        self.receive(size * bytes_per_pixel).await?;
-                        pixels = true;
-                    }
-                    16 => {
-                        let len = self.receive(4).await?;
-                        self.receive(u32::from_be_bytes(len.try_into().unwrap()) as usize).await?;
-                        pixels = true;
-                    }
-                    -223 => (width, height) = (w, h),
-                    encoding => return Err(Error::Protocol(format!("unexpected RFB encoding {encoding}"))),
-                }
-            }
-            if pixels {
-                return Ok(());
-            }
-        }
-        Err(Error::Protocol("no frame after three requests".into()))
-    }
-
-    /// Reads RFB server messages up to the next FramebufferUpdate, AMT 19 rings the Bell before the first one.
-    async fn update(&mut self) -> Result<(), Error> {
-        loop {
-            match self.receive(1).await?[0] {
-                0 => return Ok(()), // FramebufferUpdate
-                1 => {
-                    // SetColourMapEntries
-                    let header = self.receive(5).await?;
-                    self.receive(usize::from(u16::from_be_bytes([header[3], header[4]])) * 6).await?;
-                }
-                2 => {} // Bell
-                3 => {
-                    // ServerCutText
-                    let header = self.receive(7).await?;
-                    self.receive(u32::from_be_bytes(header[3..7].try_into().unwrap()) as usize).await?;
-                }
-                other => return Err(Error::Protocol(format!("unexpected RFB server message {other}"))),
-            }
-        }
-    }
-
-    /// Open IDER and keep what the device tells us about it (buffer sizes, versions), then hang up.
-    async fn ider(&mut self) -> Result<(), Error> {
-        let mut open = vec![0x40, 0, 0, 0, 0, 0, 0, 0];
-        open.extend_from_slice(&30000u16.to_le_bytes()); // rx timeout
-        open.extend_from_slice(&0u16.to_le_bytes()); // tx timeout
-        open.extend_from_slice(&20000u16.to_le_bytes()); // heartbeat
-        open.extend_from_slice(&1u32.to_le_bytes()); // version
-        self.send(&open).await?;
-        let reply = self.receive(30).await?;
-        self.receive(usize::from(reply[29])).await?;
-        Ok(())
     }
 }

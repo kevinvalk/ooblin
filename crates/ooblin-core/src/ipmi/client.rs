@@ -313,7 +313,8 @@ async fn ipv6(session: &Session, channel: u8) -> Option<Ipv6> {
     let counts = parameter(55, 0).await?;
     let mut addresses = Vec::new();
     for (number, count) in [(56, counts.first()?), (59, counts.get(1)?)] {
-        for set in 0..*count {
+        // A BMC holds a handful: we don't ask for 255 because it says so.
+        for set in 0..(*count).min(16) {
             // Set, enabled or source, the address, its prefix length and status: 0 is in use.
             let Some(entry) = parameter(number, set).await.filter(|entry| entry.get(19) == Some(&0)) else { continue };
             let address = Ipv6Addr::from(<[u8; 16]>::try_from(&entry[2..18]).unwrap());

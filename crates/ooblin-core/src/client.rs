@@ -2,8 +2,9 @@
 
 use std::ops::Range;
 
+use crate::redfish::BmcStatus;
 use crate::{
-    Error, Event, Flavor, Hardware, Info, Input, Panel, Power, PowerAction, Result, Sensor, Target, amt, ipmi,
+    Error, Event, Flavor, Hardware, Info, Input, Panel, Power, PowerAction, Result, Sensor, Target, amt, ipmi, redfish,
     supermicro,
 };
 
@@ -12,6 +13,7 @@ pub enum Client {
     Amt(amt::Client),
     Supermicro(supermicro::Client),
     Ipmi(ipmi::Client),
+    Redfish(redfish::Client),
 }
 
 /// An open screen: AMT's, or a Supermicro's.
@@ -33,13 +35,13 @@ pub enum Media {
     Supermicro(supermicro::Media),
 }
 
-/// `$call` on whichever of `$variants` `$value` holds, named `$it`; any other is `Unsupported`.
+/// `$call` on whichever of `$variants` `$value` holds, named `$it`; those it's `not` for are `Unsupported`. Every
+/// variant is named, so a new flavor is asked about each.
 macro_rules! either {
-    ($value:expr, $it:ident => $call:expr, $($variant:ident)|+) => {
+    ($value:expr, $it:ident => $call:expr, $($variant:ident)|+ $(, not $($without:ident)|+)?) => {
         match $value {
             $(Self::$variant($it) => $call,)+
-            #[allow(unreachable_patterns)]
-            _ => Err(Error::Unsupported),
+            $($(Self::$without(_) => Err(Error::Unsupported),)+)?
         }
     };
 }
@@ -70,25 +72,32 @@ impl Client {
                 let info = client.info().await?;
                 (Self::Ipmi(client), info)
             }
+            Flavor::Redfish => {
+                let client = redfish::Client::new(target, pin)?;
+                let info = client.info().await?;
+                (Self::Redfish(client), info)
+            }
         })
     }
 
     /// AMT first, unless it can't be reached (a host naming a port can't be, its URL carries AMT's own). Then a
     /// Supermicro, if the host answers Redfish without a login: no web server that isn't a BMC gets the password, and
-    /// another vendor's Redfish says it isn't one. Then IPMI, whose login never sends the password. Nothing answering
-    /// at all says why AMT didn't.
+    /// another vendor's Redfish says it isn't one. Then IPMI, whose login never sends the password and which has a
+    /// serial console, and where IPMI is off the Redfish that answered. Nothing answering at all says why AMT didn't.
     async fn guess(target: &Target, pin: Option<String>) -> Result<(Self, Info)> {
         let amt = match Self::login_as(target, pin.clone(), Flavor::Amt).await {
             Err(error @ (Error::Transport(_) | Error::Timeout | Error::Http(_))) => error,
             done => return done,
         };
-        if supermicro::probe(&target.authority()).await {
-            match Self::login_as(target, pin, Flavor::Supermicro).await {
+        let redfish = redfish::probe(&target.authority()).await;
+        if redfish {
+            match Self::login_as(target, pin.clone(), Flavor::Supermicro).await {
                 Err(Error::Protocol(_)) => {}
                 done => return done,
             }
         }
         match Self::login_as(target, None, Flavor::Ipmi).await {
+            Err(Error::Timeout | Error::Transport(_)) if redfish => Self::login_as(target, pin, Flavor::Redfish).await,
             Err(Error::Timeout | Error::Transport(_)) => Err(amt),
             done => done,
         }
@@ -113,35 +122,40 @@ impl Client {
     }
 
     pub async fn power(&mut self) -> Result<Power> {
-        either!(self, client => client.power().await, Amt | Supermicro | Ipmi)
+        either!(self, client => client.power().await, Amt | Supermicro | Ipmi | Redfish)
     }
 
     pub async fn set_power(&mut self, action: PowerAction) -> Result<()> {
-        either!(self, client => client.set_power(action).await, Amt | Supermicro | Ipmi)
+        either!(self, client => client.set_power(action).await, Amt | Supermicro | Ipmi | Redfish)
     }
 
     /// What IPMI says of the hardware is its FRU, see `ipmi::Client::fru`.
     pub async fn hardware(&mut self) -> Result<Hardware> {
-        either!(self, client => client.hardware().await, Amt | Supermicro)
+        either!(self, client => client.hardware().await, Amt | Supermicro | Redfish, not Ipmi)
     }
 
     pub async fn event_log(&mut self) -> Result<Vec<Event>> {
-        either!(self, client => client.event_log().await, Amt | Supermicro | Ipmi)
+        either!(self, client => client.event_log().await, Amt | Supermicro | Ipmi | Redfish)
+    }
+
+    /// What a server and its BMC are, as Redfish says it.
+    pub async fn bmc_status(&mut self) -> Result<BmcStatus> {
+        either!(self, client => client.status().await, Supermicro | Redfish, not Amt | Ipmi)
     }
 
     /// A BMC's sensors.
     pub async fn sensors(&mut self) -> Result<Vec<Sensor>> {
-        either!(self, client => client.sensors().await, Supermicro | Ipmi)
+        either!(self, client => client.sensors().await, Supermicro | Ipmi | Redfish, not Amt)
     }
 
     /// A BMC's front panel.
     pub async fn panel(&mut self) -> Result<Panel> {
-        either!(self, client => client.panel().await, Supermicro | Ipmi)
+        either!(self, client => client.panel().await, Supermicro | Ipmi | Redfish, not Amt)
     }
 
     /// Lights a BMC's identify light until turned off, or turns it off.
     pub async fn identify(&mut self, on: bool) -> Result<()> {
-        either!(self, client => client.identify(on).await, Supermicro | Ipmi)
+        either!(self, client => client.identify(on).await, Supermicro | Ipmi | Redfish, not Amt)
     }
 
     /// Opens the device's screen.
@@ -149,7 +163,7 @@ impl Client {
         match self {
             Self::Amt(client) => client.kvm().await.map(Kvm::Amt),
             Self::Supermicro(client) => client.kvm().await.map(Kvm::Supermicro),
-            Self::Ipmi(_) => Err(Error::Unsupported),
+            Self::Ipmi(_) | Self::Redfish(_) => Err(Error::Unsupported),
         }
     }
 
@@ -159,6 +173,7 @@ impl Client {
             Self::Amt(client) => client.sol().await.map(Sol::Amt),
             Self::Supermicro(client) => client.sol().await.map(Sol::Ipmi),
             Self::Ipmi(client) => client.sol().await.map(Sol::Ipmi),
+            Self::Redfish(_) => Err(Error::Unsupported),
         }
     }
 
@@ -167,7 +182,7 @@ impl Client {
         match self {
             Self::Amt(client) => client.ider(image).await.map(Media::Amt),
             Self::Supermicro(client) => client.media(image).await.map(Media::Supermicro),
-            Self::Ipmi(_) => Err(Error::Unsupported),
+            Self::Ipmi(_) | Self::Redfish(_) => Err(Error::Unsupported),
         }
     }
 
@@ -177,6 +192,7 @@ impl Client {
             Self::Amt(client) => client.web_pages(),
             Self::Supermicro(client) => client.web_pages(),
             Self::Ipmi(client) => client.web_pages(),
+            Self::Redfish(client) => client.web_pages(),
         }
     }
 }

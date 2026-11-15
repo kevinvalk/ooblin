@@ -2,8 +2,8 @@
      HTTPS, which we speak, only there. The footer says how it went. -->
 <script lang="ts">
   import type { BmcChange, BmcSettings } from "../../bindings/core";
+  import type { Connection } from "../../connection";
   import Form, { select, text } from "../Form.svelte";
-  import type { Connection } from "../Device.svelte";
   import Fru from "../ipmi/Fru.svelte";
   import NetworkSettings from "../ipmi/NetworkSettings.svelte";
   import Server from "../ipmi/Server.svelte";
@@ -143,7 +143,7 @@
       </div>
     </Form>
     <div class="@3xl:col-span-2">
-      <Form title="Services" {busy} save={(fields) => services(fields)}>
+      <Form title="Services" {busy} save={services}>
         {#each data?.services ?? [undefined] as service (service?.name)}
           {@const ours = !!service && OURS.includes(service.name)}
           <div title={ours ? "We speak to the BMC over this: change it in the BMC's own pages." : undefined}>

@@ -27,12 +27,14 @@ use tokio_tungstenite::tungstenite::protocol::Role;
 use crate::transcript::{Direction, Transcript};
 use crate::{Bmc, PASSWORD, USER};
 
-/// The KVM half's own: web sessions, and whether to refuse the next token.
+/// The KVM half's own: web sessions, and what to refuse.
 #[derive(Default)]
 pub(crate) struct State {
     /// Whether each login so far, by number, is still logged in: its SID and KVM token are the number.
     sessions: std::sync::Mutex<Vec<bool>>,
     refuse: AtomicBool,
+    refuse_web: AtomicBool,
+    hang_up: AtomicBool,
     /// Ticks on every logout, for the screens to look whether theirs was it.
     logouts: watch::Sender<()>,
     /// The CGI's answers changed since we started, by read (`GETPORTSINFO.XML`): the fixture's `cgi/` holds the rest.
@@ -71,7 +73,9 @@ pub(crate) async fn serve(bmc: &Arc<Bmc>, request: Request<Incoming>) -> Respons
         (&Method::POST, "/cgi/login.cgi") => {
             let form = request.into_body().collect().await.map(|body| body.to_bytes()).unwrap_or_default();
             let form: HashMap<_, _> = form_urlencoded::parse(&form).collect();
-            if form.get("name").is_some_and(|name| name == USER) && form.get("pwd").is_some_and(|pwd| pwd == PASSWORD) {
+            let known =
+                form.get("name").is_some_and(|name| name == USER) && form.get("pwd").is_some_and(|pwd| pwd == PASSWORD);
+            if known && !bmc.ikvm.refuse_web.load(Ordering::SeqCst) {
                 let mut sessions = bmc.ikvm.sessions.lock().unwrap();
                 sessions.push(true);
                 let cookie = format!("SID={:015}; path=/; secure; HttpOnly", sessions.len() - 1);
@@ -91,15 +95,16 @@ pub(crate) async fn serve(bmc: &Arc<Bmc>, request: Request<Incoming>) -> Respons
                 session.map(|session| format!(r#"<script>SmcCsrfInsert ("CSRF_TOKEN", "{session:08}");</script>"#));
             response.body(Full::from(format!("<html>{}</html>", token.unwrap_or_default())))
         }
-        // Its CGI's reads, from the fixture's `cgi/`: `GENERIC_INFO.XML=(0,0)`.
+        // Its CGI's reads, from the fixture's `cgi/`: `GENERIC_INFO.XML=(0,0)`, as its pages ask.
         (&Method::POST, "/cgi/ipmi.cgi") => {
             let token = request.headers().get("CSRF_TOKEN").and_then(|token| token.to_str().ok()?.parse().ok());
             let body = request.into_body().collect().await.map(|body| body.to_bytes()).unwrap_or_default();
-            let read = String::from_utf8_lossy(&body).split('=').next().unwrap_or_default().to_owned();
+            let body = String::from_utf8_lossy(&body);
+            let read = body.strip_suffix("=(0,0)").unwrap_or_default();
             log(bmc, format!("CGI {read}"));
             let allowed = session.is_some() && token == session && !read.contains('/');
-            let changed = bmc.ikvm.changed.lock().unwrap().get(&read).cloned();
-            let xml = changed.or_else(|| std::fs::read_to_string(bmc.fixture.join("cgi").join(&read)).ok());
+            let changed = bmc.ikvm.changed.lock().unwrap().get(read).cloned();
+            let xml = changed.or_else(|| std::fs::read_to_string(bmc.fixture.join("cgi").join(read)).ok());
             match xml.filter(|_| allowed) {
                 Some(xml) => response.body(Full::from(xml)),
                 None => response.status(StatusCode::FORBIDDEN).body(Full::default()),
@@ -199,6 +204,21 @@ impl Bmc {
     /// Refuses the next KVM token, as the BMC does a dead one.
     pub fn refuse_kvm(&self) {
         self.ikvm.refuse.store(true, Ordering::SeqCst);
+    }
+
+    /// Refuses every web login from now on, the right password too, while Redfish goes on taking it.
+    pub fn refuse_web(&self) {
+        self.ikvm.refuse_web.store(true, Ordering::SeqCst);
+    }
+
+    /// Hangs up on a drive plugged out, where the X10 says it's out.
+    pub fn hang_up_on_plug_out(&self) {
+        self.ikvm.hang_up.store(true, Ordering::SeqCst);
+    }
+
+    /// Answers the CGI's `read` (`CONFIG_INFO.XML`) with `xml` from now on.
+    pub fn set_cgi(&self, read: &str, xml: &str) {
+        self.ikvm.changed.lock().unwrap().insert(read.into(), xml.into());
     }
 }
 
@@ -303,7 +323,8 @@ async fn media(bmc: &Bmc, socket: &mut Socket) -> anyhow::Result<()> {
             }
             ensure!(answer.len() >= 29, "not an answer");
             let data = &answer[8..answer.len() - 21];
-            let status = [&b"USBS"[..], &tag.to_le_bytes(), &(length - data.len() as u32).to_le_bytes(), &[0]].concat();
+            let Some(residue) = length.checked_sub(data.len() as u32) else { bail!("more than we asked for") };
+            let status = [&b"USBS"[..], &tag.to_le_bytes(), &residue.to_le_bytes(), &[0]].concat();
             ensure!(
                 answer[..8] == pdu([0x22, 0, 2, 0], data)[..8]
                     && answer[answer.len() - 21..] == pdu([0x22, 0, 2, 0xFF], &status),
@@ -316,6 +337,7 @@ async fn media(bmc: &Bmc, socket: &mut Socket) -> anyhow::Result<()> {
     }
     ensure!(answer == plug_out, "not a plug-out");
     log(bmc, "vm out".into());
+    ensure!(!bmc.ikvm.hang_up.load(Ordering::SeqCst), "hanging up");
     send(socket, &pdu([0, 0, 0, 6], &[])).await
 }
 

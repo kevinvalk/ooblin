@@ -1,8 +1,9 @@
 # AGENTS.md
 
-Ooblin, a desktop console for Intel AMT, Supermicro BMCs and any BMC over IPMI on Linux, macOS and Windows: a library
-that knows all three (`crates/ooblin-core`, each flavor in its own folder), a Tauri v2 app over it (`crates/ooblin`)
-and a Svelte 5 and Tailwind UI (`ui/`, see `ui/DESIGN.md`). The library hands over data, the UI puts it in words.
+Ooblin, a desktop console for Intel AMT, Supermicro BMCs and any BMC over IPMI or Redfish on Linux, macOS and Windows: a
+library that knows them all (`crates/ooblin-core`, each flavor in its own folder or file), a Tauri v2 app over it
+(`crates/ooblin`) and a Svelte 5 and Tailwind UI (`ui/`, see `ui/DESIGN.md`). The library hands over data, the UI puts
+it in words.
 
 ## Working here
 
@@ -14,9 +15,9 @@ and a Svelte 5 and Tailwind UI (`ui/`, see `ui/DESIGN.md`). The library hands ov
   typechecks the UI. Only `crates/ooblin-core/src/net/` may touch the network, tests enforce it.
 - `anyhow` and `?` outside the library. Spec and integration tests (fixtures, the running app) over unit tests.
 - UI components sit in the folder of what uses them (`ui/src/device/` for a device and what all flavors share, each
-  flavor's tabs in its own, `device/amt/`, `device/supermicro/` and `device/ipmi/`), named for what they are, not where
-  they show. What IPMI does lives in `device/ipmi/`, where a Supermicro's pages take it from too, as the library's
-  `supermicro` does from its `ipmi`.
+  flavor's tabs in its own, `device/amt/`, `device/supermicro/`, `device/ipmi/` and `device/redfish/`), named for what
+  they are, not where they show. What a standard does lives in its folder (`device/ipmi/`, `device/redfish/`), where a
+  vendor's pages take it from too, as the library's `supermicro` does from its `ipmi` and `redfish`.
 - Comments only where a reader would otherwise get it wrong: terse, "we" voice, lines up to ~120 chars.
 - Not sure how the protocol, firmware or a library behaves? Ask, don't guess. Where sources disagree, trust the MS-02's
   behavior, then Intel's Device Management Toolkit (console, ui-toolkit, go-wsman-messages), then MeshCommander, then

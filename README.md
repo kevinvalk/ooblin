@@ -2,10 +2,11 @@
 
 # Ooblin
 
-Ooblin, the out-of-band (OOB) goblin, is a desktop console for Intel AMT, Supermicro BMCs and any BMC over IPMI: power
-control, hardware inventory, the device's screen, keyboard and mouse (KVM), its serial console, and booting it from a
-disk image on your machine (AMT's IDER, a Supermicro's virtual media). No server, no cloud: the app talks to your devices directly, over TLS with pinned certificates (and
-a BMC's IPMI, encrypted with keys from its password), with passwords kept in your OS keychain.
+Ooblin, the out-of-band (OOB) goblin, is a desktop console for Intel AMT, Supermicro BMCs and any BMC over IPMI or
+Redfish: power control, hardware inventory, the device's screen, keyboard and mouse (KVM), its serial console, and
+booting it from a disk image on your machine (AMT's IDER, a Supermicro's virtual media). No server, no cloud: the app
+talks to your devices directly, over TLS with pinned certificates (and a BMC's IPMI, encrypted with keys from its
+password), with passwords kept in your OS keychain.
 
 Built with [Tauri](https://tauri.app) for Linux, macOS and Windows.
 
@@ -26,8 +27,8 @@ right of the status bar saves it for a bug report: it has your devices' addresse
 ## Develop
 
 With the Rust of `rust-toolchain.toml`, the Node of `.node-version` and the
-[Tauri prerequisites](https://v2.tauri.app/start/prerequisites/) in place (CI checks every push on Linux, macOS and
-Windows the same way):
+[Tauri prerequisites](https://v2.tauri.app/start/prerequisites/) in place (CI checks every pull request and main on
+Linux, macOS and Windows the same way):
 
 ```sh
 cargo install tauri-cli --locked
@@ -39,16 +40,18 @@ cargo test
 ### Mock devices
 
 AMT lives in the management engine of a real vPro machine, and nobody makes an emulator for it. So we record real
-devices once and replay them from then on: `mock record <fixture> <host>` asks for the password and reads everything
-the device offers, without changing anything: every WS-Man class it knows, the read-only methods the app uses (clock,
-accounts, event and audit log) and a short serial console, KVM and IDER session, all into `fixtures/<fixture>`.
-`mock run <fixture>` then serves it on 127.0.0.1 as `admin` / `P@ssw0rd`, filling in by the spec what a recording
-can't hold: handshakes, authentication, method results, enumeration pages (AMT keeps one context for all of them), a
-KVM screen that waits for the viewer to ask for each update and a serial console that waits for you to type. It hangs
-up on a client that says anything else than was recorded, so every transcript checks our bytes. `cargo test` replays
-every fixture, so whatever a device once told us keeps parsing. `mock run` also takes a path, for a fixture of
-your own, and `mock record <fixture> <host> --sol` records only the serial console, for as long as you like: make
-the device write to it (mount a disk image, say), then press Enter.
+devices once and replay them from then on: `mock record <fixture> <host>` asks for the password and reads everything the
+device offers, without changing anything: every WS-Man class it knows, the read-only methods the app uses (clock,
+accounts, event and audit log) and a short serial console, KVM and IDER session, all into `fixtures/<fixture>`. `mock
+run <fixture>` then serves it on 127.0.0.1 as `admin` / `P@ssw0rd`, filling in by the spec what a recording can't hold:
+handshakes, authentication, method results, enumeration pages (AMT keeps one context for all of them), a KVM screen that
+waits for the viewer to ask for each update and a serial console that waits for you to type. It hangs up on a client
+that says anything else than was recorded (but the keys and pointer between a screen's updates, and what's typed on the
+console), so every transcript checks our bytes. `cargo test` replays every fixture, so whatever a device once told us
+keeps parsing, and replays each with a few files garbled, so whatever a device says we neither crash nor wait forever
+(`GARBLED=500 cargo test --test garbled` tries more). `mock run` also takes a path, for a fixture of your own, and `mock
+record <fixture> <host> --sol` records only the serial console, for as long as you like: make the device write to it
+(mount a disk image, say), then press Enter.
 
 A Supermicro BMC is recorded the same way: its Redfish (scrubbed, in DMTF's mockup layout under `redfish/`), its IPMI
 (scrubbed, every answer our reads asked for in `ipmi.txt`) and a short KVM session; a BMC we know over IPMI alone, its
@@ -64,10 +67,51 @@ audit log keeps its user names and client addresses, and the KVM session keeps a
 at `00402b9`, Apache-2.0), which the mock serves alongside. `fixtures/ipmi-sim` is what OpenIPMI's simulator, another
 IPMI 2.0 implementation, told ipmitool: `mock run ipmi-sim` serves a BMC we know over IPMI alone. `fixtures/openbmc` is
 OpenBMC, its CI's `obmc-phosphor-image-romulus.static.mtd` booted in `qemu-system-arm -M romulus-bmc -nographic -drive
-file=<it>,format=raw,if=mtd -net nic -net user,hostfwd=udp::623-:623` and recorded with `mock record openbmc 127.0.0.1
---user root` (0penBmc).
+file=<it>,format=raw,if=mtd -net nic -net user,hostfwd=udp::623-:623,hostfwd=tcp::2443-:443` and recorded with `mock
+record openbmc 127.0.0.1 --user root` (0penBmc) for its IPMI, and at `127.0.0.1:2443`, where IPMI doesn't answer, for
+its Redfish: one fixture a login finds over IPMI, and that the Kind Redfish speaks to as well.
+`fixtures/dmtf-rackmount1` is an untouched copy of DMTF's sample rack server from their
+[Redfish-Mockup-Server](https://github.com/DMTF/Redfish-Mockup-Server) (`public-rackmount1` at `23d21f9`, BSD-3-Clause,
+its license beside it): the standard's own example, with IPMI off.
 
 ## What it supports
+
+Out-of-band management is a few protocols and many dialects. Ooblin keeps the two apart: a flavor is what a device is
+(a folder of `crates/ooblin-core/src`), a protocol is how we speak to it (a file of its `net/`), and a flavor speaks
+the protocols its device does. Dashed is what isn't there yet.
+
+```mermaid
+flowchart LR
+  subgraph flavors["Flavors: what a device is"]
+    amt["amt<br>Intel AMT"]
+    supermicro["supermicro<br>Supermicro BMC"]
+    ipmi["ipmi<br>any BMC"]
+    redfish["redfish<br>any BMC"]
+    vendor["dell, hpe, openbmc…"]:::later
+  end
+  subgraph protocols["Protocols: how we speak"]
+    wsman["WS-Man, TCP 16993<br>all of AMT but its sessions"]
+    redirection["AMT redirection, TCP 16995<br>SOL, KVM (RFB), IDER"]
+    rmcp["IPMI 2.0 RMCP+, UDP 623<br>power, sensors, logs, FRU, SOL"]
+    rest["Redfish, HTTPS<br>power, inventory, logs, settings"]
+    web["A vendor's own web pages<br>what its Redfish lacks"]
+    kvm["A vendor's own KVM and virtual media"]
+  end
+  amt --> wsman & redirection
+  supermicro --> web & kvm
+  supermicro -- "uses" --> ipmi & redfish
+  ipmi --> rmcp
+  redfish --> rest
+  vendor -. "uses" .-> redfish & ipmi
+  vendor -.-> kvm
+  classDef later stroke-dasharray: 4 4
+```
+
+Two flavors are a standard alone and work with any vendor's device: `ipmi` and `redfish`. A vendor's flavor is what
+the standards don't say (its KVM, its virtual media, its settings and quirks) on top of those, as `supermicro` is on
+both: power and what a server is made of through `redfish`, sensors and the FRU through `ipmi`, and the rest its own.
+What is a standard's goes in that standard's flavor, what is one vendor's in the vendor's, and nothing of a vendor's
+in `net/` but its own wire formats.
 
 By the features in Intel's [AMT Implementation and Reference
 Guide](https://software.intel.com/sites/manageability/AMT_Implementation_and_Reference_Guide/default.htm), as checked
@@ -126,8 +170,19 @@ or its addresses, and VLAN), what the server does when power comes back, the ser
 board and product fields (rewritten in place, checked by reading them back), and its users to read. Not: a screen (IPMI
 has none, and every vendor's KVM is its own) nor virtual media (likewise).
 
+### Any BMC, over Redfish
+
+Whoever made it, where IPMI is off or you'd rather not speak it, as far as the standard goes (DSP0266), as checked
+against OpenBMC and DMTF's sample server: the first server, BMC and chassis its service lists, status with the BMC's
+network port and the server's own, power with booting once to BIOS or PXE (what its Reset allows, where it says so in
+the action or in a resource of its own), the identify light under either of its names, hardware (processors, memory,
+and disks from its storage controllers or simple storage), the server's logs, and sensors, each a resource of its own
+or as its thermal and power resources say them. Not: a screen, a serial console or virtual media (every vendor's own),
+nor settings. Drives behind a storage controller and logs of more than a page are written by the standard alone: no
+device we have lists either.
+
 Connecting tries Intel AMT, then a Supermicro's Redfish (asked without the password), then IPMI, whose login never
-sends it; the connect form's Kind picks one instead.
+sends it, then the Redfish that answered where IPMI doesn't; the connect form's Kind picks one instead.
 
 ## TODO
 

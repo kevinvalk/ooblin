@@ -10,8 +10,7 @@ use super::{APPLICATION, Session};
 use crate::net::ipmi::{MESSAGE, SOL, message};
 use crate::{Error, GOODBYE, Result, Target};
 
-/// An open serial console: the server's serial port, carried in numbered packets each side acknowledges. What the
-/// server writes and what we type go separate ways, so typing never waits on reading.
+/// An open serial console. What the server writes and what we type go separate ways, so typing never waits on reading.
 pub struct Sol {
     session: Session,
     /// The most a packet to the BMC carries, after its 4-byte header.
@@ -29,8 +28,9 @@ struct State {
     /// them and how often we sent them again without a word from the BMC.
     sequence: u8,
     unacknowledged: Option<(Vec<u8>, Instant, u8)>,
-    /// The BMC's last packet's number, as it sends one again until we acknowledge it.
-    received: u8,
+    /// The BMC's last packet's number and how many characters it had, as it sends one again until we acknowledge it,
+    /// with what the server wrote meanwhile after them.
+    received: (u8, u8),
     /// When we last sent anything: the session ends after a minute or so of silence.
     sent: Instant,
 }
@@ -56,7 +56,7 @@ impl Sol {
         let session = Session::open(target).await?;
         match Self::activate(&session, target).await {
             Ok(most) => {
-                let state = State { sequence: 0, unacknowledged: None, received: 0, sent: Instant::now() };
+                let state = State { sequence: 0, unacknowledged: None, received: (0, 0), sent: Instant::now() };
                 let (acknowledged, reading, writing) = Default::default();
                 Ok(Self { session, most, state: Mutex::new(state), acknowledged, reading, writing })
             }
@@ -95,14 +95,14 @@ impl Sol {
     pub async fn read(&self) -> Result<Vec<u8>> {
         let _reading = self.reading.lock().await;
         let deadline = tokio::time::Instant::now() + Duration::from_secs(1);
-        loop {
+        // A BMC that keeps sending what holds nothing new doesn't keep us past the second.
+        while tokio::time::Instant::now() < deadline {
             self.tend().await?;
-            let Ok(received) = tokio::time::timeout_at(deadline, self.session.receive()).await else {
-                return Ok(Vec::new());
-            };
+            let Ok(received) = tokio::time::timeout_at(deadline, self.session.receive()).await else { break };
             let (kind, packet) = received?;
+            // Both numbers are 4 bits, the rest reserved.
             let [sequence, acknowledges, accepted, status] = match packet.get(..4) {
-                Some(&[a, b, c, d]) if kind == SOL => [a, b, c, d],
+                Some(&[a, b, c, d]) if kind == SOL => [a & 0x0F, b & 0x0F, c, d],
                 _ => continue,
             };
             if status & 0x10 != 0 {
@@ -114,13 +114,19 @@ impl Sol {
             if sequence == 0 {
                 continue;
             }
-            let data = packet[4..].to_vec();
-            self.send(&[0, sequence, data.len() as u8, 0]).await?;
-            // Sent again, as our acknowledgement was lost: we have it already.
-            if std::mem::replace(&mut self.state.lock().unwrap().received, sequence) != sequence && !data.is_empty() {
-                return Ok(data);
+            let data = &packet[4..];
+            let count = data.len() as u8;
+            self.send(&[0, sequence, count, 0]).await?;
+            // Sent again, as our acknowledgement was lost: we have its first characters already.
+            let had = match std::mem::replace(&mut self.state.lock().unwrap().received, (sequence, count)) {
+                (last, had) if last == sequence => usize::from(had).min(data.len()),
+                _ => 0,
+            };
+            if had < data.len() {
+                return Ok(data[had..].to_vec());
             }
         }
+        Ok(Vec::new())
     }
 
     /// Types `data` on the serial port, a packet at a time, each once the BMC took the one before.
@@ -147,15 +153,16 @@ impl Sol {
         self.session.close().await;
     }
 
-    /// The BMC took `accepted` characters of our last packet, all of them unless it says `nack`. What it didn't take
-    /// goes again, as a packet of its own.
+    /// The BMC took `accepted` characters of our last packet, none if it says `nack`. What it didn't take goes again,
+    /// as a packet of its own at once, or all of it as `tend` sends it: one that takes nothing would have us send
+    /// without end.
     async fn acknowledge(&self, acknowledges: u8, accepted: u8, nack: bool) -> Result<()> {
         let rest = {
             let mut state = self.state.lock().unwrap();
             if acknowledges != state.sequence {
                 return Ok(());
             }
-            if nack {
+            if nack || accepted == 0 {
                 if let Some((.., resends)) = state.unacknowledged.as_mut() {
                     *resends = 0;
                 }

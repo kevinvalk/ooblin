@@ -1,7 +1,7 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "What the window may use besides our own commands: our events and the log.",
+  "description": "What the window may use besides our own commands: listening to our events, whether it is full screen and the log.",
   "windows": ["main"],
-  "permissions": ["core:event:default", "core:window:allow-is-fullscreen", "log:default"]
+  "permissions": ["core:event:allow-listen", "core:window:allow-is-fullscreen", "log:default"]
 }

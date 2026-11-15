@@ -2,10 +2,10 @@
      and the last POST code its BIOS wrote, what the BMC doesn't say left out. Read every 5 seconds or so while the
      device is shown, and at once after a switch. -->
 <script lang="ts">
-  import { Lightbulb } from "@lucide/svelte";
+  import { Lightbulb, LoaderCircle } from "@lucide/svelte";
   import { invoke } from "@tauri-apps/api/core";
   import type { Panel } from "../../bindings/core";
-  import { reason } from "../Device.svelte";
+  import { reason } from "../../connection";
 
   let { host, hidden, say }: { host: string; hidden: boolean; say: (text: string, failed?: boolean) => void } = $props();
 
@@ -57,6 +57,10 @@
     title="Lights the server's blue identify light (UID), to find it in the rack, until switched off."
     onclick={() => identify(!panel!.identify)}
   >
-    <Lightbulb class={["size-4", panel.identify && "fill-current"]} /> UID
+    {#if switching}
+      <LoaderCircle class="size-4 animate-spin" />
+    {:else}
+      <Lightbulb class={["size-4", panel.identify && "fill-current"]} />
+    {/if} UID
   </button>
 {/if}

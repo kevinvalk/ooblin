@@ -52,7 +52,8 @@ impl Hosts {
     /// The devices saved at `path`, their passwords under `service` in the credential store.
     pub fn open(path: &Path, service: &str) -> io::Result<Self> {
         let hosts = match std::fs::read(path) {
-            Ok(json) => serde_json::from_slice(&json)?,
+            Ok(json) => serde_json::from_slice(&json)
+                .map_err(|error| io::Error::other(format!("{}: {error}", path.display())))?,
             Err(error) if error.kind() == io::ErrorKind::NotFound => BTreeMap::new(),
             Err(error) => return Err(error),
         };

@@ -15,7 +15,7 @@ pub use discovery::{Found, RMCP_PORT, discover, nearby};
 pub use redirection::{REDIRECTION_PORT, Redirection, Session, decode_fields, encode_fields};
 pub(crate) use redirection::{read_exact, write_all};
 
-use std::sync::{Arc, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
 use digest_auth::{AuthContext, WwwAuthenticateHeader};
@@ -25,6 +25,7 @@ use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, Server
 use rustls::crypto::{WebPkiSupportedAlgorithms, aws_lc_rs};
 use rustls::pki_types::{CertificateDer, ServerName, UnixTime};
 use rustls::{CertificateError, ClientConfig, DigitallySignedStruct, SignatureScheme};
+use socket2::{SockRef, TcpKeepalive};
 use tokio::net::TcpStream;
 use tokio_rustls::TlsConnector;
 use tokio_rustls::client::TlsStream;
@@ -73,7 +74,15 @@ impl Connection {
         }
 
         let status = response.status();
-        let body = response.text().await.map_err(transport)?;
+        let mut body = Vec::new();
+        while let Some(chunk) = response.chunk().await.map_err(transport)? {
+            body.extend_from_slice(&chunk);
+            if body.len() > MOST {
+                return Err(Error::Protocol(format!("a reply of more than {MOST} bytes")));
+            }
+        }
+        let body = String::from_utf8_lossy(&body).into_owned();
+
         match status {
             StatusCode::UNAUTHORIZED => Err(Error::Unauthorized),
             status if status.is_success() => Ok(body),
@@ -98,15 +107,19 @@ impl Connection {
     }
 }
 
-/// AMT answers in a second or two, a device taking this long has most likely hung.
+/// A device answers in a second or two, one taking this long has most likely hung.
 const HUNG: Duration = Duration::from_secs(20);
+
+/// The most a reply may be, far above any AMT sends (the MS-02's largest pages are some 50 KB), so a device that keeps
+/// sending can't fill our memory.
+const MOST: usize = 8 << 20;
 
 /// HTTPS to a device that only takes the pinned certificate.
 fn http(pin: &Arc<Pin>) -> Result<reqwest::Client> {
     reqwest::Client::builder()
         .use_preconfigured_tls(pin.tls())
         .pool_max_idle_per_host(1)
-        // A burst of reads shares a connection, but we don't reuse one AMT may have given up on in the meantime.
+        // A burst of reads shares a connection, but we don't reuse one the device may have given up on in the meantime.
         .pool_idle_timeout(Duration::from_secs(5))
         .connect_timeout(Duration::from_secs(10))
         .timeout(HUNG)
@@ -124,6 +137,14 @@ async fn tls(host: &str, port: u16, pin: &Arc<Pin>) -> Result<Stream> {
         let tcp = TcpStream::connect((host, port)).await?;
         // Our messages are small and each waits on an answer, Nagle's algorithm would hold every one of them back.
         tcp.set_nodelay(true)?;
+        // A session waits for the device as long as it takes, and one that vanished says nothing: the OS asks after
+        // 10 quiet seconds, and hangs up when 3 askings 5 seconds apart go unanswered.
+        let asking = TcpKeepalive::new()
+            .with_time(Duration::from_secs(10))
+            .with_interval(Duration::from_secs(5))
+            .with_retries(3);
+        SockRef::from(&tcp).set_tcp_keepalive(&asking)?;
+
         TlsConnector::from(Arc::new(pin.tls()))
             .connect(name, tcp)
             .await
@@ -173,7 +194,8 @@ pub fn fingerprint(der: &[u8]) -> String {
 #[derive(Debug)]
 struct Pin {
     pinned: OnceLock<String>,
-    rejected: OnceLock<String>,
+    /// The other certificate a device presented, until `mismatch` says so.
+    rejected: Mutex<Option<String>>,
     algorithms: WebPkiSupportedAlgorithms,
 }
 
@@ -181,7 +203,7 @@ impl Pin {
     fn new(pin: Option<String>) -> Arc<Self> {
         Arc::new(Self {
             pinned: pin.map(OnceLock::from).unwrap_or_default(),
-            rejected: OnceLock::new(),
+            rejected: Mutex::default(),
             algorithms: aws_lc_rs::default_provider().signature_verification_algorithms,
         })
     }
@@ -190,10 +212,11 @@ impl Pin {
         ClientConfig::builder().dangerous().with_custom_certificate_verifier(self.clone()).with_no_client_auth()
     }
 
-    /// Why a connection failed, if it was because the device presented another certificate.
+    /// Why a connection failed, if it was because the device presented another certificate. Said once: what fails
+    /// next has a reason of its own.
     fn mismatch(&self) -> Option<Error> {
-        let (expected, actual) = (self.pinned.get()?.clone(), self.rejected.get()?.clone());
-        Some(Error::PinMismatch { expected, actual })
+        let actual = self.rejected.lock().unwrap().take()?;
+        Some(Error::PinMismatch { expected: self.pinned.get()?.clone(), actual })
     }
 }
 
@@ -210,7 +233,7 @@ impl ServerCertVerifier for Pin {
         if *self.pinned.get_or_init(|| presented.clone()) == presented {
             return Ok(ServerCertVerified::assertion());
         }
-        let _ = self.rejected.set(presented);
+        *self.rejected.lock().unwrap() = Some(presented);
         Err(rustls::Error::InvalidCertificate(CertificateError::ApplicationVerificationFailure))
     }
 

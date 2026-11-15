@@ -168,8 +168,10 @@ impl Sender {
         let _ = tokio::time::timeout(GOODBYE, self.socket.close()).await;
     }
 
+    /// Unless the BMC hung: one that stops reading would keep us waiting, and whoever waits for us.
     async fn send(&mut self, message: &[u8]) -> Result<()> {
-        self.socket.send(tungstenite::Message::binary(message.to_vec())).await.map_err(websocket)
+        let sent = self.socket.send(tungstenite::Message::binary(message.to_vec()));
+        tokio::time::timeout(HUNG, sent).await.map_err(|_| Error::Timeout)?.map_err(websocket)
     }
 }
 

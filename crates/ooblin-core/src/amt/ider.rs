@@ -39,6 +39,7 @@ impl Client {
         let cdrom = Cdrom::new(image).await?;
         let redirection = self.redirect(Session::Ider).await?;
         let mut ider = Ider { redirection, cdrom, chunk: 0, sequence: 0, served: 0..0 };
+
         // Timeouts of 30 seconds to receive and none to send, a heartbeat every 20 seconds, version 1.
         ider.send(0x40, &[0x30, 0x75, 0, 0, 0x20, 0x4E, 1, 0, 0, 0], false, false).await?;
         let reply = ider.redirection.read_exact(30).await?;
@@ -47,6 +48,7 @@ impl Client {
         if reply[0] != 0x41 || reply[21] != 0 || !(1..=8192).contains(&ider.chunk) {
             return Err(Error::Protocol(format!("an IDER session we don't speak: {reply:?}")));
         }
+
         // The drive shows up when the device next boots, not under a running OS.
         ider.send(0x48, &[3, 0x01 | 0x08, 0, 0, 0], false, false).await?;
         Ok(ider)
@@ -141,7 +143,7 @@ impl Ider {
         let mut left = blocks * 2048;
         let mut buf = vec![0; self.chunk];
         while left > 0 {
-            let chunk = &mut buf[..self.chunk.min(left as usize)];
+            let chunk = &mut buf[..self.chunk.min(usize::try_from(left).unwrap_or(usize::MAX))];
             self.cdrom.read(self.served.end, chunk).await?;
             left -= chunk.len() as u64;
             self.served.end += chunk.len() as u64;
@@ -190,7 +192,7 @@ impl Ider {
     }
 
     async fn send(&mut self, command: u8, data: &[u8], last: bool, dma: bool) -> Result<()> {
-        let attributes = u8::from(last && command > 0x50) << 1 | u8::from(dma);
+        let attributes = u8::from(last) << 1 | u8::from(dma);
         let message = [&[command, 0, 0, attributes][..], &self.sequence.to_le_bytes(), data].concat();
         self.sequence += 1;
         self.redirection.write_all(&message).await

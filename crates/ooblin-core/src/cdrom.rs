@@ -8,7 +8,7 @@ use std::io::SeekFrom;
 use tokio::fs::File;
 use tokio::io::{AsyncReadExt, AsyncSeekExt};
 
-use crate::Result;
+use crate::{Error, Result};
 
 pub struct Cdrom {
     image: File,
@@ -31,11 +31,16 @@ impl Cdrom {
     pub async fn new(image: std::fs::File) -> Result<Self> {
         let image = File::from_std(image);
         let blocks = image.metadata().await?.len() / 2048;
+        // READ CAPACITY can't say no blocks: its answer is the last one.
+        if blocks == 0 {
+            return Err(Error::Invalid("That file is too small to be a disc image.".into()));
+        }
         Ok(Self { image, blocks, sense: [0; 3] })
     }
 
-    /// What `cdb` gets.
+    /// What `cdb` gets, a field it's too short for read as zeros.
     pub fn answer(&mut self, cdb: &[u8]) -> Answer {
+        let cdb: [u8; 12] = std::array::from_fn(|at| cdb.get(at).copied().unwrap_or(0));
         let u16_at = |at: usize| u16::from_be_bytes([cdb[at], cdb[at + 1]]);
         // Unlike the references we stop at the allocation length, as SCSI wants: more is an overrun to the host.
         let allocation = match cdb[0] {
@@ -80,7 +85,7 @@ impl Cdrom {
             0x23 => data(&[0, 0, 0, 8, 0, 0, 0x0B, 0x40, 2, 0, 2, 0]),
             // READ CAPACITY: the last block and the block size.
             0x25 => {
-                let last = u32::try_from(self.blocks.saturating_sub(1)).unwrap_or(u32::MAX).to_be_bytes();
+                let last = u32::try_from(self.blocks - 1).unwrap_or(u32::MAX).to_be_bytes();
                 data(&[&last[..], &[0, 0, 8, 0]].concat())
             }
             // READ TOC: one data track.

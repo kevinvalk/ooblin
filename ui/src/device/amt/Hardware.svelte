@@ -14,9 +14,10 @@
     <div><dt>Serial number</dt><dd>{data?.system.serial_number}</dd></div>
     <div><dt>System ID</dt><dd class="font-mono">{data?.system.id}</dd></div>
     {#each data?.processors ?? [undefined] as processor, i}
+      {@const speeds = [processor?.mhz, processor?.max_mhz].filter(Boolean).join(" / ")}
       <div>
         <dt>{data && data.processors.length > 1 ? `CPU ${i}` : "CPU"}</dt>
-        <dd>{processor && `${processor.model} @ ${[processor.mhz, processor.max_mhz].filter(Boolean).join(" / ")} MHz`}</dd>
+        <dd>{processor && processor.model + (speeds && ` @ ${speeds} MHz`)}</dd>
       </div>
     {/each}
   </dl>
@@ -111,7 +112,7 @@
         {#if data && data.batteries.length > 1}<h3>Battery {i}</h3>{/if}
         <dl class="card">
           <div><dt>Name</dt><dd>{battery.name}</dd></div>
-          <div><dt>Charge</dt><dd>{battery.charge_percent && `${battery.charge_percent} %`}</dd></div>
+          <div><dt>Charge</dt><dd>{battery.charge_percent !== null ? `${battery.charge_percent} %` : ""}</dd></div>
           <div><dt>Design capacity</dt><dd>{battery.design_capacity_mwh && `${battery.design_capacity_mwh / 1000} Wh`}</dd></div>
         </dl>
       </div>

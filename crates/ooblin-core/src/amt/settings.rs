@@ -156,7 +156,7 @@ impl Client {
                     _ => DnsUpdate::Off,
                 },
             },
-            clock_offset: clock.map(|clock| clock - now()),
+            clock_offset: clock.map(|clock| clock.saturating_sub(now())),
             power_policies: schemes
                 .iter()
                 .map(|scheme| {

@@ -1,11 +1,13 @@
-//! Intel AMT, Supermicro BMCs and any BMC over IPMI, without a webview. Each flavor has its own protocols (`amt`,
-//! `supermicro`, `ipmi`), `Client` speaks to any, and all hand over what's here. Every socket lives in `net`.
+//! Intel AMT, Supermicro BMCs and any BMC over IPMI or Redfish, without a webview. Each flavor has its own protocols
+//! (`amt`, `ipmi` and `redfish`, which a vendor's `supermicro` adds its own to), `Client` speaks to any, and all hand
+//! over what's here. Every socket lives in `net`.
 
 pub mod amt;
 mod cdrom;
 mod client;
 pub mod ipmi;
 mod net;
+pub mod redfish;
 pub mod supermicro;
 
 pub use client::{Client, Kvm, Media, Sol};
@@ -135,6 +137,8 @@ pub enum Flavor {
     Supermicro,
     /// A BMC we know only over IPMI: any vendor's, or a Supermicro without Redfish.
     Ipmi,
+    /// A BMC we know only over Redfish: any vendor's, with IPMI turned off say.
+    Redfish,
 }
 
 /// What a login says about the device. Text it doesn't have is empty: AMT's own facts (`build`, `control_mode`) on a

@@ -1,6 +1,6 @@
-//! Supermicro BMCs: Redfish for what they say and do (member `1` of each collection, as Supermicro numbers them), their
-//! own web pages for what Redfish doesn't say, IPMI for what every BMC does alike (`ipmi`), and ATEN's iKVM for their
-//! screen.
+//! Supermicro BMCs: Redfish for what they say and do (`redfish`, member `1` of each collection as Supermicro numbers
+//! them, and what theirs has of its own), their own web pages for what Redfish doesn't say, IPMI for what every BMC
+//! does alike (`ipmi`), and ATEN's iKVM for their screen.
 
 #![allow(non_snake_case, reason = "our JSON types name their fields the way Redfish does, `PowerState` say")]
 
@@ -9,14 +9,14 @@ mod kvm;
 mod media;
 
 pub use crate::net::ikvm::Ikvm;
-pub use crate::net::redfish::{Connection, probe};
 pub use crate::net::web::Web;
+pub use crate::redfish::{BmcStatus, Connection, Lan, probe};
 pub use kvm::Kvm;
 pub use media::Media;
 
-use core::net::{Ipv4Addr, Ipv6Addr};
+use core::net::Ipv4Addr;
 
-use serde::de::{DeserializeOwned, IgnoredAny};
+use serde::de::IgnoredAny;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use tokio::sync::OnceCell;
@@ -24,46 +24,22 @@ use ts_rs::TS;
 
 use crate::ipmi::{self, Fru, Network, PowerRestore, SolSettings, sel};
 use crate::mac;
+use crate::redfish::{self, Collection, ComputerSystem, Cpu, Dimm, EthernetInterface, Paths, Root, Storage, port};
 use crate::{
-    Bios, Configuration, Consent, Disk, Error, Event, Flavor, Hardware, Info, Ipv4, Ipv6, Module, Motherboard, Panel,
-    Port, Power, PowerAction, PowerState, Processor, RemoteAccess, Result, Sensor, Severity, System, Target,
+    Consent, Error, Event, Flavor, Hardware, Info, Motherboard, Panel, Power, PowerAction, RemoteAccess, Result,
+    Sensor, Severity, Target,
 };
 
 pub struct Client {
-    connection: Connection,
+    /// Its Redfish, for what the standard says.
+    redfish: redfish::Client,
     /// Its IPMI, for what every BMC does alike.
     ipmi: ipmi::Client,
     /// What changes only with the BMC's firmware or the server's hardware, either of which ends our connection.
     facts: OnceCell<Facts>,
     /// Its firmware's version as IPMI says it, which changes no more than `facts` do, kept apart because a login reads
-    /// it and not them.
-    firmware: OnceCell<String>,
-}
-
-/// What the server and its BMC are: the day its firmware (in `info`) was built, Redfish's version, the BIOS's and the
-/// day it was released, and the server's own network ports. Dates are `2026-05-29`, empty where the BMC's pages don't
-/// say.
-#[derive(Debug, Serialize, TS)]
-#[ts(export, export_to = "core.ts")]
-pub struct BmcStatus {
-    pub info: Info,
-    pub power: PowerState,
-    pub system_id: String,
-    pub firmware_built: String,
-    pub redfish: String,
-    pub bios: String,
-    pub bios_released: String,
-    pub lans: Vec<Lan>,
-    /// The BMC's own port, the one we speak to, as AMT's are its management ports.
-    pub ports: Vec<Port>,
-}
-
-/// One of the server's network ports: its name (`OnBoard LAN 1`) and MAC address.
-#[derive(Clone, Debug, Serialize, TS)]
-#[ts(export, export_to = "core.ts")]
-pub struct Lan {
-    pub name: String,
-    pub mac: String,
+    /// it and not them. `None` where IPMI didn't say, which we don't wait for again with every `status`.
+    firmware: OnceCell<Option<String>>,
 }
 
 /// How the BMC is set up: its network, what it serves on which port, how it runs the fans and our mouse, where it gets
@@ -74,6 +50,8 @@ pub struct Lan {
 pub struct BmcSettings {
     pub network: Network,
     pub services: Vec<Service>,
+    /// What it lets us redirect now, as `Info` said on login.
+    pub remote_access: RemoteAccess,
     pub fan_mode: Mode,
     pub mouse_mode: Mode,
     pub ntp: Ntp,
@@ -144,8 +122,13 @@ pub enum Change {
 impl Client {
     /// Connects lazily, as `amt::Client::new` does.
     pub fn new(target: &Target, pin: Option<String>) -> Result<Self> {
+        let paths = Paths {
+            system: "/redfish/v1/Systems/1".into(),
+            manager: "/redfish/v1/Managers/1".into(),
+            chassis: "/redfish/v1/Chassis/1".into(),
+        };
         Ok(Self {
-            connection: Connection::new(target, pin)?,
+            redfish: redfish::Client::at(target, pin, paths)?,
             ipmi: ipmi::Client::new(target),
             facts: OnceCell::new(),
             firmware: OnceCell::new(),
@@ -158,9 +141,9 @@ impl Client {
     }
 
     /// The X10 takes half a second a request, its pages and Redfish alike, so we ask all at once, and what doesn't
-    /// change only once.
+    /// change only once. Only a login asks alone first (`manager`): a password changed since is tried by each of these.
     pub async fn status(&mut self) -> Result<BmcStatus> {
-        let system = self.get::<ComputerSystem>("/redfish/v1/Systems/1");
+        let system = self.redfish.get::<ComputerSystem>("/redfish/v1/Systems/1");
         let facts = self.facts.get_or_try_init(|| self.read_facts());
         // Not `try_join!`, which would drop `dashboard` between its web login and logout.
         let (manager, system, facts) = tokio::join!(self.manager(), system, facts);
@@ -178,11 +161,15 @@ impl Client {
         })
     }
 
-    /// The identify light over IPMI, which every BMC has, the POST code from Redfish.
+    /// The identify light over IPMI, which every BMC has unless it's turned off, the POST code from Redfish.
     pub async fn panel(&mut self) -> Result<Panel> {
-        let snooping = self.optional::<Snooping>("/redfish/v1/Managers/1/Snooping");
-        let (snooping, panel) = tokio::try_join!(snooping, self.ipmi.panel())?;
-        Ok(Panel { post_code: u8::from_str_radix(&snooping.PostCode, 16).ok(), ..panel })
+        let snooping = self.redfish.optional::<Snooping>("/redfish/v1/Managers/1/Snooping");
+        let (snooping, panel) = tokio::join!(snooping, self.ipmi.panel());
+        let identify = panel.inspect_err(|error| log::warn!("The BMC's IPMI didn't answer: {error}")).ok();
+        Ok(Panel {
+            identify: identify.and_then(|panel| panel.identify),
+            post_code: u8::from_str_radix(&snooping?.PostCode, 16).ok(),
+        })
     }
 
     /// Lights the identify light until turned off, or turns it off.
@@ -195,106 +182,49 @@ impl Client {
         self.ipmi.sol().await
     }
 
-    /// What it offers is what its Reset allows (boot once only into a target it allows), on or off.
     pub async fn power(&mut self) -> Result<Power> {
-        use PowerAction::*;
-        let system: ComputerSystem = self.get("/redfish/v1/Systems/1").await?;
-        let state = system.state();
-        let offered: &[_] = match state {
-            PowerState::Off => &[On, OnToBios, OnToPxe, OnToImage],
-            _ => &[SoftOff, Off, SoftReset, Reset, Nmi, ResetToBios, ResetToPxe, ResetToImage],
-        };
-        let (resets, targets) = (&system.Actions.reset.types, &system.Boot.targets);
-        let offers = |(reset, target): (&str, Option<&str>)| {
-            resets.iter().any(|allowed| allowed == reset)
-                && target.is_none_or(|target| targets.iter().any(|t| t == target))
-        };
-        let actions = offered.iter().copied().filter(|&action| reset(action).is_some_and(offers)).collect();
-        Ok(Power { state, actions })
+        self.redfish.power().await
     }
 
-    /// Boot once is a boot override first, then the power change.
     pub async fn set_power(&mut self, action: PowerAction) -> Result<()> {
-        let (reset, target) = reset(action).ok_or(Error::Unsupported)?;
-        if let Some(target) = target {
-            let boot = json!({"Boot": {"BootSourceOverrideEnabled": "Once", "BootSourceOverrideTarget": target}});
-            self.connection.patch("/redfish/v1/Systems/1", &boot).await?;
-        }
-        self.connection.post("/redfish/v1/Systems/1/Actions/ComputerSystem.Reset", &json!({"ResetType": reset})).await
+        self.redfish.set_power(action).await
     }
 
-    /// The system alone first, so a wrong password is tried once.
+    /// Its Redfish alone, for what the standard says and we read another way: its sensors, say.
+    pub fn redfish(&self) -> &redfish::Client {
+        &self.redfish
+    }
+
+    /// The system alone first, so a wrong password is tried once where this is the first we ask.
     pub async fn hardware(&mut self) -> Result<Hardware> {
-        let system: ComputerSystem = self.get("/redfish/v1/Systems/1").await?;
+        let system: ComputerSystem = self.redfish.get("/redfish/v1/Systems/1").await?;
         let (chassis, processors, memory, storage) = tokio::try_join!(
-            self.get::<Chassis>("/redfish/v1/Chassis/1"),
-            self.members::<Cpu>("/redfish/v1/Systems/1/Processors"),
-            self.members::<Dimm>("/redfish/v1/Systems/1/Memory"),
-            self.members::<Storage>("/redfish/v1/Systems/1/SimpleStorage"),
+            self.redfish.get::<Chassis>("/redfish/v1/Chassis/1"),
+            self.redfish.members::<Cpu>("/redfish/v1/Systems/1/Processors"),
+            self.redfish.members::<Dimm>("/redfish/v1/Systems/1/Memory"),
+            self.redfish.members::<Storage>("/redfish/v1/Systems/1/SimpleStorage"),
         )?;
-        // The X10 says a serial number it doesn't have as spaces.
         Ok(Hardware {
-            system: System {
-                model: system.Model,
-                manufacturer: system.Manufacturer,
-                version: String::new(),
-                serial_number: system.SerialNumber.trim().to_owned(),
-                id: system.UUID,
-            },
             motherboard: Motherboard {
                 product: String::new(),
                 manufacturer: chassis.Manufacturer,
                 version: String::new(),
-                serial_number: chassis.Oem.Supermicro.BoardSerialNumber.trim().to_owned(),
+                serial_number: chassis.Oem.Supermicro.BoardSerialNumber,
                 asset_tag: chassis.AssetTag,
                 replaceable: false,
             },
-            bios: Bios {
-                vendor: String::new(),
-                version: system.BiosVersion,
-                released: String::new(),
-                features: vec![],
-            },
-            processors: processors
-                .into_iter()
-                .map(|cpu| Processor {
-                    model: cpu.Model,
-                    manufacturer: cpu.Manufacturer,
-                    family: String::new(),
-                    socket: cpu.Socket,
-                    mhz: None,
-                    max_mhz: cpu.MaxSpeedMHz,
-                    status: cpu.Status.State,
-                    upgrade_method: String::new(),
-                })
-                .collect(),
-            memory: memory
-                .into_iter()
-                .map(|dimm| Module {
-                    slot: dimm.DeviceLocator,
-                    bytes: dimm.CapacityMiB.map(|mib| mib << 20),
-                    mhz: dimm.OperatingSpeedMhz,
-                    kind: dimm.MemoryDeviceType,
-                    form_factor: String::new(),
-                    manufacturer: dimm.Manufacturer,
-                    part_number: dimm.PartNumber,
-                    serial_number: dimm.SerialNumber,
-                    asset_tag: String::new(),
-                })
-                .collect(),
-            disks: storage
-                .into_iter()
-                .flat_map(|storage| storage.Devices)
-                .filter(|device| device.Status.State != "Absent")
-                .map(|device| Disk { model: device.Model, serial_number: String::new(), bytes: device.CapacityBytes })
-                .collect(),
+            processors: processors.into_iter().map(Cpu::processor).collect(),
+            memory: memory.into_iter().map(Dimm::module).collect(),
+            disks: storage.into_iter().flat_map(Storage::disks).collect(),
             batteries: vec![],
+            bios: system.bios(),
+            system: system.system(),
         })
     }
 
     /// Newest first. The X10 says how bad an event is only in its raw IPMI data, which we rate as `ipmi`'s SEL.
     pub async fn event_log(&mut self) -> Result<Vec<Event>> {
-        let log: Collection<Entry> = self.get("/redfish/v1/Systems/1/LogServices/Log1/Entries").await?;
+        let log: Collection<Entry> = self.redfish.get("/redfish/v1/Systems/1/LogServices/Log1/Entries").await?;
         let byte = |hex: &str| u8::from_str_radix(hex.trim_start_matches("0x"), 16).unwrap_or_default();
         let events = log.Members.into_iter().rev().map(|entry| {
             let raw = &entry.Oem.Supermicro.RawEventData;
@@ -325,13 +255,14 @@ impl Client {
                 .inspect_err(|error| log::warn!("The BMC's IPMI didn't answer: {error}"))
                 .unwrap_or_default()
         };
-        let (interface, protocols, ntp, syslog, fan_mode, mouse_mode, ipmi) = tokio::join!(
-            self.get::<EthernetInterface>("/redfish/v1/Managers/1/EthernetInterfaces/1"),
-            self.get::<Value>("/redfish/v1/Managers/1/NetworkProtocol"),
-            self.optional::<NtpResource>("/redfish/v1/Managers/1/NTP"),
-            self.optional::<SyslogResource>("/redfish/v1/Managers/1/Syslog"),
-            self.optional("/redfish/v1/Managers/1/FanMode"),
-            self.optional("/redfish/v1/Managers/1/MouseMode"),
+        let (manager, interface, protocols, ntp, syslog, fan_mode, mouse_mode, ipmi) = tokio::join!(
+            self.redfish.get::<Manager>("/redfish/v1/Managers/1"),
+            self.redfish.get::<EthernetInterface>("/redfish/v1/Managers/1/EthernetInterfaces/1"),
+            self.redfish.get::<Value>("/redfish/v1/Managers/1/NetworkProtocol"),
+            self.redfish.optional::<NtpResource>("/redfish/v1/Managers/1/NTP"),
+            self.redfish.optional::<SyslogResource>("/redfish/v1/Managers/1/Syslog"),
+            self.redfish.optional("/redfish/v1/Managers/1/FanMode"),
+            self.redfish.optional("/redfish/v1/Managers/1/MouseMode"),
             ipmi,
         );
         let (interface, protocols, ntp, syslog) = (interface?, protocols?, ntp?, syslog?);
@@ -354,6 +285,7 @@ impl Client {
         Ok(BmcSettings {
             network,
             services: services.collect(),
+            remote_access: remote_access(&manager?, &protocols),
             fan_mode: fan_mode?,
             mouse_mode: mouse_mode?,
             ntp: Ntp { enabled: ntp.NTPEnable, primary: ntp.PrimaryNTPServer, secondary: ntp.SecondaryNTPServer },
@@ -368,24 +300,27 @@ impl Client {
         })
     }
 
-    /// Changes a setting: Redfish's own over Redfish, the server's power restore policy and serial console over IPMI.
+    /// Changes a setting: Redfish's own over Redfish, the server's power restore policy, serial console and FRU over
+    /// IPMI, its services and network as its own pages do, in a web session each.
     pub async fn change(&mut self, change: Change) -> Result<()> {
         let mode = |mode: String| json!({ "Mode": mode });
         match change {
-            Change::FanMode(fan) => self.connection.patch("/redfish/v1/Managers/1/FanMode", &mode(fan)).await,
-            Change::MouseMode(mouse) => self.connection.patch("/redfish/v1/Managers/1/MouseMode", &mode(mouse)).await,
+            Change::FanMode(fan) => self.redfish.connection.patch("/redfish/v1/Managers/1/FanMode", &mode(fan)).await,
+            Change::MouseMode(mouse) => {
+                self.redfish.connection.patch("/redfish/v1/Managers/1/MouseMode", &mode(mouse)).await
+            }
             Change::Ntp(ntp) => {
                 let ntp = json!({
                     "NTPEnable": ntp.enabled,
                     "PrimaryNTPServer": ntp.primary,
                     "SecondaryNTPServer": ntp.secondary,
                 });
-                self.connection.patch("/redfish/v1/Managers/1/NTP", &ntp).await
+                self.redfish.connection.patch("/redfish/v1/Managers/1/NTP", &ntp).await
             }
             Change::Syslog(log) => {
                 let log =
                     json!({"EnableSyslog": log.enabled, "SyslogServerIP": log.server, "SyslogPortNumber": log.port});
-                self.connection.patch("/redfish/v1/Managers/1/Syslog", &log).await
+                self.redfish.connection.patch("/redfish/v1/Managers/1/Syslog", &log).await
             }
             Change::PowerRestore(restore) => self.ipmi.change(ipmi::Change::PowerRestore(restore)).await,
             Change::SolBitRate(rate) => self.ipmi.change(ipmi::Change::SolBitRate(rate)).await,
@@ -397,36 +332,34 @@ impl Client {
 
     /// The BMC's own web pages, where everything we don't do can be done.
     pub fn web_pages(&self) -> String {
-        format!("{}/", self.connection.url())
+        self.redfish.web_pages()
     }
 
     /// What a login says, and the BMC's own port for `status`: its firmware's version as IPMI says it (`4.07`), as an
-    /// IPMI login does, where Redfish says `4.7`. The manager alone first, so a wrong password is tried once: the X10
-    /// locks the account after five.
+    /// IPMI login does, where Redfish says `4.7`. The manager alone first, so a login tries a wrong password once: the
+    /// X10 locks the account after five. Another vendor's has no manager `1`, or one that isn't Supermicro's.
     async fn manager(&self) -> Result<(Info, EthernetInterface)> {
-        let manager: Manager = self.get("/redfish/v1/Managers/1").await?;
+        let manager: Manager = self.redfish.optional("/redfish/v1/Managers/1").await?;
         if manager.Oem.Supermicro.is_none() {
             return Err(Error::Protocol("a Redfish service that isn't a Supermicro BMC".into()));
         }
-        let interface = self.get::<EthernetInterface>("/redfish/v1/Managers/1/EthernetInterfaces/1");
-        let protocols = self.get::<Value>("/redfish/v1/Managers/1/NetworkProtocol");
-        let firmware = self.firmware.get_or_try_init(|| self.ipmi.firmware());
+        let interface = self.redfish.get::<EthernetInterface>("/redfish/v1/Managers/1/EthernetInterfaces/1");
+        let protocols = self.redfish.get::<Value>("/redfish/v1/Managers/1/NetworkProtocol");
+        let firmware = self.firmware.get_or_init(async || {
+            let firmware = self.ipmi.firmware().await;
+            firmware.inspect_err(|error| log::warn!("The BMC's IPMI didn't say its firmware's version: {error}")).ok()
+        });
         let (interface, protocols, firmware) = tokio::join!(interface, protocols, firmware);
         let (interface, protocols) = (interface?, protocols?);
+        let remote_access = remote_access(&manager, &protocols);
         let info = Info {
             flavor: Flavor::Supermicro,
             name: if interface.FQDN.is_empty() { interface.HostName.clone() } else { interface.FQDN.clone() },
-            version: firmware.ok().cloned().unwrap_or(manager.FirmwareVersion),
+            version: firmware.clone().unwrap_or(manager.FirmwareVersion),
             build: String::new(),
             control_mode: String::new(),
-            fingerprint: self.connection.fingerprint().expect("a successful call has pinned a certificate"),
-            remote_access: RemoteAccess {
-                kvm: Some(manager.GraphicalConsole.ServiceEnabled),
-                sol: manager.SerialConsole.ServiceEnabled,
-                ider: protocols.pointer("/VirtualMedia/ProtocolEnabled") == Some(&Value::Bool(true)),
-                consent: Consent::None,
-                consent_fixed: true,
-            },
+            fingerprint: self.redfish.connection.fingerprint().expect("a successful call has pinned a certificate"),
+            remote_access,
         };
         Ok((info, interface))
     }
@@ -436,7 +369,7 @@ impl Client {
     /// isn't on that page. Turning the KVM off turns virtual media off with it, as the page does, and no two may share
     /// a port.
     async fn set_services(&self, services: &[Service]) -> Result<()> {
-        Web::with(&self.connection, async |web| {
+        Web::with(&self.redfish.connection, async |web| {
             let [ports] = web.read(["GETPORTSINFO.XML"]).await?;
             let mut fields = attributes(&ports, "PORT_INFO")?;
             for service in services {
@@ -477,11 +410,13 @@ impl Client {
     /// may answer us no more.
     async fn set_network(&self, network: &Network) -> Result<()> {
         network.check()?;
-        Web::with(&self.connection, async |web| {
+        Web::with(&self.redfish.connection, async |web| {
             let [config, ipv6] = web.read(["CONFIG_INFO.XML", "CONFIG_IPV6.XML"]).await?;
             let on = |on: bool| if on { "on" } else { "off" }.to_owned();
             let dhcpv6 = if attribute(&ipv6, "DHCPV6", "MODE")? == "1" { "stateful" } else { "stateless" };
-            let rmcp = u16::from_str_radix(&attribute(&config, "LAN", "RMCP_PORT")?, 16).unwrap_or(623);
+            let rmcp = attribute(&config, "LAN", "RMCP_PORT")?;
+            let rmcp = u16::from_str_radix(&rmcp, 16)
+                .map_err(|_| Error::Protocol(format!("the BMC's pages say RMCP port {rmcp}")))?;
             let vlan = network.vlan.unwrap_or(0);
             let fields = [
                 ("bmcip", network.address.clone()),
@@ -508,19 +443,11 @@ impl Client {
         .await
     }
 
-    /// The resource at `path`, or its default where this BMC doesn't have it: an OEM one, say.
-    async fn optional<T: DeserializeOwned + Default>(&self, path: &str) -> Result<T> {
-        match self.get(path).await {
-            Err(Error::Http(404)) => Ok(T::default()),
-            resource => resource,
-        }
-    }
-
     /// Redfish's version and the server's network ports, and from the BMC's own pages what Redfish doesn't say, which
     /// we go without where they don't say it.
     async fn read_facts(&self) -> Result<Facts> {
-        let root = self.get::<Root>("/redfish/v1/");
-        let lans = self.members::<EthernetInterface>("/redfish/v1/Systems/1/EthernetInterfaces");
+        let root = self.redfish.get::<Root>("/redfish/v1/");
+        let lans = self.redfish.members::<EthernetInterface>("/redfish/v1/Systems/1/EthernetInterfaces");
         let (root, lans, pages) = tokio::join!(root, lans, self.dashboard());
         let (firmware_built, bios_released) = pages.unwrap_or_else(|error| {
             log::warn!("The BMC's pages didn't say its firmware's and BIOS's dates: {error}");
@@ -538,97 +465,14 @@ impl Client {
     /// only for this.
     async fn dashboard(&self) -> Result<(String, String)> {
         let [generic, smbios] =
-            Web::with(&self.connection, async |web| web.read(["GENERIC_INFO.XML", "SMBIOS_INFO.XML"]).await).await?;
+            Web::with(&self.redfish.connection, async |web| web.read(["GENERIC_INFO.XML", "SMBIOS_INFO.XML"]).await)
+                .await?;
         // A date as `05/29/2026`.
         let date = |date: Result<String>| match date.unwrap_or_default().split('/').collect::<Vec<_>>()[..] {
             [month, day, year] => format!("{year}-{month}-{day}"),
             _ => String::new(),
         };
         Ok((date(attribute(&generic, "GENERIC", "IPMIFW_BLDTIME")), date(attribute(&smbios, "BIOS", "REL_DATE"))))
-    }
-
-    /// Each member of the collection at `path`, one request each: the X10's `$expand` is broken.
-    async fn members<T: DeserializeOwned>(&self, path: &str) -> Result<Vec<T>> {
-        let collection: Collection<Link> = self.get(path).await?;
-        let mut members = Vec::new();
-        for member in collection.Members {
-            members.push(self.get(&member.id).await?);
-        }
-        Ok(members)
-    }
-
-    /// The resource at `path`, tidied.
-    async fn get<T: DeserializeOwned>(&self, path: &str) -> Result<T> {
-        let mut value = self.connection.get(path).await?;
-        tidy(&mut value);
-        T::deserialize(value).map_err(|error| Error::Protocol(format!("{path}: {error}")))
-    }
-}
-
-/// The `ResetType` that does `action`, and the target to boot once into first, for what Redfish can do.
-fn reset(action: PowerAction) -> Option<(&'static str, Option<&'static str>)> {
-    use PowerAction::*;
-    Some(match action {
-        On => ("On", None),
-        OnToBios => ("On", Some("BiosSetup")),
-        OnToPxe => ("On", Some("Pxe")),
-        OnToImage => ("On", Some("UsbCd")),
-        SoftOff => ("GracefulShutdown", None),
-        Off => ("ForceOff", None),
-        SoftReset => ("GracefulRestart", None),
-        Reset => ("ForceRestart", None),
-        ResetToBios => ("ForceRestart", Some("BiosSetup")),
-        ResetToPxe => ("ForceRestart", Some("Pxe")),
-        ResetToImage => ("ForceRestart", Some("UsbCd")),
-        Nmi => ("Nmi", None),
-        _ => return None,
-    })
-}
-
-/// What a BMC leaves out comes as null, blanks or SMBIOS's placeholder: we drop them all, so they read as "" or `None`
-/// as AMT's do.
-fn tidy(value: &mut Value) {
-    match value {
-        Value::Object(fields) => fields.retain(|_, value| {
-            tidy(value);
-            !value.is_null()
-        }),
-        Value::Array(values) => values.iter_mut().for_each(tidy),
-        Value::String(text) => {
-            let trimmed = text.trim();
-            *text = if trimmed == "To be filled by O.E.M." { "" } else { trimmed }.to_owned();
-        }
-        _ => {}
-    }
-}
-
-/// The BMC's own port. It names one list of DNS servers for both IPv4 and IPv6, and the X10 its own link-local address
-/// as its IPv6 gateway.
-fn port(interface: EthernetInterface) -> Port {
-    let mut ipv4_dns = interface.NameServers.iter().filter(|server| server.parse::<Ipv4Addr>().is_ok()).cloned();
-    let mut ipv6_dns = interface.NameServers.iter().filter(|server| server.parse::<Ipv6Addr>().is_ok()).cloned();
-    let ipv4 = interface.IPv4Addresses.into_iter().next().unwrap_or_default();
-    let addresses: Vec<_> = interface.IPv6Addresses.into_iter().map(|address| address.Address.to_lowercase()).collect();
-    let gateway = Some(interface.IPv6DefaultGateway.to_lowercase()).filter(|gateway| !addresses.contains(gateway));
-    Port {
-        wireless: false,
-        mac: mac(&interface.MACAddress),
-        link_up: interface.Status.State == "Enabled" && interface.InterfaceEnabled,
-        mbps: interface.SpeedMbps.filter(|&mbps| mbps > 0),
-        ipv4: Ipv4 {
-            configuration: if ipv4.AddressOrigin == "DHCP" { Configuration::Dhcp } else { Configuration::Manual },
-            address: ipv4.Address,
-            subnet_mask: ipv4.SubnetMask,
-            gateway: ipv4.Gateway,
-            primary_dns: ipv4_dns.next().unwrap_or_default(),
-            secondary_dns: ipv4_dns.next().unwrap_or_default(),
-        },
-        ipv6: (!addresses.is_empty()).then(|| Ipv6 {
-            addresses,
-            gateway: gateway.unwrap_or_default(),
-            primary_dns: ipv6_dns.next().unwrap_or_default(),
-            secondary_dns: ipv6_dns.next().unwrap_or_default(),
-        }),
     }
 }
 
@@ -640,10 +484,12 @@ fn attributes(xml: &str, element: &str) -> Result<Vec<(String, String)>> {
     Ok(node.attributes().map(|attribute| (attribute.name().to_owned(), attribute.value().to_owned())).collect())
 }
 
-/// The attribute `name` of the element named `element` in the BMC's pages' XML `xml`, trimmed, empty where it has none.
+/// The attribute `name` of the element named `element` in the BMC's pages' XML `xml`, trimmed. One it doesn't have is
+/// an error: we write some back as they were, which a blank isn't.
 fn attribute(xml: &str, element: &str, name: &str) -> Result<String> {
     let found = attributes(xml, element)?.into_iter().find(|(attribute, _)| attribute == name);
-    Ok(found.map(|(_, value)| value.trim().to_owned()).unwrap_or_default())
+    let found = found.ok_or_else(|| Error::Protocol(format!("the BMC's pages say no {name} of {element}")))?;
+    Ok(found.1.trim().to_owned())
 }
 
 /// Sets the field `name` among `fields` to `value`.
@@ -664,12 +510,6 @@ struct Facts {
 }
 
 // Redfish's resources, only what we read of them.
-
-#[derive(Default, Deserialize)]
-#[serde(default)]
-struct Root {
-    RedfishVersion: String,
-}
 
 #[derive(Default, Deserialize)]
 #[serde(default)]
@@ -702,87 +542,22 @@ struct Manager {
     Oem: Oem<Option<IgnoredAny>>,
 }
 
-#[derive(Default, Deserialize)]
-#[serde(default)]
-struct Console {
-    ServiceEnabled: bool,
-}
-
-#[derive(Default, Deserialize)]
-#[serde(default)]
-struct EthernetInterface {
-    Name: String,
-    VLAN: Vlan,
-    HostName: String,
-    FQDN: String,
-    MACAddress: String,
-    Status: Condition,
-    InterfaceEnabled: bool,
-    SpeedMbps: Option<u64>,
-    IPv4Addresses: Vec<Address>,
-    IPv6Addresses: Vec<Address>,
-    IPv6DefaultGateway: String,
-    NameServers: Vec<String>,
-}
-
-#[derive(Default, Deserialize)]
-#[serde(default)]
-struct Vlan {
-    VLANEnable: bool,
-    VLANId: u16,
-}
-
-#[derive(Clone, Default, Deserialize)]
-#[serde(default)]
-struct Address {
-    Address: String,
-    SubnetMask: String,
-    AddressOrigin: String,
-    Gateway: String,
-}
-
-#[derive(Default, Deserialize)]
-#[serde(default)]
-struct ComputerSystem {
-    PowerState: String,
-    UUID: String,
-    Model: String,
-    Manufacturer: String,
-    SerialNumber: String,
-    BiosVersion: String,
-    Boot: Boot,
-    Actions: Actions,
-}
-
-impl ComputerSystem {
-    fn state(&self) -> PowerState {
-        match &*self.PowerState {
-            "On" => PowerState::On,
-            "Off" => PowerState::Off,
-            _ => PowerState::Unknown,
-        }
+/// What a BMC lets us redirect. Its KVM and virtual media as its services say, which is what turning them off changes.
+fn remote_access(manager: &Manager, protocols: &Value) -> RemoteAccess {
+    let enabled = |service: &str| protocols.pointer(&format!("/{service}/ProtocolEnabled")).and_then(Value::as_bool);
+    RemoteAccess {
+        kvm: Some(enabled("KVMIP").unwrap_or(manager.GraphicalConsole.ServiceEnabled)),
+        sol: manager.SerialConsole.ServiceEnabled,
+        ider: enabled("VirtualMedia") == Some(true),
+        consent: Consent::None,
+        consent_fixed: true,
     }
 }
 
 #[derive(Default, Deserialize)]
 #[serde(default)]
-struct Boot {
-    #[serde(rename = "BootSourceOverrideTarget@Redfish.AllowableValues")]
-    targets: Vec<String>,
-}
-
-#[derive(Default, Deserialize)]
-#[serde(default)]
-struct Actions {
-    #[serde(rename = "#ComputerSystem.Reset")]
-    reset: ResetAction,
-}
-
-#[derive(Default, Deserialize)]
-#[serde(default)]
-struct ResetAction {
-    #[serde(rename = "ResetType@Redfish.AllowableValues")]
-    types: Vec<String>,
+struct Console {
+    ServiceEnabled: bool,
 }
 
 #[derive(Default, Deserialize)]
@@ -801,45 +576,8 @@ struct Board {
 
 #[derive(Default, Deserialize)]
 #[serde(default)]
-struct Cpu {
-    Model: String,
-    Manufacturer: String,
-    Socket: String,
-    MaxSpeedMHz: Option<u32>,
-    Status: Condition,
-}
-
-#[derive(Default, Deserialize)]
-#[serde(default)]
-struct Dimm {
-    DeviceLocator: String,
-    CapacityMiB: Option<u64>,
-    OperatingSpeedMhz: Option<u32>,
-    MemoryDeviceType: String,
-    Manufacturer: String,
-    PartNumber: String,
-    SerialNumber: String,
-}
-
-#[derive(Default, Deserialize)]
-#[serde(default)]
-struct Storage {
-    Devices: Vec<Device>,
-}
-
-#[derive(Default, Deserialize)]
-#[serde(default)]
-struct Device {
-    Model: String,
-    CapacityBytes: Option<u64>,
-    Status: Condition,
-}
-
-#[derive(Default, Deserialize)]
-#[serde(default)]
 struct Entry {
     Created: String,
-    EntryCode: String,
     SensorType: String,
     OemSensorType: String,
     Message: String,
@@ -868,26 +606,8 @@ struct Protocol {
     Port: Option<u16>,
 }
 
-/// A resource's `Status`.
-#[derive(Default, Deserialize)]
-#[serde(default)]
-struct Condition {
-    State: String,
-}
-
 #[derive(Default, Deserialize)]
 #[serde(default)]
 struct Oem<T> {
     Supermicro: T,
-}
-
-#[derive(Deserialize)]
-struct Collection<T> {
-    Members: Vec<T>,
-}
-
-#[derive(Deserialize)]
-struct Link {
-    #[serde(rename = "@odata.id")]
-    id: String,
 }

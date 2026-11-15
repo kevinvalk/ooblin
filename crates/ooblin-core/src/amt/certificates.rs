@@ -52,7 +52,7 @@ impl Client {
                 // Sic, AMT's spelling.
                 trusted_root: certificate.get("TrustedRootCertficate") == Some("true"),
                 read_only: certificate.get("ReadOnlyCertificate") == Some("true"),
-                in_use: in_use.contains(&&*certificate.text("InstanceID")),
+                in_use: certificate.get("InstanceID").is_some_and(|id| in_use.contains(&id)),
             })
             .collect())
     }

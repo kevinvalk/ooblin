@@ -1,9 +1,9 @@
 <!-- A card of settings, AMT's or a BMC's. With a `title` its fields go together and save together, from the title's
-     Save and Cancel (or Enter and Escape), there all along so it's clear what saves this way and enabled once something
+     ✓ and ✕ (or Enter and Escape), there all along so it's clear what saves this way and enabled once something
      changed. Without one each switch or choice saves as it changes. `save` gets the form's fields and what changed in
      words ("IPv4 saved.", "KVM turned off."), the changed control's name too; one that says it didn't go through keeps
-     what was typed, to try again or cancel. Either way the form then shows what the device took: the settings are the
-     fields' defaults. -->
+     what was typed in a titled form, to try again or cancel. Otherwise the form then shows what the device took: the
+     settings are the fields' defaults. -->
 <script module lang="ts">
   /** A select's options, the device's `current` one selected: unlike the select's own default, a selected option counts
    * when it comes in after the select, the settings being read. A `current` none of them is shows as it is, so saving

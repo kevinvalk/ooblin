@@ -1,0 +1,68 @@
+{
+  "@odata.id": "/redfish/v1/Managers/bmc",
+  "@odata.type": "#Manager.v1_15_0.Manager",
+  "Actions": {
+    "#Manager.Reset": {
+      "@Redfish.ActionInfo": "/redfish/v1/Managers/bmc/ResetActionInfo",
+      "target": "/redfish/v1/Managers/bmc/Actions/Manager.Reset"
+    },
+    "#Manager.ResetToDefaults": {
+      "ResetType@Redfish.AllowableValues": [
+        "ResetAll"
+      ],
+      "target": "/redfish/v1/Managers/bmc/Actions/Manager.ResetToDefaults"
+    }
+  },
+  "DateTime": "2026-11-15T09:52:32+00:00",
+  "DateTimeLocalOffset": "+00:00",
+  "Description": "Baseboard Management Controller",
+  "EthernetInterfaces": {
+    "@odata.id": "/redfish/v1/Managers/bmc/EthernetInterfaces"
+  },
+  "Id": "bmc",
+  "LastResetTime": "2026-11-15T09:36:16+00:00",
+  "Links": {
+    "ManagerForChassis": [
+      {
+        "@odata.id": "/redfish/v1/Chassis/chassis"
+      }
+    ],
+    "ManagerForChassis@odata.count": 1,
+    "ManagerForServers": [
+      {
+        "@odata.id": "/redfish/v1/Systems/system"
+      }
+    ],
+    "ManagerForServers@odata.count": 1
+  },
+  "LogServices": {
+    "@odata.id": "/redfish/v1/Managers/bmc/LogServices"
+  },
+  "ManagerDiagnosticData": {
+    "@odata.id": "/redfish/v1/Managers/bmc/ManagerDiagnosticData"
+  },
+  "ManagerType": "BMC",
+  "Model": "OpenBmc",
+  "Name": "OpenBmc Manager",
+  "NetworkProtocol": {
+    "@odata.id": "/redfish/v1/Managers/bmc/NetworkProtocol"
+  },
+  "Oem": {
+    "OpenBmc": {
+      "@odata.id": "/redfish/v1/Managers/bmc#/Oem/OpenBmc",
+      "@odata.type": "#OpenBMCManager.v1_1_0.Manager",
+      "Certificates": {
+        "@odata.id": "/redfish/v1/Managers/bmc/Truststore/Certificates"
+      }
+    }
+  },
+  "PowerState": "On",
+  "ServiceEntryPointUUID": "8c235788-68c8-4b23-b336-f5f767f80d5e",
+  "ServiceIdentification": "",
+  "Status": {
+    "Health": "OK",
+    "State": "Enabled"
+  },
+  "TimeZoneName": "UTC",
+  "UUID": "9642988f-8eab-5fbe-e988-8c0615ffb642"
+}

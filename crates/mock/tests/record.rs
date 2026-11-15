@@ -6,82 +6,43 @@ use std::path::Path;
 use anyhow::Result;
 use mock::{Amt, Bmc, Direction, PASSWORD, Transcript};
 use ooblin_core::amt::{Client, Connection};
-use ooblin_core::{ipmi, supermicro};
+use ooblin_core::{Flavor, ipmi, supermicro};
 
-fn sent(bytes: &[u8]) -> (Direction, Vec<u8>) {
-    (Direction::Sent, bytes.to_vec())
-}
-
-fn received(bytes: &[u8]) -> (Direction, Vec<u8>) {
-    (Direction::Received, bytes.to_vec())
-}
-
-fn sol() -> Transcript {
-    let start =
-        [&[0x20, 0, 0, 0, 1, 0, 0, 0][..], &[0x10, 0x27, 100, 0, 0, 0, 0x10, 0x27, 100, 0, 0, 0, 0, 0, 0, 0]].concat();
-    Transcript(vec![
-        sent(&start),
-        received(&[0x21; 23]),
-        sent(&[0x27, 0, 0, 0, 2, 0, 0, 0, 0, 0, 0x1B, 0, 0, 0]),
-        sent(&[0x28, 0, 0, 0, 3, 0, 0, 0, 1, 0, b'\r']),
-        received(&[&[0x2A, 0, 0, 0, 1, 0, 0, 0, 7, 0][..], b"login: "].concat()),
-    ])
-}
-
-/// A 2 by 1 screen in 16 bits, one full frame in Raw.
-fn kvm() -> Transcript {
-    let init = [0, 2, 0, 1, 16, 16, 0, 1, 0, 31, 0, 63, 0, 31, 11, 5, 0, 0, 0, 0, 0, 0, 0, 4];
-    Transcript(vec![
-        sent(&[0x40, 0, 0, 0, 0, 0, 0, 0]),
-        received(&[0x41, 0, 0, 0, 0, 0, 0, 0]),
-        received(b"RFB 004.000\n"),
-        sent(b"RFB 003.008\n"),
-        received(&[1]),
-        received(&[1]),
-        sent(&[1]),
-        received(&[0, 0, 0, 0]),
-        sent(&[1]),
-        received(&init),
-        received(b"test"),
-        sent(&[2, 0, 0, 3, 0, 0, 0, 16, 0, 0, 0, 0, 0xFF, 0xFF, 0xFF, 0x21]),
-        sent(&[3, 0, 0, 0, 0, 0, 0, 2, 0, 1]),
-        received(&[2]), // AMT 19 rings the Bell, then only tells its desktop size
-        received(&[0]),
-        received(&[0, 0, 1]),
-        received(&[0, 0, 0, 0, 0, 2, 0, 1, 0xFF, 0xFF, 0xFF, 0x21]),
-        sent(&[3, 0, 0, 0, 0, 0, 0, 2, 0, 1]),
-        received(&[0]),
-        received(&[0, 0, 1]),
-        received(&[0, 0, 0, 0, 0, 2, 0, 1, 0, 0, 0, 0]),
-        received(&[0xF8, 0x00, 0x07, 0xE0]),
-    ])
-}
-
-fn ider() -> Transcript {
-    let mut reply =
-        vec![0x41, 0, 0, 0, 0, 0, 0, 0, 1, 0, 19, 0, 0, 0, 0, 0, 0, 0x20, 0, 0x20, 0, 0, 0, 0, 0, 0x57, 0x01, 0, 0, 2];
-    reply.extend_from_slice(b"ok");
-    Transcript(vec![
-        sent(&[0x40, 0, 0, 0, 0, 0, 0, 0, 0x30, 0x75, 0, 0, 0x20, 0x4E, 1, 0, 0, 0]),
-        received(&reply[..30]),
-        received(&reply[30..]),
-    ])
-}
-
+/// The MS-02's sessions, recorded again from the mock replaying them: all the device said, and what we said and then
+/// say on top (Enter on the serial console, asking for the screen again, the disc going in for the next boot).
 #[tokio::test]
 async fn records_every_session_as_the_device_said_it() -> Result<()> {
-    let device = tempfile::tempdir()?;
-    for (name, transcript) in [("sol", sol()), ("kvm", kvm()), ("ider", ider())] {
-        transcript.save(&device.path().join(format!("{name}.transcript")))?;
-    }
-    let amt = Amt::start("127.0.0.1:0", "127.0.0.1:0", device.path()).await;
+    let device = mock::fixture("ms-02");
+    let amt = Amt::start("127.0.0.1:0", "127.0.0.1:0", &device).await;
 
     let recorded = tempfile::tempdir()?;
     mock::record(&amt.target(PASSWORD), recorded.path()).await?;
     for name in ["sol", "kvm", "ider"] {
-        let load = |dir: &Path| Transcript::load(&dir.join(format!("{name}.transcript")));
-        assert_eq!(load(recorded.path())?, load(device.path())?, "{name}");
+        // However many reads or writes it took.
+        let said = |dir: &Path, by: Direction| -> Result<Vec<u8>> {
+            let transcript = Transcript::load(&dir.join(format!("{name}.transcript")))?;
+            Ok(transcript.0.into_iter().filter(|(direction, _)| *direction == by).flat_map(|(_, data)| data).collect())
+        };
+        assert_eq!(said(recorded.path(), Direction::Received)?, said(&device, Direction::Received)?, "{name}");
+        assert!(said(recorded.path(), Direction::Sent)?.starts_with(&said(&device, Direction::Sent)?), "{name}");
     }
+
+    // What we recorded replays, to the client that recorded it.
+    let replay = Amt::start("127.0.0.1:0", "127.0.0.1:0", recorded.path()).await;
+    let mut client = Client::new(&replay.target(PASSWORD), None)?;
+    let sol = client.sol().await?;
+    sol.write(b"\r").await?;
+    assert!(!sol.read().await?.is_empty());
+    assert_eq!(replay.asked().last().map(String::as_str), Some(r#"SOL "\r""#));
+
+    let kvm = client.kvm().await?;
+    // AMT 19 first says only how large its screen is.
+    assert_eq!(kvm.frame().await?.len(), 4);
+    assert!(kvm.frame().await?.len() > 4);
+
+    let disc = tempfile::tempfile()?;
+    disc.set_len(2048)?;
+    client.ider(disc).await?;
     Ok(())
 }
 
@@ -102,7 +63,7 @@ async fn crawls_into_a_scrubbed_fixture_that_replays() -> Result<()> {
 async fn records_a_bmc_into_a_scrubbed_fixture_that_replays() -> Result<()> {
     let device = Bmc::start("127.0.0.1:0", &mock::fixture("x10")).await;
     let recorded = tempfile::tempdir()?;
-    mock::redfish::record(&device.target(PASSWORD), recorded.path()).await?;
+    mock::redfish::record(&device.target(PASSWORD), recorded.path(), Flavor::Supermicro).await?;
     mock::ipmi::record(&device.target(PASSWORD), recorded.path()).await?;
     let replay = Bmc::start("127.0.0.1:0", recorded.path()).await;
     let client = |bmc: &Bmc| supermicro::Client::new(&bmc.target(PASSWORD), None);

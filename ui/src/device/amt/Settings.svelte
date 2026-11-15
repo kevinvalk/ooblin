@@ -16,7 +16,7 @@
     Ipv6Settings,
     Settings,
   } from "../../bindings/core";
-  import { reason, type Connection } from "../Device.svelte";
+  import { reason, type Connection } from "../../connection";
   import Form, { choices, text } from "../Form.svelte";
   import { CONFIGURATIONS } from "../Network.svelte";
 
@@ -40,7 +40,6 @@
   } = $props();
   /** Ours, as another device's settings may be open too. */
   const id = $props.id();
-
 
   async function remoteAccess(fields: FormData, done: string) {
     if (!data) return;
@@ -88,9 +87,11 @@
     return save("Reachability saved.", { Availability: available });
   }
 
-  /** The IP forms' configurations while they're edited: only a manual one takes addresses. */
-  let ipv4Configuration = $derived(data?.network.ipv4.configuration);
-  let ipv6Configuration = $derived(data?.network.ipv6.configuration);
+  /** The IP forms' configurations while they're `edited`: only a manual one takes addresses. An edit outlasts the
+   * settings, which land again after every save, one that failed too. */
+  let edited = $state<{ ipv4?: Configuration; ipv6?: Ipv6Configuration }>({});
+  let ipv4Configuration = $derived(edited.ipv4 ?? data?.network.ipv4.configuration);
+  let ipv6Configuration = $derived(edited.ipv6 ?? data?.network.ipv6.configuration);
 
   /** The addresses an IP form sets, IPv6 all but the subnet mask. */
   const ADDRESSES = [
@@ -303,7 +304,7 @@
       title="IPv4"
       {busy}
       save={ipv4}
-      reset={() => (ipv4Configuration = data?.network.ipv4.configuration)}
+      reset={() => (edited.ipv4 = undefined)}
     >
       {@const v4 = data?.network.ipv4}
       <div>
@@ -312,7 +313,7 @@
           id="{id}-ipv4"
           name="ipv4"
           class="field"
-          oninput={(event) => (ipv4Configuration = event.currentTarget.value as Configuration)}
+          oninput={(event) => (edited.ipv4 = event.currentTarget.value as Configuration)}
         >
           {@render choices(v4?.configuration, CONFIGURATIONS)}
         </select>
@@ -326,7 +327,7 @@
       title="IPv6"
       {busy}
       save={ipv6}
-      reset={() => (ipv6Configuration = data?.network.ipv6.configuration)}
+      reset={() => (edited.ipv6 = undefined)}
     >
       {@const v6 = data?.network.ipv6}
       <div>
@@ -335,7 +336,7 @@
           id="{id}-ipv6"
           name="ipv6"
           class="field"
-          oninput={(event) => (ipv6Configuration = event.currentTarget.value as Ipv6Configuration)}
+          oninput={(event) => (edited.ipv6 = event.currentTarget.value as Ipv6Configuration)}
         >
           {@render choices(v6?.configuration, { Off: "Off", Automatic: "Automatic", Manual: "Automatic and manual" })}
         </select>
@@ -500,6 +501,8 @@
               {/if}
             </dd>
           </div>
+        {:else}
+          <p class="px-4 py-2.5 text-muted">None.</p>
         {/each}
       </dl>
     </div>

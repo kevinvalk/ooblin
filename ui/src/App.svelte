@@ -4,66 +4,75 @@
   import { invoke } from "@tauri-apps/api/core";
   import { listen } from "@tauri-apps/api/event";
   import * as log from "@tauri-apps/plugin-log";
+  import { SvelteSet } from "svelte/reactivity";
   import type { CommandError, Connected, Device as Saved } from "./bindings/ooblin";
   import Connect, { type Login } from "./Connect.svelte";
-  import Device, { reason, type Connection } from "./device/Device.svelte";
+  import { reason, type Connection } from "./connection";
+  import Device from "./device/Device.svelte";
   import Sidebar from "./Sidebar.svelte";
 
   /** Every device we logged in to, the open ones by host, and the one on screen (none: the connect form). */
   let devices: Saved[] = $state.raw([]);
   let connections: Record<string, Connection> = $state({});
   let current: string | null = $state(null);
-  /** The connect form, for `device` if given: a new `key` is a fresh one. `error` is why the last attempt failed. */
+  /** The connect form, for `device` if given: a new `key` is a fresh one. `error` is why the last attempt failed,
+   * `connecting` whether one of its own is underway. */
   let form = $state({
     key: 0,
     device: undefined as Saved | undefined,
     error: undefined as CommandError | undefined,
+    connecting: false,
   });
-  /** The device we're connecting to: it spins, and a second click on it does nothing. */
-  let connecting: string | null = $state(null);
+  /** The devices we're connecting to: they spin, and a second click on one does nothing. */
+  const connecting = new SvelteSet<string>();
   let collapsed = $state(false);
   let message = $state({ text: "", failed: false });
   let hide = 0;
 
-  /** Says `text` in the footer for as long as it takes to read: five seconds, more for more words, fifteen at most.
-   * What `failed` stands out, and goes in the log. */
+  /** Says `text` in the footer. What `failed` stands out, and goes in the log. */
   function say(text: string, failed = false) {
     message = { text, failed };
     if (failed) log.warn(text).catch(() => {});
+    linger();
+  }
+
+  /** The footer says it for as long as it takes to read: five seconds, more for more words, fifteen at most. */
+  function linger() {
     clearTimeout(hide);
-    hide = setTimeout(() => (message.text = ""), Math.min(5000 + 50 * text.length, 15_000));
+    hide = setTimeout(() => (message.text = ""), Math.min(5000 + 50 * message.text.length, 15_000));
   }
 
   async function listDevices() {
-    devices = await invoke<Saved[]>("devices").catch((error) => (say(String(error), true), []));
+    devices = await invoke<Saved[]>("devices").catch((error) => (say(reason(error), true), []));
   }
 
   /** Open devices show, remembered devices log in, the rest ask for their password. */
   function select(device: Saved) {
     if (connections[device.host]) return show(device.host);
-    if (connecting === device.host) return;
+    if (connecting.has(device.host)) return;
     showForm(device);
     if (device.remembered)
-      connect({ host: device.host, user: device.user, password: null, remember: false, flavor: null });
+      connect({ host: device.host, user: device.user, password: "", remember: false, flavor: null });
   }
 
   function showForm(device?: Saved, error?: CommandError) {
-    form = { key: form.key + 1, device, error };
+    form = { key: form.key + 1, device, error, connecting: false };
     current = null;
     say("");
     listDevices();
   }
 
-  /** Without a `password` with the one we have, see the `connect` command. The form may have made way for another
+  /** An empty `password` is the one we have, see the `connect` command. The form may have made way for another
    * one meanwhile, or a device: then it's in the sidebar, or the footer says why not. */
-  async function connect(login: Omit<Login, "password"> & { password: string | null }) {
+  async function connect(login: Login) {
     const host = login.host;
     const key = form.key;
     const shown = () => !current && form.key === key;
-    connecting = host;
+    connecting.add(host);
     form.error = undefined;
+    form.connecting = true;
     try {
-      const { info, unremembered } = await invoke<Connected>("connect", login);
+      const { info, unremembered } = await invoke<Connected>("connect", { ...login, password: login.password || null });
       connections[host] = { host, info };
       if (shown()) show(host);
       else listDevices();
@@ -72,7 +81,18 @@
       if (shown()) form.error = explain(error, `Couldn't reach ${host}`);
       else say(`Couldn't connect to ${host}: ${reason(error)}`, true);
     } finally {
-      if (connecting === host) connecting = null;
+      connecting.delete(host);
+      if (form.key === key) form.connecting = false;
+    }
+  }
+
+  /** Pins the certificate the device presents now, then logs in again. */
+  async function trust(login: Login, fingerprint: string) {
+    try {
+      await invoke("trust", { host: login.host, fingerprint });
+      connect(login);
+    } catch (error) {
+      say(reason(error), true);
     }
   }
 
@@ -109,7 +129,6 @@
     else say(failure.message, true);
   }
 
-  // The window is titled after the device on screen.
   $effect(() => {
     invoke("title", {
       title: current ? `${connections[current].info.name || current} – Ooblin` : "Ooblin",
@@ -117,15 +136,21 @@
   });
 
   function keydown(event: KeyboardEvent) {
-    if ((event.metaKey || event.ctrlKey) && event.key === "b") {
+    const command = event.metaKey || event.ctrlKey;
+    // Reloading would forget the open devices, which Rust keeps: a Device reads its tab again instead.
+    if (event.key === "F5" || (command && event.key.toLowerCase() === "r")) event.preventDefault();
+
+    if (command && event.key === "b") {
       event.preventDefault();
       collapsed = !collapsed;
     }
   }
 
-  /** What goes wrong unnoticed, an error thrown or a promise rejected, goes in the log. */
+  /** What goes wrong unnoticed, an error thrown or a promise rejected, goes in the log. Some errors come without
+   * one (a ResizeObserver's), only a message. */
   function unnoticed(event: Event) {
-    const error = event instanceof ErrorEvent ? event.error : (event as PromiseRejectionEvent).reason;
+    const error =
+      event instanceof ErrorEvent ? (event.error ?? event.message) : (event as PromiseRejectionEvent).reason;
     log.error(error instanceof Error ? (error.stack ?? error.message) : reason(error)).catch(() => {});
   }
 
@@ -163,17 +188,18 @@
   />
 
   <div class="grid min-w-0 overflow-hidden">
-    {#each Object.keys(connections) as host (host)}
+    <!-- By the connection itself: one that takes another's place (an open device connected to again) starts afresh. -->
+    {#each Object.keys(connections) as host (connections[host])}
       <Device bind:connection={connections[host]} hidden={host !== current} {say} lost={(error) => lost(host, error)} />
     {/each}
     {#if !current}
       {#key form.key}
         <Connect
           device={form.device}
-          connecting={connecting !== null}
+          connecting={form.connecting}
           error={form.error}
-          onsubmit={(login) => connect({ ...login, password: login.password || null })}
-          ontrust={(host, fingerprint) => invoke("trust", { host, fingerprint })}
+          onsubmit={connect}
+          ontrust={trust}
         />
       {/key}
     {/if}
@@ -196,7 +222,7 @@
       <output
         class={["truncate select-text", message.failed ? "text-danger" : "text-muted"]}
         onmouseenter={() => clearTimeout(hide)}
-        onmouseleave={() => message.text && say(message.text, message.failed)}
+        onmouseleave={linger}
       >
         {message.text}
       </output>

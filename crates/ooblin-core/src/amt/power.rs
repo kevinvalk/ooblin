@@ -115,9 +115,6 @@ impl Client {
     }
 }
 
-// The inputs and settings below are go-wsman-messages' (`pkg/wsman/cim/power`, `cim/boot`, `amt/boot`), Copyright Intel
-// Corporation, Apache-2.0.
-
 /// One-Click Recovery (booting a recovery image) and remote platform erase, which the BIOS has to allow as well: `None`
 /// where the device can't.
 #[derive(Debug, Serialize, Deserialize, TS)]
@@ -151,6 +148,9 @@ impl Client {
         Ok(())
     }
 }
+
+// The inputs and settings below are go-wsman-messages' (`pkg/wsman/cim/power`, `cim/boot`, `amt/boot`), Copyright Intel
+// Corporation, Apache-2.0.
 
 const POWER_MANAGEMENT: &str = "http://schemas.dmtf.org/wbem/wscim/1/cim-schema/2/CIM_PowerManagementService";
 const BOOT_CONFIG: &str = "http://schemas.dmtf.org/wbem/wscim/1/cim-schema/2/CIM_BootConfigSetting";
@@ -190,7 +190,6 @@ struct SetBootConfigRole<'a> {
 
 method!(SetBootConfigRole<'_>, BOOT_SERVICE);
 
-/// Exactly the settings AMT takes back.
 #[derive(ToXml)]
 #[xml(rename = "RequestStateChange_INPUT", ns(BOOT_SERVICE))]
 struct BootStateChange {
@@ -199,6 +198,7 @@ struct BootStateChange {
 
 method!(BootStateChange, BOOT_SERVICE, "RequestStateChange");
 
+/// Exactly the settings AMT takes back.
 #[derive(ToXml)]
 #[xml(rename = "AMT_BootSettingData", ns(BOOT_SETTINGS))]
 struct BootSettingData<'a> {

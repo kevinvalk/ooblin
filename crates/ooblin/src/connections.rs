@@ -14,6 +14,7 @@ use std::collections::HashMap;
 use std::io;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Duration;
 
 use futures_util::future::join_all;
 use ooblin_core::{Client, Flavor, Info, Kvm, Sol, Target};
@@ -34,7 +35,7 @@ pub struct Connections {
 #[derive(Default)]
 struct State {
     connections: HashMap<String, Arc<Connection>>,
-    /// The latest login underway to each host: a disconnect, forget or newer login cancels it.
+    /// Each host's latest login that isn't in, underway or failed: a disconnect, forget or newer login cancels it.
     logins: HashMap<String, u64>,
     /// The last id given out.
     id: u64,
@@ -102,7 +103,7 @@ pub struct Serving {
     pub eject: Sender<()>,
 }
 
-/// A task that stops with the last copy of it: one serving a disk image, or looking for devices.
+/// A task that stops when dropped: one serving a disk image, or looking for devices.
 pub struct Task(pub JoinHandle<()>);
 
 impl Drop for Task {
@@ -158,9 +159,11 @@ impl Connections {
             state.logins.insert(target.host.clone(), id);
             id
         };
+
         let hosts = self.hosts()?;
         let flavor = flavor.or(hosts.flavor(&target.host));
         let (client, info) = Client::login(&target, hosts.pin(&target.host), flavor).await?;
+
         let unremembered = if remember { hosts.remember(&target).err() } else { None };
         let remembered = remember && unremembered.is_none();
         let accepted = self.accept(login, &target, &info, client, remembered);
@@ -171,6 +174,7 @@ impl Connections {
         if accepted.is_err() && remembered && !kept() {
             hosts.forget_password(&target.host).unwrap_or_default();
         }
+
         // The connection replaced closes before we say we're in, freeing the device's serial console and drive.
         if let Some(replaced) = accepted? {
             replaced.close(&target.host).await;
@@ -207,10 +211,12 @@ impl Connections {
     }
 
     /// Closes every connection at once, so quitting waits for the slowest device rather than all of them in turn, and
-    /// cancels the logins underway.
+    /// cancels the logins underway. Not for long: a session opening on a device that stopped answering holds its slot
+    /// for as long as that takes, and what's still open when we quit hangs up with us.
     pub async fn close_all(&self) {
         let State { connections, .. } = std::mem::take(&mut *self.state.lock().unwrap());
-        join_all(connections.iter().map(|(host, connection)| connection.close(host))).await;
+        let closing = join_all(connections.iter().map(|(host, connection)| connection.close(host)));
+        let _ = tokio::time::timeout(Duration::from_secs(5), closing).await;
     }
 
     /// Forgets `host`, see `Hosts::forget`, letting go of its connection and cancelling a login to it underway.

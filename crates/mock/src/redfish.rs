@@ -1,4 +1,4 @@
-//! The BMC's Redfish, from the fixture's `redfish/` laid out as DMTF's mockups are (`redfish/v1/Systems/1/index.json`),
+//! A BMC's Redfish, from the fixture's `redfish/` laid out as DMTF's mockups are (`redfish/v1/Systems/1/index.json`),
 //! and recording one.
 
 use std::collections::HashMap;
@@ -9,8 +9,8 @@ use http_body_util::{BodyExt, Full};
 use hyper::body::{Bytes, Incoming};
 use hyper::header::{AUTHORIZATION, CONTENT_TYPE};
 use hyper::{Method, Request, Response, StatusCode};
-use ooblin_core::supermicro::{Client, Connection, probe};
-use ooblin_core::{Error, Target};
+use ooblin_core::redfish::{Connection, probe};
+use ooblin_core::{Client, Error, Flavor, Target};
 use serde_json::Value;
 
 use crate::{Bmc, PASSWORD, scrub};
@@ -34,7 +34,8 @@ const SETTINGS: [&str; 4] = [
 ];
 
 /// As the X10: the root without a login, the rest with Basic (a 401 without a challenge), a 404 as a web page. Of
-/// writes the two our power changes make, which change nothing here, and the settings' (`SETTINGS`), which do.
+/// writes the two our power changes make to a server, of which only its identify light changes here, and the
+/// settings' (`SETTINGS`), which do.
 pub(crate) async fn serve(bmc: &Arc<Bmc>, request: Request<Incoming>) -> Response<Full<Bytes>> {
     let (method, path) = (request.method().clone(), request.uri().path().to_owned());
     let login = request.headers().get(AUTHORIZATION).map(|header| header == BASIC);
@@ -80,23 +81,38 @@ pub(crate) async fn serve(bmc: &Arc<Bmc>, request: Request<Incoming>) -> Respons
             bmc.redfish.changed.lock().unwrap().insert(setting.to_owned(), current);
             answer(StatusCode::NO_CONTENT, "")
         }
-        (Method::POST, "redfish/v1/Systems/1/Actions/ComputerSystem.Reset") if resets(&bmc.fixture, &body) => {
+        (Method::POST, reset) if resets(&bmc.fixture, reset, &body) => answer(StatusCode::NO_CONTENT, ""),
+        (Method::PATCH, system) if system.starts_with("redfish/v1/Systems/") => {
+            let (Some(mut current), Ok(Value::Object(change))) = (read(), serde_json::from_slice::<Value>(&body))
+            else {
+                return not_found();
+            };
+            let lights = change.into_iter().filter(|(field, _)| field.contains("Indicator"));
+            current.as_object_mut().unwrap().extend(lights);
+            bmc.redfish.changed.lock().unwrap().insert(system.to_owned(), current);
             answer(StatusCode::NO_CONTENT, "")
         }
-        (Method::PATCH, "redfish/v1/Systems/1") => answer(StatusCode::NO_CONTENT, ""),
         _ => answer(StatusCode::METHOD_NOT_ALLOWED, ""),
     }
 }
 
-/// Whether the system allows the `ResetType` asked for.
-fn resets(fixture: &Path, body: &[u8]) -> bool {
-    let system = std::fs::read(fixture.join("redfish/v1/Systems/1/index.json")).unwrap_or_default();
-    let (Ok(system), Ok(body)) = (serde_json::from_slice::<Value>(&system), serde_json::from_slice::<Value>(body))
-    else {
-        return false;
+/// Whether `reset` is a server's Reset, and the server allows the `ResetType` asked for: it says which in itself, or
+/// in a resource of their own.
+fn resets(fixture: &Path, reset: &str, body: &[u8]) -> bool {
+    let read = |resource: &str| -> Option<Value> {
+        serde_json::from_slice(&std::fs::read(fixture.join(resource.trim_matches('/')).join("index.json")).ok()?).ok()
     };
-    let allowed = system.pointer("/Actions/#ComputerSystem.Reset/ResetType@Redfish.AllowableValues");
-    allowed.and_then(Value::as_array).is_some_and(|allowed| allowed.contains(&body["ResetType"]))
+    let allowed = || -> Option<Vec<Value>> {
+        let system = read(reset.strip_suffix("/Actions/ComputerSystem.Reset")?)?;
+        let action = system.pointer("/Actions/#ComputerSystem.Reset")?;
+        let allowed = match action.get("@Redfish.ActionInfo").and_then(Value::as_str) {
+            Some(info) => read(info)?.pointer("/Parameters/0/AllowableValues")?.clone(),
+            None => action.get("ResetType@Redfish.AllowableValues")?.clone(),
+        };
+        allowed.as_array().cloned()
+    };
+    let asked = serde_json::from_slice::<Value>(body).unwrap_or_default();
+    allowed().is_some_and(|allowed| allowed.contains(&asked["ResetType"]))
 }
 
 /// Recording: the device answers, and we keep what it said, scrubbed, where the replay will look for it. We answer
@@ -138,20 +154,27 @@ impl Bmc {
     }
 }
 
-/// Records `target`'s Redfish into `fixture`: what our client reads of it, scrubbed.
-pub async fn record(target: &Target, fixture: &Path) -> anyhow::Result<()> {
+/// Records `target`'s Redfish into `fixture`: what our client reads of it as a device of `flavor`, scrubbed.
+pub async fn record(target: &Target, fixture: &Path, flavor: Flavor) -> anyhow::Result<()> {
     let device = Some(Connection::new(target, None)?);
     let proxy = Bmc::serve("127.0.0.1:0", fixture, State { device, ..State::default() }).await;
     let proxied = proxy.target(PASSWORD);
     eprint!("Redfish  recording…");
     anyhow::ensure!(probe(&proxied.host).await, "{} doesn't answer Redfish", target.host);
-    let mut client = Client::new(&proxied, None)?;
-    client.status().await?;
+    let (mut client, _) = Client::login(&proxied, None, Some(flavor)).await?;
+    client.bmc_status().await?;
     client.panel().await.ok();
     client.power().await?;
     client.hardware().await?;
     client.event_log().await?;
-    client.bmc_settings().await?;
+    match &mut client {
+        // Its sensors we read over IPMI, and keep what its Redfish says of them too.
+        Client::Supermicro(client) => {
+            client.bmc_settings().await?;
+            client.redfish().sensors().await?;
+        }
+        client => drop(client.sensors().await?),
+    }
     eprintln!("\rRedfish  {} requests", proxy.requests.lock().unwrap().len());
     Ok(())
 }

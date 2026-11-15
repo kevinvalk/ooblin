@@ -36,8 +36,8 @@ impl Client {
     /// Plugs a USB CD-ROM drive with `image` in it into the host, in the first of the BMC's three slots that's free.
     pub async fn media(&mut self, image: std::fs::File) -> Result<Media> {
         let cdrom = Cdrom::new(image).await?;
-        let web = Web::login(&self.connection).await?;
-        match plug_in(&self.connection, &web).await {
+        let web = Web::login(&self.redfish.connection).await?;
+        match plug_in(&self.redfish.connection, &web).await {
             Ok((receiver, plug)) => Ok(Media { receiver, plug, cdrom, web }),
             Err(error) => {
                 web.logout().await;
@@ -51,6 +51,10 @@ impl Client {
 /// then the drive's endpoints.
 async fn plug_in(connection: &Connection, web: &Web) -> Result<(Receiver, Plug)> {
     let token = web.token().await?;
+    if !(15..=35).contains(&token.len()) {
+        return Err(Error::Protocol(format!("a {}-byte KVM token", token.len())));
+    }
+
     let (mut receiver, mut plug) = ikvm::media(connection, web).await?;
     plug.send(&pdu(SLOTS, &[])).await?;
     let slots = next(&mut receiver, &mut plug, false).await;
@@ -61,7 +65,7 @@ async fn plug_in(connection: &Connection, web: &Web) -> Result<(Receiver, Plug)>
     };
 
     let (mut receiver, mut plug) = ikvm::media(connection, web).await?;
-    plug.send(&plug_in_packet(&token, slot as u8)?).await?;
+    plug.send(&plug_in_packet(&token, slot as u8)).await?;
     let (class, status) = next(&mut receiver, &mut plug, false).await?;
     let why = match (class, status.first()) {
         (PLUGGED_IN, Some(0)) => {
@@ -85,7 +89,10 @@ impl Media {
     pub async fn serve(mut self, mut read: impl FnMut(Range<u64>), eject: impl Future<Output = ()>) -> Result<()> {
         let served = tokio::select! {
             served = self.answer(&mut read) => served,
-            () = eject => self.plug_out().await,
+            () = eject => {
+                self.plug_out().await;
+                Ok(())
+            }
         };
         self.plug.close().await;
         self.web.logout().await;
@@ -108,7 +115,6 @@ impl Media {
             if !to_host && length > 0 {
                 next(&mut self.receiver, &mut self.plug, false).await?;
             }
-            // The whole field, zeros past the command: `Cdrom` reads a command's fields without checking its length.
             let (mut data, range, failed) = match self.cdrom.answer(&wrapper[15..]) {
                 Answer::Data(data) => (data, 0..0, false),
                 Answer::Read { lba, blocks } => {
@@ -134,14 +140,15 @@ impl Media {
         }
     }
 
-    /// Takes the drive out, waiting `GOODBYE` at most for the BMC to say it's out.
-    async fn plug_out(&mut self) -> Result<()> {
-        self.plug.send(&pdu(PLUG_OUT, &[])).await?;
+    /// Takes the drive out, waiting `GOODBYE` at most for the BMC to say it's out: once asked it is, whatever the BMC
+    /// says then, or doesn't.
+    async fn plug_out(&mut self) {
         let out = async {
+            self.plug.send(&pdu(PLUG_OUT, &[])).await?;
             while next(&mut self.receiver, &mut self.plug, true).await?.0 != PLUGGED_OUT {}
-            Ok(())
+            Ok::<_, Error>(())
         };
-        tokio::time::timeout(GOODBYE, out).await.unwrap_or(Ok(()))
+        let _ = tokio::time::timeout(GOODBYE, out).await;
     }
 }
 
@@ -169,13 +176,10 @@ fn pdu(class: [u8; 4], body: &[u8]) -> Vec<u8> {
     [&class[..], &(body.len() as u32).to_le_bytes(), body].concat()
 }
 
-/// As the viewer: the KVM token split at 15 bytes, a random stamp, one drive in `slot` of an authenticated HTML5
-/// viewer's, a CD-ROM. Then the drive's USB descriptors, which the PDU's length leaves out.
-fn plug_in_packet(token: &str, slot: u8) -> Result<Vec<u8>> {
+/// As the viewer: the KVM token, of 15 to 35 bytes, split at 15, a random stamp, one drive in `slot` of an
+/// authenticated HTML5 viewer's, a CD-ROM. Then the drive's USB descriptors, which the PDU's length leaves out.
+fn plug_in_packet(token: &str, slot: u8) -> Vec<u8> {
     let token = token.as_bytes();
-    if !(15..=35).contains(&token.len()) {
-        return Err(Error::Protocol(format!("a {}-byte KVM token", token.len())));
-    }
     let mut packet = pdu(PLUG_IN, &[0; 44]);
     packet[8..23].copy_from_slice(&token[..15]);
     packet[24..24 + token.len() - 15].copy_from_slice(&token[15..]);
@@ -187,7 +191,7 @@ fn plug_in_packet(token: &str, slot: u8) -> Result<Vec<u8>> {
         packet.push(descriptor.len() as u8);
         packet.extend(descriptor);
     }
-    Ok(packet)
+    packet
 }
 
 /// The viewer's drive's, as ikvmt has them: the device (ATEN's), its configuration (one mass storage interface, SCSI

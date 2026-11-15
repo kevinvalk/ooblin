@@ -5,8 +5,7 @@
   import { Channel, invoke } from "@tauri-apps/api/core";
   import type { Device as Saved } from "./bindings/ooblin";
   import type { Found } from "./bindings/core";
-  import { reason, type Connection } from "./device/Device.svelte";
-  import { FLAVORS } from "./flavors";
+  import { FLAVORS, reason, type Connection } from "./connection";
 
   let {
     devices,
@@ -23,7 +22,7 @@
     devices: Saved[];
     connections: Record<string, Connection>;
     current: string | null;
-    connecting: string | null;
+    connecting: Set<string>;
     collapsed: boolean;
     say: (text: string, failed?: boolean) => void;
     onselect: (device: Saved) => void;
@@ -85,7 +84,7 @@
         <!-- One action per device, on hover: disconnect an open one, forget a closed one. -->
         <li
           class="group flex items-center rounded-md pr-0.5 text-muted hover:bg-hover data-open:text-ink aria-current:bg-accent aria-current:text-white"
-          data-open={open || connecting === device.host ? "" : undefined}
+          data-open={open || connecting.has(device.host) ? "" : undefined}
           aria-current={device.host === current}
         >
           <button
@@ -94,7 +93,7 @@
             title={answer?.provisioned === false ? "Not provisioned" : undefined}
             onclick={() => onselect(device)}
           >
-            {#if connecting === device.host}
+            {#if connecting.has(device.host)}
               <LoaderCircle class="-mx-0.5 size-3.5 flex-none animate-spin" />
             {:else}
               <span
@@ -125,7 +124,7 @@
           </button>
           <button
             type="button"
-            class="btn-icon hidden size-7 group-hover:grid group-aria-current:text-white/80 group-aria-current:hover:bg-white/20"
+            class="btn-icon hidden size-7 group-hover:grid group-has-[:focus-visible]:grid group-aria-current:text-white/80 group-aria-current:hover:bg-white/20"
             title={open ? "Disconnect" : "Forget"}
             onclick={() => (open ? ondisconnect(device.host) : forget(device.host))}
           >

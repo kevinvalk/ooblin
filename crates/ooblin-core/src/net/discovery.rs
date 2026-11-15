@@ -64,12 +64,7 @@ pub async fn discover(networks: &str, port: u16, mut found: impl FnMut(Found)) -
     let listen = async {
         let mut datagram = [0; 64];
         loop {
-            let (length, from) = match socket.recv_from(&mut datagram).await {
-                Ok(received) => received,
-                // Windows says so when an earlier ping was refused, the ping, not the socket, failed.
-                Err(error) if error.kind() == std::io::ErrorKind::ConnectionReset => continue,
-                Err(error) => return Err(Error::from(error)),
-            };
+            let (length, from) = super::ipmi::receive(&socket, &mut datagram).await?;
             let SocketAddr::V4(from) = from else { continue };
             if let Some(device) = pong(&datagram[..length], from.ip().to_string())
                 && answered.lock().unwrap().insert(*from.ip())
@@ -102,7 +97,10 @@ fn addresses(networks: &str) -> Result<BTreeSet<Ipv4Addr>> {
             }
             None => (address(network)?, address(network)?),
         };
-        if addresses.len() + last.saturating_sub(first) as usize >= 1 << 16 {
+        if first > last {
+            return Err(invalid());
+        }
+        if addresses.len() + (last - first) as usize >= 1 << 16 {
             return Err(Error::Invalid("That's too many addresses, a /16 at most.".into()));
         }
         addresses.extend((first..=last).map(Ipv4Addr::from));

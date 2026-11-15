@@ -5,8 +5,8 @@ use crate::Error;
 
 /// The screen as the frames so far painted it.
 pub(crate) struct Decoder {
-    width: u16,
-    height: u16,
+    pub(super) width: u16,
+    pub(super) height: u16,
     image: Vec<u8>,
 }
 

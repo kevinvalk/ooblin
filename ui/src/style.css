@@ -107,9 +107,9 @@
             @apply grid grid-cols-[11rem_1fr] items-baseline gap-4 px-4 py-2.5;
         }
 
-        /* A row's label, not the labels of the choices in it. */
+        /* A row's label, not the labels of the choices in it. One that's a name (a certificate's) may be long. */
         & > div > :is(dt, label) {
-            @apply text-muted;
+            @apply wrap-anywhere text-muted;
         }
 
         & .field {
@@ -139,6 +139,15 @@
         @apply inline-block h-3.5 w-36 max-w-full animate-pulse rounded bg-line align-middle content-[''];
     }
 
+    /* A warning or a critical event or reading stands out by color, the whole row. */
+    [data-severity="Warning"] {
+        @apply text-asleep;
+    }
+
+    [data-severity="Critical"] {
+        @apply text-danger;
+    }
+
     /* A power state, named by `data-power`. */
     .dot {
         @apply size-2.5 flex-none rounded-full bg-muted data-[power=Asleep]:bg-asleep data-[power=Hibernating]:bg-asleep data-[power=On]:bg-on;
@@ -161,11 +170,16 @@
         @apply border border-line bg-field hover:bg-hover;
     }
 
+    .btn-danger {
+        @apply bg-danger text-white hover:bg-danger/90;
+    }
+
     .btn-icon {
         @apply grid size-8 place-items-center rounded-md text-muted hover:bg-hover hover:text-ink;
     }
 
-    /* An input, or a group of one with its button (the focus taking them both in), which then has no look of its own. */
+    /* An input, or a group of one with its button (the focus taking them both in), which then has no look of its
+       own. */
     .field {
         @apply h-9 rounded-lg border border-line bg-field px-3 select-text outline-none focus-within:border-accent/60 disabled:bg-transparent disabled:text-muted;
 

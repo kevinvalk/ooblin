@@ -1,4 +1,5 @@
 //! Everything that touches the network lives in `ooblin-core/src/net/`: our egress surface, reviewable in one place.
+//! The sources say so by what they name, the app's manifest by what it depends on.
 
 use std::fs;
 use std::path::Path;
@@ -39,4 +40,17 @@ fn visit(dir: &Path, offenders: &mut Vec<String>) {
             );
         }
     }
+}
+
+/// The app's dependencies, none a way onto the network of its own but Tauri's, to our own window, and the verify
+/// build's bridge. A name can hide in a source, not here: a new one is weighed before it joins them.
+#[test]
+fn the_app_depends_on_what_we_looked_at() {
+    let looked_at = "clap futures-util keyring log ooblin-core rfd serde serde_json tauri tauri-plugin-log \
+        tauri-plugin-mcp-bridge tauri-plugin-opener tauri-plugin-single-instance tauri-plugin-window-state tokio ts-rs";
+    let manifest = fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("../ooblin/Cargo.toml")).unwrap();
+    let dependencies = manifest.lines().skip_while(|line| *line != "[dependencies]").skip(1);
+    let dependencies = dependencies.take_while(|line| !line.starts_with('['));
+    let names: Vec<_> = dependencies.filter_map(|line| Some(line.split_once(" = ")?.0)).collect();
+    assert_eq!(names, looked_at.split_whitespace().collect::<Vec<_>>());
 }
