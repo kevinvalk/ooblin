@@ -9,6 +9,7 @@ use crate::{
 };
 
 /// A device we're logged in to, of any flavor.
+#[allow(clippy::large_enum_variant, reason = "there are a few at most, and it minds only without `verify`")]
 pub enum Client {
     Amt(amt::Client),
     Supermicro(supermicro::Client),

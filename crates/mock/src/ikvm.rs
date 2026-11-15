@@ -66,6 +66,8 @@ pub(crate) async fn serve(bmc: &Arc<Bmc>, request: Request<Incoming>) -> Respons
                 // Before it's closed, so it's logged before what the client does next.
                 log(&bmc, "WS closed".into());
                 let _ = socket.close(None).await;
+                // What the client still had on its way is read, not reset: Windows drops what we said last with it.
+                while socket.next().await.is_some_and(|message| message.is_ok()) {}
             });
             let response = response.status(StatusCode::SWITCHING_PROTOCOLS).header(CONNECTION, "Upgrade");
             response.header(UPGRADE, "websocket").header(SEC_WEBSOCKET_ACCEPT, accept).body(Full::default())

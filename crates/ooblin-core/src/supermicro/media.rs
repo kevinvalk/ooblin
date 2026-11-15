@@ -80,6 +80,7 @@ async fn plug_in(connection: &Connection, web: &Web) -> Result<(Receiver, Plug)>
         _ => "said no",
     };
     plug.close().await;
+    receiver.closed().await;
     Err(Error::Protocol(format!("the BMC's virtual media {why}: {class:?} {status:?}")))
 }
 
@@ -95,6 +96,7 @@ impl Media {
             }
         };
         self.plug.close().await;
+        self.receiver.closed().await;
         self.web.logout().await;
         served
     }

@@ -63,6 +63,9 @@ jobs:
         if: matrix.targets
         run: rustup target add ${{ matrix.targets }}
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
+        # Its key names the system but not its version, and what one Ubuntu built doesn't build on another.
+        with:
+          key: ${{ matrix.os }}
       - run: npm ci --prefix ui
       # One version of the Tauri CLI, as its own lock file built it, which the cache above keeps.
       - run: cargo install tauri-cli --version 2.12.4 --locked
