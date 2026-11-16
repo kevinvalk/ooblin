@@ -42,7 +42,6 @@ impl Client {
                 family: family(processor.get("Family")),
                 socket: socket.unwrap_or_default().to_owned(),
                 mhz: processor.parse("CurrentClockSpeed"),
-                max_mhz: processor.parse("MaxClockSpeed"),
                 status: named(CPU_STATUS, processor.get("CPUStatus")),
                 upgrade_method: named(UPGRADE_METHOD, processor.get("UpgradeMethod")),
             }

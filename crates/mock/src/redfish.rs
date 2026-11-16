@@ -8,7 +8,7 @@ use hyper::header::{AUTHORIZATION, CONTENT_TYPE};
 use hyper::{Method, Request, Response, StatusCode};
 use ooblin_core::redfish::{Connection, probe};
 use ooblin_core::{Client, Error, Flavor, Target};
-use serde_json::Value;
+use serde_json::{Value, json};
 
 use crate::{Bmc, PASSWORD, scrub};
 
@@ -76,8 +76,17 @@ pub(crate) async fn serve(bmc: &Arc<Bmc>, request: Request<Incoming>) -> Respons
             let is_known = change.iter().all(|(field, value)| {
                 current.get(field).is_some() && allowed.as_ref().is_none_or(|allowed| allowed.contains(value))
             });
+            // We refuse as the A2SDi does, which says why only in its extended messages.
             if !is_known {
-                return answer(StatusCode::BAD_REQUEST, "");
+                let error = json!({ "error": {
+                    "code": "Base.v1_4_0.GeneralError",
+                    "Message": "A general error has occurred. See ExtendedInfo for more information.",
+                    "@Message.ExtendedInfo": [{
+                        "MessageId": "Base.v1_4_0.PropertyValueNotInList",
+                        "Message": "The value for the property is not in the list of acceptable values.",
+                    }],
+                }});
+                return answer(StatusCode::BAD_REQUEST, error.to_string());
             }
 
             current.as_object_mut().unwrap().extend(change);
@@ -131,7 +140,7 @@ async fn forward(device: &Connection, path: &str, file: &Path) -> Response<Full<
             std::fs::create_dir_all(file.parent().unwrap()).and_then(|()| std::fs::write(file, &json)).unwrap();
             answer(StatusCode::OK, json)
         }
-        Err(Error::Http(status)) => answer(StatusCode::from_u16(status).unwrap(), ""),
+        Err(Error::Http(status) | Error::Redfish { status, .. }) => answer(StatusCode::from_u16(status).unwrap(), ""),
         Err(error) => answer(StatusCode::BAD_GATEWAY, error.to_string()),
     }
 }

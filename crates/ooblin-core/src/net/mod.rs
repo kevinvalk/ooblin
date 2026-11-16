@@ -125,6 +125,9 @@ fn http(pin: &Arc<Pin>) -> Result<reqwest::Client> {
         .pool_idle_timeout(Duration::from_secs(5))
         .connect_timeout(Duration::from_secs(10))
         .timeout(HUNG)
+        // NOTE: A Supermicro A2SDi (BMC 4.04) answers a change of its NTP with `Location : …`, a space before the
+        // colon. Without this we failed a change that the BMC had made.
+        .http1_allow_spaces_after_header_name_in_responses(true)
         .build()
         .map_err(transport)
 }

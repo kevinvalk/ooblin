@@ -99,7 +99,6 @@ async fn reads_what_dmtfs_sample_server_says() -> Result<()> {
     // Its FPGA is no processor of the server's, nor is its empty second socket, and an empty bay is no disk.
     let sockets: Vec<_> = hardware.processors.iter().map(|processor| &*processor.socket).collect();
     assert_eq!(sockets, ["CPU 1"]);
-    assert_eq!(hardware.processors[0].max_mhz, Some(3700));
 
     let module = &hardware.memory[0];
     assert_eq!((&*module.slot, module.bytes, &*module.kind), ("DIMM Slot 1", Some(32 << 30), "DDR4"));

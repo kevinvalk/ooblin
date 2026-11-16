@@ -4,8 +4,8 @@ use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
 use super::{
-    APPLICATION, CHASSIS, Fru, Network, PowerRestore, Session, Sol, SolSettings, TRANSPORT, chassis, fru, sdr, sel,
-    set_power_restore, set_sol_bit_rate, sol_settings, with_session,
+    APPLICATION, CHASSIS, Fru, Network, PowerRestore, SUPERMICRO_OEM, Session, Sol, SolSettings, TRANSPORT, chassis,
+    fru, sdr, sel, set_power_restore, set_sol_bit_rate, sol_settings, with_session,
 };
 use crate::{
     Configuration, Consent, Error, Event, Flavor, Info, Ipv4, Ipv6, Panel, Port, Power, PowerAction, PowerState,
@@ -212,7 +212,24 @@ impl Client {
             Change::Network(network) => set_network(session, network).await,
             Change::PowerRestore(restore) => set_power_restore(session, *restore).await,
             Change::SolBitRate(rate) => set_sol_bit_rate(session, *rate).await,
-            Change::Fru(fru) => fru::write(session, 0, fru).await,
+            Change::Fru(fru) => {
+                // NOTE: A Supermicro refuses every FRU write (0xCC) until its OEM command 0x30 0x06 unlocks the FRU
+                // (00), and its own SMCIPMITool locks it again (01) after every write, as we do. A board that does not
+                // know the command most likely never locks, so we write whatever it answers. Another vendor's 0x30 may
+                // do something else entirely, hence only on a Supermicro.
+                let is_supermicro = SUPERMICRO.contains(&device(session).await?.manufacturer_iana);
+                if is_supermicro {
+                    let _ = session.request(SUPERMICRO_OEM, 0x06, &[0x00]).await;
+                }
+
+                // TODO: Closing the app mid-write leaves the FRU unlocked, and we have no way to read whether it is.
+                let written = fru::write(session, 0, fru).await;
+                if is_supermicro && let Err(error) = session.request(SUPERMICRO_OEM, 0x06, &[0x01]).await {
+                    log::warn!("Locking the FRU again failed: {error}");
+                }
+
+                written
+            }
         })
         .await
     }
@@ -267,12 +284,14 @@ async fn device(session: &Session) -> Result<Device> {
     })
 }
 
+const SUPERMICRO: [u32; 3] = [10876, 47488, 10437]; // Old boards say 47488 or Peppercon's 10437
+
 fn manufacturer(iana: u32) -> String {
     // The vendors whose BMCs we would meet, by their IANA number.
     let name = match iana {
         343 => "Intel",
         674 => "Dell",
-        10876 | 47488 | 10437 => "Supermicro", // Old boards say 47488 or Peppercon's 10437
+        iana if SUPERMICRO.contains(&iana) => "Supermicro",
         11 | 47196 => "HPE",
         2 | 20301 => "IBM",
         19046 => "Lenovo",

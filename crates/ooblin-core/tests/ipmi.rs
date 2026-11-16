@@ -412,7 +412,8 @@ async fn reads_sensor_records_a_bmc_makes_hard_to_read() -> Result<()> {
 }
 
 /// We read the FRU as the X10's own pages show it and then change it. Its product area grows into the room after it,
-/// its board area stays, and an area it has none of cannot be set.
+/// its board area stays, and an area it has none of cannot be set. A Supermicro's FRU is locked, so we unlock it for
+/// the write and lock it again after, as SMCIPMITool does.
 #[tokio::test]
 async fn changes_the_fru() -> Result<()> {
     let bmc = x10().await;
@@ -424,8 +425,15 @@ async fn changes_the_fru() -> Result<()> {
 
     let product = fru.product.as_mut().unwrap();
     (product.name, product.asset_tag) = ("Homelab".into(), "rack-2".into());
+    asked(&bmc);
     client.change(Change::Fru(fru.clone())).await?;
     assert_eq!(client.fru().await?, fru);
+
+    let is_write = |asked: &String| asked.starts_with("IPMI 30 06") || asked.starts_with("IPMI 0a 12");
+    let writes: Vec<_> = asked(&bmc).into_iter().filter(is_write).collect();
+    let [unlock, fru_writes @ .., lock] = &writes[..] else { bail!("{writes:?}") };
+    assert_eq!((&**unlock, &**lock), ("IPMI 30 06 [00]", "IPMI 30 06 [01]"));
+    assert!(!fru_writes.is_empty() && fru_writes.iter().all(|write| write.starts_with("IPMI 0a 12")), "{writes:?}");
 
     fru.chassis = Some(Default::default());
     match client.change(Change::Fru(fru)).await {
@@ -622,6 +630,26 @@ async fn reads_ipmi_sim_as_ipmitool_does() -> Result<()> {
     let network = settings.network.unwrap();
     assert_eq!((network.is_dhcp, &*network.address, &*network.subnet_mask), (false, "192.0.2.50", "255.255.255.0"));
     assert_eq!((&*network.gateway, network.vlan), ("192.0.2.1", None));
+
+    Ok(())
+}
+
+/// Only a Supermicro gets Supermicro's unlock, as another vendor's 0x30 may do anything. ipmi_sim names no manufacturer
+/// although its FRU says Supermicro, so we write its FRU with the standard command alone.
+#[tokio::test]
+async fn unlocks_the_fru_of_a_supermicro_alone() -> Result<()> {
+    let bmc = Bmc::start("127.0.0.1:0", &mock::fixture("ipmi-sim")).await;
+    let client = Client::new(&bmc.target(PASSWORD));
+
+    let mut fru = client.fru().await?;
+    fru.product.as_mut().unwrap().asset_tag = "rack-8".into();
+    asked(&bmc);
+    client.change(Change::Fru(fru.clone())).await?;
+    assert_eq!(client.fru().await?, fru);
+
+    let asked = asked(&bmc);
+    let is_written = asked.iter().any(|asked| asked.starts_with("IPMI 0a 12"));
+    assert!(is_written && !asked.iter().any(|asked| asked.starts_with("IPMI 30")), "{asked:?}");
 
     Ok(())
 }

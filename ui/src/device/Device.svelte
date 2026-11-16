@@ -57,37 +57,38 @@
   const say = (text: string, isFailed?: boolean) => tell(hidden ? `${title}: ${text}` : text, isFailed);
 
   /** The tabs of a flavor, with its pages in its own folder or that of the standard it speaks. A tab is named after the
-   * command that reads it, and the settings come last where a flavor has them, which is how we tell them. All but the
-   * hardware (`isFixed`) change often enough to want a refresh, sensors so often that we read them every `everyMs`
-   * while they are shown. The KVM and serial console are screens of their own. */
+   * command that reads it, and the settings come last where a flavor has them, which is how we tell them. Every page
+   * can be read again, sensors change so often that we read them every `everyMs` while they are shown, and a change of
+   * the settings reads what it changes (`isChangedBySettings`, the hardware holds the FRU) afresh. The KVM and serial
+   * console are screens of their own. */
   const TABS: Record<
     Flavor,
-    Record<string, { label: string; page: Component<any>; isFixed?: true; everyMs?: number }>
+    Record<string, { label: string; page: Component<any>; isChangedBySettings?: true; everyMs?: number }>
   > = {
     Amt: {
       status: { label: "Status", page: AmtStatus },
-      hardware: { label: "Hardware", page: AmtHardware, isFixed: true },
+      hardware: { label: "Hardware", page: AmtHardware, isChangedBySettings: true },
       event_log: { label: "Event log", page: EventLog },
       audit_log: { label: "Audit log", page: AuditLog },
       settings: { label: "Settings", page: AmtSettings },
     },
     Supermicro: {
       bmc_status: { label: "Status", page: RedfishStatus },
-      hardware: { label: "Hardware", page: RedfishHardware, isFixed: true },
+      hardware: { label: "Hardware", page: RedfishHardware, isChangedBySettings: true },
       event_log: { label: "Event log", page: EventLog },
       sensors: { label: "Sensors", page: Sensors, everyMs: 1000 },
       bmc_settings: { label: "Settings", page: BmcSettings },
     },
     Redfish: {
       bmc_status: { label: "Status", page: RedfishStatus },
-      hardware: { label: "Hardware", page: RedfishHardware, isFixed: true },
+      hardware: { label: "Hardware", page: RedfishHardware, isChangedBySettings: true },
       event_log: { label: "Event log", page: EventLog },
       // Redfish has a resource per sensor, so a read takes a BMC a while.
       sensors: { label: "Sensors", page: Sensors, everyMs: 5000 },
     },
     Ipmi: {
       ipmi_status: { label: "Status", page: IpmiStatus },
-      fru: { label: "Hardware", page: IpmiHardware, isFixed: true },
+      fru: { label: "Hardware", page: IpmiHardware, isChangedBySettings: true },
       event_log: { label: "Event log", page: EventLog },
       sensors: { label: "Sensors", page: Sensors, everyMs: 1000 },
       ipmi_settings: { label: "Settings", page: IpmiSettings },
@@ -100,7 +101,7 @@
   /** By tab: what it read or why it could not, and when. */
   const pages = new SvelteMap<string, { data?: unknown; error?: string; read?: Date }>();
   let page = $derived(pages.get(tab));
-  let isLive = $derived(tabs[tab] && !tabs[tab].isFixed);
+  let isPage = $derived(tabs[tab] !== undefined);
 
   /** Whether its screen and serial console were opened, as they stay open across tabs. Then, for the footer: what they
    * wait for while they are not open yet, and the size of the screen and its updates a second while it is shown. */
@@ -152,7 +153,7 @@
    * off goes (Rust ejects the image of AMT itself). */
   function saved(data: unknown) {
     pages.set(names.at(-1)!, { data, read: new Date() });
-    names.filter((name) => tabs[name].isFixed).forEach((name) => pages.delete(name));
+    names.filter((name) => tabs[name].isChangedBySettings).forEach((name) => pages.delete(name));
     landed(data);
 
     const { is_kvm, is_sol, is_ider } = connection.info.remote_access;
@@ -426,7 +427,7 @@
 <!-- ⌘R reads the tab on screen again, App keeps it from reloading the whole app. -->
 <svelte:window
   onkeydown={(event) => {
-    if (!hidden && isLive && (event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "r") read();
+    if (!hidden && isPage && (event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "r") read();
   }}
 />
 
@@ -609,7 +610,7 @@
     {@render closeButton("sol", "Close the serial console")}
     <!-- The settings come last, as they are looked at least. -->
     {#each Object.entries(tabs).slice(-1) as [name, { label }] (name)}{@render tabButton(name, label)}{/each}
-    {#if isLive}
+    {#if isPage}
       <span class="ml-auto text-muted">{page?.read ? `Read at ${page.read.toLocaleTimeString()}` : ""}</span>
       <button
         type="button"

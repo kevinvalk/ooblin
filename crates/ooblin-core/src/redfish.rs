@@ -568,7 +568,6 @@ pub(crate) struct Cpu {
     Model: String,
     Manufacturer: String,
     Socket: String,
-    MaxSpeedMHz: Option<u32>,
     OperatingSpeedMHz: Option<u32>,
     ProcessorType: String,
     Status: Condition,
@@ -586,7 +585,6 @@ impl Cpu {
             family: String::new(),
             socket: self.Socket,
             mhz: self.OperatingSpeedMHz,
-            max_mhz: self.MaxSpeedMHz,
             status: self.Status.State,
             upgrade_method: String::new(),
         }

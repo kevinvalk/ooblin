@@ -24,6 +24,8 @@ pub(crate) struct Replay {
     records: Vec<Part>,
     entries: Vec<Part>,
     fru: Vec<u8>,
+    /// A Supermicro refuses to write its FRU until it is unlocked (see `ipmi::Client::change`), as the A2SDi does.
+    is_fru_locked: bool,
     /// What tests have go wrong, see `Bmc::fault`.
     faults: Vec<(String, Fault)>,
 }
@@ -67,6 +69,7 @@ impl Replay {
             replay.learn(hex(function)[0], hex(command)[0], &hex(asked.next().unwrap_or_default()), answer);
         }
 
+        replay.is_fru_locked = replay.is_supermicro();
         replay
     }
 
@@ -133,6 +136,11 @@ impl Replay {
                 let part = self.fru.get(offset..end).unwrap_or_default();
                 (0, [&[part.len() as u8][..], part].concat())
             }
+            (0x30, 0x06, &[state @ (0x00 | 0x01)]) if self.is_supermicro() => {
+                self.is_fru_locked = state == 0x01;
+                (0, vec![])
+            }
+            (0x0A, 0x12, _) if self.is_fru_locked => (0xCC, vec![]),
             (0x0A, 0x12, &[0, low, high, ref written @ ..]) => {
                 let offset = usize::from(u16::from_le_bytes([low, high]));
                 match self.fru.get_mut(offset..offset + written.len()) {
@@ -145,6 +153,12 @@ impl Replay {
             }
             _ => self.answers.get(&asked(function, command, data)).cloned().unwrap_or((0xC1, vec![])),
         }
+    }
+
+    /// Does the recording's Get Device ID name Supermicro (10876) as the manufacturer?
+    fn is_supermicro(&self) -> bool {
+        let device_id = self.answers.get(&[0x06, 0x01][..]);
+        device_id.is_some_and(|(code, id)| *code == 0 && id.get(6..9) == Some(&[0x7C, 0x2A, 0x00]))
     }
 
     /// Do we answer `command` of `function` from the recording as the BMC would?
@@ -586,7 +600,11 @@ impl Bmc {
 
         let is_ours = matches!(
             (function, command),
-            (0x06, 0x3C | 0x48 | 0x49) | (0x00, 0x02 | 0x04 | 0x06 | 0x08) | (0x0C, 0x01 | 0x21) | (0x0A, 0x12)
+            (0x06, 0x3C | 0x48 | 0x49)
+                | (0x00, 0x02 | 0x04 | 0x06 | 0x08)
+                | (0x0C, 0x01 | 0x21)
+                | (0x0A, 0x12)
+                | (0x30, 0x06)
         );
         if is_ours || self.ipmi.lock().unwrap().knows(function, command, data) {
             return;

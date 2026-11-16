@@ -29,7 +29,6 @@
         <dl class="card">
           <div><dt>Model</dt><dd>{processor?.model}</dd></div>
           <div><dt>Manufacturer</dt><dd>{processor?.manufacturer}</dd></div>
-          <div><dt>Maximum speed</dt><dd>{processor?.max_mhz && `${processor.max_mhz} MHz`}</dd></div>
           <div><dt>Status</dt><dd>{processor?.status}</dd></div>
         </dl>
       </div>

@@ -14,10 +14,9 @@
     <div><dt>Serial number</dt><dd>{data?.system.serial_number}</dd></div>
     <div><dt>System ID</dt><dd class="font-mono">{data?.system.id}</dd></div>
     {#each data?.processors ?? [undefined] as processor, i}
-      {@const speeds = [processor?.mhz, processor?.max_mhz].filter(Boolean).join(" / ")}
       <div>
         <dt>{data && data.processors.length > 1 ? `CPU ${i}` : "CPU"}</dt>
-        <dd>{processor && processor.model + (speeds && ` @ ${speeds} MHz`)}</dd>
+        <dd>{processor && processor.model + (processor.mhz !== null ? ` @ ${processor.mhz} MHz` : "")}</dd>
       </div>
     {/each}
   </dl>
@@ -57,7 +56,6 @@
           <div><dt>Family</dt><dd>{processor?.family}</dd></div>
           <div><dt>Socket</dt><dd>{processor?.socket}</dd></div>
           <div><dt>Speed</dt><dd>{processor?.mhz && `${processor.mhz} MHz`}</dd></div>
-          <div><dt>Maximum speed</dt><dd>{processor?.max_mhz && `${processor.max_mhz} MHz`}</dd></div>
           <div><dt>Status</dt><dd>{processor?.status}</dd></div>
           <div><dt>Upgrade method</dt><dd>{processor?.upgrade_method}</dd></div>
         </dl>

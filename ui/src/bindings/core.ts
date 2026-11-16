@@ -304,7 +304,7 @@ export type PowerRestore = "StayOff" | "Previous" | "PowerOn";
  */
 export type PowerState = "On" | "Asleep" | "Hibernating" | "Off" | "Unknown";
 
-export type Processor = { model: string, manufacturer: string, family: string, socket: string, mhz: number | null, max_mhz: number | null, status: string, upgrade_method: string, };
+export type Processor = { model: string, manufacturer: string, family: string, socket: string, mhz: number | null, status: string, upgrade_method: string, };
 
 /**
  * One-Click Recovery (booting a recovery image) and remote platform erase, which the BIOS has to allow as well: `None`

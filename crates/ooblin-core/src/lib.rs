@@ -90,6 +90,9 @@ pub enum Error {
     Timeout,
     #[error("HTTP {0}")]
     Http(u16),
+    /// A Redfish request the BMC refused, with what its error body says went wrong, in its own words (DSP0266).
+    #[error("the BMC refused that: {message}")]
+    Redfish { status: u16, message: String },
     #[error("{method} failed with return value {code}")]
     Method { method: String, code: String },
     #[error("WS-Man fault: {0}")]
@@ -278,7 +281,6 @@ pub struct Processor {
     pub family: String,
     pub socket: String,
     pub mhz: Option<u32>,
-    pub max_mhz: Option<u32>,
     pub status: String,
     pub upgrade_method: String,
 }

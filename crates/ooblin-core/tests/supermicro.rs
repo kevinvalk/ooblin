@@ -352,7 +352,9 @@ async fn changes_the_settings() -> Result<()> {
     assert_eq!(settings.power_restore, Some(PowerRestore::PowerOn));
     assert_eq!(settings.sol.map(|sol| sol.bit_rate), Some(Some(57_600)));
 
-    assert!(matches!(client.change(BmcChange::FanMode("Turbo".into())).await, Err(Error::Http(400))));
+    let refused = client.change(BmcChange::FanMode("Turbo".into())).await;
+    let Err(Error::Redfish { status: 400, message }) = refused else { panic!("{refused:?}") };
+    assert_eq!(message, "The value for the property is not in the list of acceptable values.");
     assert!(matches!(client.change(BmcChange::SolBitRate(4800)).await, Err(Error::Invalid(_))));
 
     Ok(())

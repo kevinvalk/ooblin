@@ -282,7 +282,7 @@ async fn reads_what_the_ms_02_says() -> Result<()> {
         (&*processor.family, &*processor.socket, &*processor.upgrade_method),
         ("Core Ultra 9", "U3E1", "Socket BGA2114")
     );
-    assert_eq!((processor.mhz, processor.max_mhz), (Some(4600), Some(8500)));
+    assert_eq!(processor.mhz, Some(4600));
     assert_eq!((hardware.memory[0].bytes, hardware.disks[0].bytes), (Some(32 << 30), Some(2_000_398_934_000)));
     assert!(hardware.batteries.is_empty());
 

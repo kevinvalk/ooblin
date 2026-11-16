@@ -21,6 +21,7 @@ const SENSOR: u8 = 0x04;
 const APPLICATION: u8 = 0x06;
 const STORAGE: u8 = 0x0A;
 const TRANSPORT: u8 = 0x0C;
+const SUPERMICRO_OEM: u8 = 0x30; // Not the specification's: what a vendor's own commands use, here Supermicro's
 
 const THIS_CHANNEL: u8 = 0x0E; // The channel a request came in on, so the one we speak on
 

@@ -87,8 +87,36 @@ impl Connection {
             return Err(Error::Unauthorized);
         }
 
-        ok(response)
+        // A 404 stays one, as `redfish::optional` takes it for a resource the BMC does not have.
+        let status = response.status();
+        if status.is_success() || status == StatusCode::NOT_FOUND {
+            return ok(response);
+        }
+
+        let status = status.as_u16();
+        let body = response.bytes().await.unwrap_or_default();
+        Err(refusal(&body).map_or(Error::Http(status), |message| Error::Redfish { status, message }))
     }
+}
+
+/// Why the BMC refused a request, as its Redfish error body says. We prefer the extended messages, because the main one
+/// of a Supermicro is "A general error has occurred. See ExtendedInfo for more information."
+fn refusal(body: &[u8]) -> Option<String> {
+    let body: Value = serde_json::from_slice(body).ok()?;
+    let error = &body["error"];
+
+    let extended = error["@Message.ExtendedInfo"].as_array().into_iter().flatten();
+    let messages: Vec<&str> = extended
+        .filter_map(|info| info["Message"].as_str())
+        .map(str::trim)
+        .filter(|message| !message.is_empty())
+        .collect();
+    if !messages.is_empty() {
+        return Some(messages.join(" "));
+    }
+
+    let message = error["message"].as_str().or(error["Message"].as_str())?.trim();
+    (!message.is_empty()).then(|| message.to_owned())
 }
 
 /// Whether `host` answers Redfish without a login, as its root must (DSP0266). It is one request, which carries no
