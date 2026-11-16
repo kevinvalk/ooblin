@@ -2,6 +2,9 @@
 
 # Ooblin
 
+> [!IMPORTANT]
+> This was fully LLM written using Fable 5.2. I did use all my knowledge and experience to get this working nice and robustly. I do use it myself to Intel AMT and Supermicro IPMI machines. That said, I feel you, and I don't even know what my own stance is on LLM software..
+
 Ooblin, the out-of-band (OOB) goblin, is a desktop console for Intel AMT, Supermicro BMCs and any BMC over IPMI or Redfish: power control, hardware inventory, the screen, keyboard and mouse of the device (KVM), its serial console, and booting it from a disk image on your machine.
 
 The idea is that you do NOT need a server or a cloud for this. The app talks to your devices directly, over TLS with pinned certificates (and IPMI, encrypted with keys from its password), and keeps the passwords in the keychain of your OS. It is built with [Tauri](https://tauri.app) and runs on Linux, macOS and Windows.
