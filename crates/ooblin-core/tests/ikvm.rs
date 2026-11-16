@@ -350,7 +350,8 @@ async fn records_a_session_that_replays_alike() -> Result<()> {
 }
 
 /// Virtual media plugs a CD-ROM drive in with the KVM token, in the first free slot, and answers what the host asks
-/// from the image. When ejected it plugs the drive out and logs out of its web session.
+/// from the image, which reads on after its first block. When ejected it plugs the drive out and logs out of its web
+/// session.
 #[tokio::test]
 async fn virtual_media_serves_the_image_until_ejected() -> Result<()> {
     let bmc = start(&mock::fixture("x10")).await;
@@ -367,7 +368,7 @@ async fn virtual_media_serves_the_image_until_ejected() -> Result<()> {
         read.notified(),
     );
     tokio::time::timeout(Duration::from_secs(5), serve).await??;
-    assert_eq!(reads.into_inner()?, vec![2048..4096]);
+    assert_eq!(reads.into_inner()?.first(), Some(&(2048..4096)));
 
     let requests = requests(&bmc);
     let media: Vec<_> = requests.iter().filter(|line| line.starts_with("vm ") || line.contains("/vm")).collect();

@@ -7,13 +7,10 @@ on:
     branches: [main] # We only push on main, as a branch of a pull request is already checked as the pull request
     tags: ["v*"]
   pull_request:
-  schedule:
-    - cron: "17 3 * * *" # Every night we try many more garbled devices than a push wants to wait for
 
 # A newer push makes the run in flight pointless so we cancel it, but a tag ALWAYS finishes as that is a real release.
-# The event is part of the group as we do not want a push to cancel the run of the night.
 concurrency:
-  group: ci-${{ github.event_name }}-${{ github.ref }}
+  group: ci-${{ github.ref }}
   cancel-in-progress: ${{ github.ref_type != 'tag' }}
 
 # SECURITY: Everything we lint, test and build runs code of others (build scripts of crates, npm packages), so those
@@ -50,16 +47,33 @@ jobs:
       - run: npm run build --prefix ui
       - run: cargo fmt --all --check
       - run: cargo clippy --workspace --all-targets --all-features -- -D warnings
-      - run: cargo test --workspace
-        env:
-          GARBLED: ${{ github.event_name == 'schedule' && 200 || 8 }} # 200 rounds at night, 8 on a push
+      - run: cargo test --workspace # With 8 rounds of garbled devices, see `garble-and-read`
       # The tests write the TypeScript bindings of the UI, so a difference means somebody forgot to commit them.
       - run: git diff --exit-code ui/src/bindings
+
+  # The same garbled devices as `lint-and-test`, many more of them (crates/ooblin-core/tests/garbled.rs). A failure
+  # fails the run, but nothing waits for it: the 8 rounds above gate building and releasing, these look further.
+  garble-and-read:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, windows-latest, ubuntu-24.04]
+    runs-on: ${{ matrix.os }}
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - name: Install the Rust of rust-toolchain.toml
+        run: rustup toolchain install
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
+      - run: cargo test -p ooblin-core --test garbled
+        env:
+          GARBLED: 200
 
   # On main this becomes the rolling "Unstable" prerelease and on a `v*` tag the release of that tag.
   build-and-bundle:
     needs: lint-and-test
-    if: github.event_name == 'push' # So not for a pull request and not at night
+    if: github.event_name == 'push' # So not for a pull request
     strategy:
       fail-fast: false
       matrix:

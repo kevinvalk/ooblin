@@ -290,8 +290,9 @@ async fn screen(bmc: &Bmc, socket: &mut Socket) -> anyhow::Result<()> {
 
 /// Virtual media as the X10 has it: its slots, all free, on a socket of their own, or a CD-ROM drive plugged in with
 /// the token of a live session. In that one we ask what a host first does (INQUIRY, READ CAPACITY) and read the second
-/// block, logging what came back with success (`vm 28 0101…`, the first 8 bytes), till it is plugged out, which may
-/// come at any time. A token `refuse_kvm` refuses is refused until the client hangs up, anything else hangs up.
+/// block, logging what came back with success (`vm 28 0101…`, the first 8 bytes). Then we read on through the image
+/// as a host booting from it would, unlogged, till it is plugged out, which may come at any time. A token `refuse_kvm`
+/// refuses is refused until the client hangs up, anything else hangs up.
 async fn media(bmc: &Bmc, socket: &mut Socket) -> anyhow::Result<()> {
     let pdu = |class: [u8; 4], body: &[u8]| [&class[..], &(body.len() as u32).to_le_bytes(), body].concat();
 
@@ -317,27 +318,26 @@ async fn media(bmc: &Bmc, socket: &mut Socket) -> anyhow::Result<()> {
     ensure!(receive(socket).await? == pdu([0, 0, 0, 7], &[6, 3, 1, 16, 2, 32, 3, 48]), "not the endpoints");
     let plug_out = pdu([0, 0, 0, 5], &[]);
     send(socket, &pdu([0, 0, 0, 4], &[])).await?;
-    let mut answer = receive(socket).await?;
-    'served: {
+    let answer = receive(socket).await?;
+    let answer = 'served: {
         if answer == plug_out {
-            break 'served;
+            break 'served answer;
         }
         ensure!(answer == pdu([0, 0, 0, 3], &[255; 4]), "not alive");
 
-        let commands: [(&[u8], u32); 3] = [
-            (&[0x12, 0, 0, 0, 36, 0], 36),
-            (&[0x25, 0, 0, 0, 0, 0, 0, 0, 0, 0], 8),
-            (&[0x28, 0, 0, 0, 0, 1, 0, 0, 1, 0], 2048),
-        ];
-        for (tag, (command, length)) in (1u32..).zip(commands) {
+        // What came back with success for `command`, or nothing where the drive was plugged out instead.
+        let mut tag = 0u32;
+        let mut ask = async |command: &[u8], length: u32| -> anyhow::Result<Option<Vec<u8>>> {
+            tag += 1;
             let mut wrapper =
                 [&b"USBC"[..], &tag.to_le_bytes(), &length.to_le_bytes(), &[0x80, 0, command.len() as u8]].concat();
             wrapper.extend(command);
             wrapper.resize(31, 0);
             send(socket, &pdu([0x11, 0, 2, 0], &wrapper)).await?;
-            answer = receive(socket).await?;
+
+            let answer = receive(socket).await?;
             if answer == plug_out {
-                break 'served;
+                return Ok(None);
             }
             ensure!(answer.len() >= 29, "not an answer");
             let data = &answer[8..answer.len() - 21];
@@ -348,11 +348,39 @@ async fn media(bmc: &Bmc, socket: &mut Socket) -> anyhow::Result<()> {
                     && answer[answer.len() - 21..] == pdu([0x22, 0, 2, 0xFF], &status),
                 "not a success"
             );
+            Ok(Some(data.to_vec()))
+        };
+
+        let commands: [(&[u8], u32); 3] = [
+            (&[0x12, 0, 0, 0, 36, 0], 36),
+            (&[0x25, 0, 0, 0, 0, 0, 0, 0, 0, 0], 8),
+            (&[0x28, 0, 0, 0, 0, 1, 0, 0, 1, 0], 2048),
+        ];
+        let mut capacity = Vec::new();
+        for (command, length) in commands {
+            let Some(data) = ask(command, length).await? else { break 'served plug_out.clone() };
             let hex: String = data.iter().take(8).map(|byte| format!("{byte:02x}")).collect();
             log(bmc, format!("vm {:02x} {hex}", command[0]));
+            if command[0] == 0x25 {
+                capacity = data;
+            }
         }
-        answer = receive(socket).await?;
-    }
+
+        // Then we read on as a host booting from it would, 32 blocks at a time and with a pause, so that a read of an
+        // image takes long enough to be seen. READ CAPACITY said its last block.
+        let blocks = capacity.get(..4).map_or(0, |last| u32::from_be_bytes(last.try_into().unwrap()).saturating_add(1));
+        for start in (2..blocks).step_by(32) {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+            let [a, b, c, d] = start.to_be_bytes();
+            let count = 32.min(blocks - start);
+            let [high, low] = (count as u16).to_be_bytes();
+            if ask(&[0x28, 0, a, b, c, d, 0, high, low, 0], count * 2048).await?.is_none() {
+                break 'served plug_out.clone();
+            }
+        }
+
+        receive(socket).await?
+    };
 
     ensure!(answer == plug_out, "not a plug-out");
     log(bmc, "vm out".into());

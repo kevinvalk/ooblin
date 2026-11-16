@@ -174,13 +174,20 @@ async fn survives_what_a_device_says() {
     // NOTE: `GARBLED=500 cargo test --test garbled` tries more rounds than a push needs
     let rounds: u64 = std::env::var("GARBLED").map_or(8, |rounds| rounds.parse().unwrap());
 
+    // IMPORTANT: Every round at once makes each take as long as all of them together (200 took Windows past two
+    // minutes), while the two minutes below are for one round. So 16 run at a time, which keeps the slowest round
+    // at seconds, and a round's clock starts when it does.
+    let at_a_time = std::sync::Arc::new(tokio::sync::Semaphore::new(16));
+
     let mut reads = tokio::task::JoinSet::new();
     for fixture in mock::fixtures().filter(|fixture| !fixture.ends_with("go-wsman-messages")) {
         for (flavor, round) in
             mock::flavors(&fixture).into_iter().flat_map(|flavor| (0..rounds).map(move |round| (flavor, round)))
         {
             let fixture = fixture.clone();
+            let at_a_time = at_a_time.clone();
             reads.spawn(async move {
+                let _turn = at_a_time.acquire_owned().await.unwrap();
                 let mut random = Random(round.wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1);
                 let (directory, mut files) = (tempfile::tempdir().unwrap(), Vec::new());
                 copy(&fixture, directory.path(), &mut files);
