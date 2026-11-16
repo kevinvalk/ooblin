@@ -1,7 +1,7 @@
 # NOTE: The release job of .github/workflows/ci.yml sets `version` and `sha256` on every tag, in a commit of its own.
 cask "ooblin" do
-  version "0.0.0"
-  sha256 "0000000000000000000000000000000000000000000000000000000000000000"
+  version "0.1.0"
+  sha256 ""
 
   url "https://github.com/kevinvalk/ooblin/releases/download/v#{version}/Ooblin_#{version}_universal.dmg"
   name "Ooblin"
