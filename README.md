@@ -8,9 +8,18 @@ The idea is that you do NOT need a server or a cloud for this. The app talks to 
 
 ## Running it for the first time
 
-Download the build for your system from the [releases](https://github.com/kevinvalk/ooblin/releases). "Unstable" is the latest build of main. Nothing is signed yet, so on macOS you have to allow the app once in Privacy & Security.
+On macOS you install it with Homebrew, from the cask in this repository:
 
-Or build it yourself, with the tools from "Developing" below in place:
+```sh
+brew tap kevinvalk/ooblin https://github.com/kevinvalk/ooblin
+brew install --cask ooblin
+```
+
+Anywhere else, download the build for your system from the [releases](https://github.com/kevinvalk/ooblin/releases): an installer for Windows, an AppImage, `.deb` or `.rpm` for Linux. "Unstable" is the latest build of main. Apple does not sign Ooblin yet, so on macOS you have to allow the app once in System Settings > Privacy & Security.
+
+Ooblin looks for a newer release when it starts, and when you ask under Help in the status bar. It installs one the way you installed it and starts again, which closes every connection, so it waits for you to click Update.
+
+Or build it yourself, with the tools from "Developing" below in place. A build of your own says it is version 0.0.0, so it offers you every release:
 
 ```sh
 cargo tauri build
@@ -27,7 +36,7 @@ Some things you want to know:
 - You do not have to say what kind of device it is. Connecting tries Intel AMT first, then the Redfish of a Supermicro (asked without the password), then IPMI (whose login never sends the password), and then the Redfish that answered where IPMI does not. The Kind in the connect form picks one instead.
 - A BMC whose web port is not 443 takes the port in the host, as `host:port`.
 - We pin the certificate of a device the first time you connect. From then on a device that shows another certificate is refused until you trust the new one.
-- Ooblin logs what it does and what goes wrong (a megabyte, and the one before it) in the log folder of your OS. The button at the right of the status bar saves the log for a bug report. It has the addresses and names of your devices, but NEVER a password.
+- Ooblin logs what it does and what goes wrong (a megabyte, and the one before it) in the log folder of your OS. Save log under Help in the status bar saves it for a bug report. It has the addresses and names of your devices, but NEVER a password.
 
 ## Developing
 
@@ -41,6 +50,16 @@ cargo test
 ```
 
 `cargo test` runs the library against the mock devices below and writes the types of the UI to `ui/src/bindings`, so commit those with your change. `AGENTS.md` has the rest: how the code is laid out and how we check a change in the running app.
+
+### Releasing
+
+A tag is the release, and its name is the version: push `vX.Y.Z` and CI builds every bundle at that version, signs them for the updater, publishes the release with its `latest.json`, and commits the new version and checksum of the Homebrew cask (`Casks/ooblin.rb`) to main. Nothing else in the repository holds the version, `Cargo.toml` says 0.0.0. Every push to main replaces the "Unstable" prerelease, versioned as the last tag plus the commits since (`0.2.0+5`).
+
+```sh
+git tag v0.2.0 && git push origin v0.2.0
+```
+
+The updater only takes what is signed with our key: the private half is the `TAURI_SIGNING_PRIVATE_KEY` secret of the repository, the public half is in `crates/ooblin/tauri.conf.json`. IMPORTANT: Without that private key no installed Ooblin can update itself ever again, so keep a copy of it somewhere safe.
 
 ### Mock devices
 
@@ -189,7 +208,8 @@ Not: a screen, a serial console or virtual media (every vendor has its own), nor
 
 ## Current problems and ideas
 
-- Nothing is signed. We also want SHA-256 sums and a provenance attestation on the releases.
+- Apple and Microsoft do not sign Ooblin yet, only our updater does. We also want SHA-256 sums and a provenance attestation on the releases.
+- An Arch Linux package (AUR) and winget for Windows, both published from the release job.
 - Drives behind a Redfish storage controller and Redfish logs of more than a page are written by the standard alone, as no device we have lists either.
 - We never saw a real X10 end a KVM session on its own, so the reasons we show for that are unverified.
 - We should build from a fresh clone on macOS, Linux and Windows.

@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { PanelLeft, ScrollText } from "@lucide/svelte";
+  import { CircleHelp, Download, PanelLeft } from "@lucide/svelte";
   import { invoke } from "@tauri-apps/api/core";
   import { listen } from "@tauri-apps/api/event";
   import * as log from "@tauri-apps/plugin-log";
@@ -27,6 +27,7 @@
   const connecting = new SvelteSet<string>();
 
   let isCollapsed = $state(false);
+  let update: string | null = $state(null); // The version of a newer release, which the footer offers
   let message = $state({ text: "", isFailed: false });
   let hideTimeout = 0;
 
@@ -163,6 +164,23 @@
     }
   }
 
+  /** Looks for a newer release. Only when `isAsked` do we say how that went, as at start being offline is no news. */
+  async function checkUpdate(isAsked: boolean) {
+    try {
+      update = await invoke<string | null>("check_update");
+      if (isAsked) say(update !== null ? `Ooblin ${update} is out.` : "Ooblin is up to date.");
+    } catch (error) {
+      if (isAsked) say(reason(error), true);
+    }
+  }
+  checkUpdate(false);
+
+  /** Rust starts the new release once it is installed, so we only hear back when that failed. */
+  async function installUpdate() {
+    say(`Installing Ooblin ${update}, it restarts when done…`);
+    await invoke("update").catch((error) => say(reason(error), true));
+  }
+
   // Started with a host on the command line, or started again with one? We open it as if it was picked from the
   // sidebar.
   invoke<Saved | null>("launch").then((device) => (device !== null ? select(device) : showForm()));
@@ -242,13 +260,46 @@
     {/if}
     <!-- Then what the device on screen says, on the right. -->
     {#if current !== null}{@render connections[current].footer?.()}{/if}
-    <button
-      type="button"
-      class={["btn-icon size-7", current === null && "ml-auto"]}
-      title="Save the log: what Ooblin did and what went wrong, with the devices' addresses and names, never a password"
-      onclick={saveLog}
+    <div class={["flex items-center gap-1", current === null && "ml-auto"]}>
+      {#if update !== null}
+        <button
+          type="button"
+          class="btn btn-secondary h-6 px-2"
+          title="Installs Ooblin {update} and restarts, which closes every connection"
+          onclick={installUpdate}
+        >
+          <Download class="size-3.5" /> Update to {update}
+        </button>
+      {/if}
+      <button type="button" class="btn-icon size-7" title="Help" popovertarget="help">
+        <CircleHelp class="size-4" />
+      </button>
+    </div>
+    <div
+      id="help"
+      popover
+      class="fixed inset-auto right-1.5 bottom-9 m-0 min-w-52 rounded-lg border border-line bg-canvas p-1 text-ink shadow-xl"
     >
-      <ScrollText class="size-4" />
-    </button>
+      <button
+        type="button"
+        class="block h-8 w-full rounded-md px-3 text-left hover:bg-accent hover:text-white"
+        popovertarget="help"
+        popovertargetaction="hide"
+        title="Looks for a newer release of Ooblin."
+        onclick={() => checkUpdate(true)}
+      >
+        Check for updates
+      </button>
+      <button
+        type="button"
+        class="block h-8 w-full rounded-md px-3 text-left hover:bg-accent hover:text-white"
+        popovertarget="help"
+        popovertargetaction="hide"
+        title="Saves what Ooblin did and what went wrong, with the devices' addresses and names, never a password."
+        onclick={saveLog}
+      >
+        Save log…
+      </button>
+    </div>
   </footer>
 </div>

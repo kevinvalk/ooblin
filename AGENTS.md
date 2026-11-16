@@ -13,7 +13,8 @@ it in words.
 - Tauri drives everything, `cargo tauri dev` and `build` start Vite. Cross-platform from day one.
 - `cargo test` runs the library against the mock (`crates/mock`) and writes the UI's types to `ui/src/bindings` (ts-rs,
   committed: ooblin-core's by `#[ts(export)]`, the app's own by its `bindings` test), `npm run build --prefix ui`
-  typechecks the UI. Only `crates/ooblin-core/src/net/` may touch the network, tests enforce it.
+  typechecks the UI. Only `crates/ooblin-core/src/net/` may touch the network, tests enforce it. The one exception is
+  the app's updater, which asks our releases on GitHub, never in the verify build.
 - `anyhow` and `?` outside the library. Spec and integration tests (fixtures, the running app) over unit tests.
 - What a standard does (IPMI, Redfish) is written once, in the UI as in the library, and a vendor's pages take it from
   there as the library's `supermicro` does from its `ipmi` and `redfish`.

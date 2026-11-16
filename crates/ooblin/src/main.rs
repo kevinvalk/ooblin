@@ -486,6 +486,51 @@ fn save_log(app: AppHandle, picked: State<'_, Picked>, path: PathBuf) -> Result<
     Ok(std::fs::write(path, logs.concat())?)
 }
 
+/// The release `check_update` found newer than ours, which `update` installs and no other.
+#[derive(Default)]
+struct Available(std::sync::Mutex<Option<tauri_plugin_updater::Update>>);
+
+/// The version of a release newer than ours, if one is out.
+#[tauri::command]
+async fn check_update(app: AppHandle, available: State<'_, Available>) -> Result<Option<String>, CommandError> {
+    let update = updater(&app)?.check().await.map_err(CommandError::failed)?;
+    let version = update.as_ref().map(|update| update.version.clone());
+
+    *available.0.lock().unwrap() = update;
+    Ok(version)
+}
+
+/// Installs the release `check_update` found the way we were installed (the plugin knows the AppImage, deb, rpm, MSI,
+/// NSIS or app bundle we came in) and starts it. That closes every connection, as quitting does.
+#[tauri::command]
+async fn update(app: AppHandle, available: State<'_, Available>) -> Result<(), CommandError> {
+    let update = available.0.lock().unwrap().clone();
+    let update = update.ok_or_else(|| CommandError::failed("There's no update to install."))?;
+
+    log::info!("Updating to {}", update.version);
+    update.download_and_install(|_, _| {}, || {}).await.map_err(CommandError::failed)?;
+    app.restart()
+}
+
+/// The verify build asks the server `OOBLIN_UPDATES` names, on this machine, and never GitHub. Another debug build is
+/// one we run from source, which has nothing to update.
+fn updater(app: &AppHandle) -> Result<tauri_plugin_updater::Updater, CommandError> {
+    use tauri_plugin_updater::UpdaterExt;
+
+    let builder = app.updater_builder();
+    let builder = if IS_VERIFY_BUILD {
+        let url =
+            std::env::var("OOBLIN_UPDATES").map_err(|_| CommandError::failed("OOBLIN_UPDATES names no server."))?;
+        builder.endpoints(vec![url.parse().map_err(CommandError::failed)?]).map_err(CommandError::failed)?
+    } else if cfg!(debug_assertions) {
+        return Err(CommandError::failed("A development build doesn't update itself."));
+    } else {
+        builder
+    };
+
+    builder.build().map_err(CommandError::failed)
+}
+
 /// What the webview gets when a command fails: always a message, and both fingerprints when the certificate changed.
 /// `Unreachable` means the device stopped answering, even to a second try, `Consent` that someone at it has to read out
 /// a code first (see `consent_start`), `Ended` that it ended a session on purpose, which we do not open again
@@ -639,9 +684,11 @@ fn main() {
                 .with_state_flags(StateFlags::SIZE | StateFlags::POSITION | StateFlags::MAXIMIZED)
                 .build(),
         )
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .manage(Launch(args.into()))
         .manage(Discovery::default())
         .manage(Picked::default())
+        .manage(Available::default())
         // NOTE: The webview never holds a socket or a stored password, it calls these commands instead.
         .invoke_handler(tauri::generate_handler![
             launch,
@@ -693,7 +740,9 @@ fn main() {
             title,
             fullscreen,
             grow,
-            save_log
+            save_log,
+            check_update,
+            update
         ])
         .build(tauri::generate_context!())
         .expect("the Tauri runtime starts")

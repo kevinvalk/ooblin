@@ -26,5 +26,11 @@
   "bundle": {
     "active": true,
     "icon": ["icons/32x32.png", "icons/128x128.png", "icons/128x128@2x.png", "icons/icon.icns", "icons/icon.ico"]
+  },
+  "plugins": {
+    "updater": {
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDZFQkY5MkZFM0ZFNDUyODUKUldTRlV1US8vcEsvYnE0NE53N2FsNkp1K2s2anVkUU9UcFdVSlp1SnV4V3p4Vk1jOS93d2pzRHMK",
+      "endpoints": ["https://github.com/kevinvalk/ooblin/releases/latest/download/latest.json"]
+    }
   }
 }

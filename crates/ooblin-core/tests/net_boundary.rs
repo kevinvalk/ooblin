@@ -45,12 +45,14 @@ fn only_net_touches_the_network() {
 }
 
 /// The app's manifest says the same by what it depends on. None of its dependencies is a way onto the network of its
-/// own, but Tauri's to our own window and the verify build's bridge. A name can hide in a source but not here, so we
-/// weigh a new one before it joins them.
+/// own, but Tauri's to our own window, the verify build's bridge and the updater's to our releases on GitHub, which
+/// only takes what our key signed. reqwest is there only for the updater's TLS, the app never calls it. A name can hide
+/// in a source but not here, so we weigh a new one before it joins them.
 #[test]
 fn the_app_depends_on_what_we_looked_at() {
-    let looked_at = "clap futures-util keyring log ooblin-core rfd serde serde_json tauri tauri-plugin-log \
-        tauri-plugin-mcp-bridge tauri-plugin-opener tauri-plugin-single-instance tauri-plugin-window-state tokio ts-rs";
+    let looked_at = "clap futures-util keyring log ooblin-core reqwest rfd serde serde_json tauri tauri-plugin-log \
+        tauri-plugin-mcp-bridge tauri-plugin-opener tauri-plugin-single-instance tauri-plugin-updater \
+        tauri-plugin-window-state tokio ts-rs";
     let manifest = fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("../ooblin/Cargo.toml")).unwrap();
 
     let dependencies = manifest.lines().skip_while(|line| *line != "[dependencies]").skip(1);
