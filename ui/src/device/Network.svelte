@@ -1,7 +1,5 @@
-<!-- A device's network ports, AMT's and a BMC's alike: its link, IPv4 and IPv6. While loading we show one wired
-     port. -->
 <script module lang="ts">
-  /** How an IPv4 address is set, in words, AMT's settings' too. */
+  /** How an IPv4 address is set, in words. The settings of AMT say it the same way. */
   export const CONFIGURATIONS = { Dhcp: "Automatic (DHCP)", Os: "Same as the OS", Manual: "Manual" };
 </script>
 
@@ -11,15 +9,16 @@
   let { ports }: { ports?: Port[] } = $props();
 </script>
 
+<!-- While loading we show one wired port. -->
 {#each ports ?? [undefined] as port (port?.mac)}
   <section>
-    <h2>{port?.wireless ? "Wireless network" : "Wired network"}</h2>
+    <h2>{port?.is_wireless ? "Wireless network" : "Wired network"}</h2>
     <div class="cards">
       <div class="@3xl:col-span-2">
         <h3>Link</h3>
         <dl class="card">
           <div><dt>MAC address</dt><dd class="font-mono">{port?.mac}</dd></div>
-          <div><dt>Status</dt><dd>{port && (port.link_up ? (port.mbps ? `Up, ${port.mbps} Mbit/s` : "Up") : "Down")}</dd></div>
+          <div><dt>Status</dt><dd>{port && (port.is_link_up ? (port.mbps ? `Up, ${port.mbps} Mbit/s` : "Up") : "Down")}</dd></div>
         </dl>
       </div>
       <div>

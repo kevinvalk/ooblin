@@ -1,5 +1,3 @@
-<!-- What IPMI says of the hardware: the FRU's chassis, board and product, as the OS reads them too. They change in
-     Settings. -->
 <script lang="ts">
   import type { Fru } from "../../bindings/core";
 
@@ -32,7 +30,7 @@
       <div><dt>Product name</dt><dd>{data?.board?.product}</dd></div>
       <div><dt>Serial number</dt><dd>{data?.board?.serial_number}</dd></div>
       <div><dt>Part number</dt><dd>{data?.board?.part_number}</dd></div>
-      <div><dt>Manufactured</dt><dd>{data?.board?.manufactured && new Date(data.board.manufactured * 1000).toLocaleDateString()}</dd></div>
+      <div><dt>Manufactured</dt><dd>{data?.board?.manufactured_at && new Date(data.board.manufactured_at * 1000).toLocaleDateString()}</dd></div>
     </dl>
   </section>
 {/if}

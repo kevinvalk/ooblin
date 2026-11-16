@@ -1,5 +1,3 @@
-//! Alarms: when AMT wakes the device, once or over and over. Like MeshCommander, an alarm's name is its ID too.
-
 use instant_xml::ToXml;
 use jiff::{SpanRelativeTo, Timestamp, Unit};
 use serde::{Deserialize, Serialize};
@@ -13,42 +11,46 @@ use crate::{Error, Result};
 #[ts(export, export_to = "core.ts")]
 pub struct Alarm {
     pub name: String,
-    /// Unix seconds, of the next time.
-    pub at: i64,
-    /// How long until it goes off again, none for once.
+    /// When it goes off next, in Unix seconds.
+    pub next_at: i64,
+    /// How long until it goes off again, 0 for an alarm that goes off once.
     pub every_minutes: u32,
     /// Whether AMT forgets it once it went off for the last time.
-    pub forget: bool,
+    pub is_forget: bool,
 }
 
 impl Client {
     pub async fn alarms(&mut self) -> Result<Vec<Alarm>> {
         let alarms = self.enumerate("IPS_AlarmClockOccurrence").await?;
+
         Ok(alarms
             .iter()
             .map(|alarm| Alarm {
                 name: alarm.text("ElementName"),
-                at: alarm.parse::<Timestamp>("StartTime").map_or(0, |at| at.as_second()),
-                // ISO 8601, `P1DT2H3M`.
-                every_minutes: alarm.parse::<jiff::Span>("Interval").map_or(0, |every| {
-                    every.total((Unit::Minute, SpanRelativeTo::days_are_24_hours())).unwrap_or(0.0) as u32
+                next_at: alarm.parse::<Timestamp>("StartTime").map_or(0, |start_time| start_time.as_second()),
+                // AMT writes the interval as an ISO 8601 duration, `P1DT2H3M`.
+                every_minutes: alarm.parse::<jiff::Span>("Interval").map_or(0, |interval| {
+                    interval.total((Unit::Minute, SpanRelativeTo::days_are_24_hours())).unwrap_or(0.0) as u32
                 }),
-                forget: alarm.get("DeleteOnCompletion") == Some("true"),
+                is_forget: alarm.get("DeleteOnCompletion") == Some("true"),
             })
             .collect())
     }
 
-    /// AMT refuses one in the past.
+    /// NOTE: AMT refuses an alarm in the past.
     pub(super) async fn add_alarm(&mut self, alarm: &Alarm) -> Result<()> {
-        let at = Timestamp::from_second(alarm.at).map_err(|error| Error::Protocol(error.to_string()))?;
-        let every = alarm.every_minutes;
+        let start_time = Timestamp::from_second(alarm.next_at).map_err(|error| Error::Protocol(error.to_string()))?;
+        let minutes = alarm.every_minutes;
+
+        // Like MeshCommander, we use an alarm's name as its ID too.
         let template = AlarmTemplate {
             InstanceID: &alarm.name,
             ElementName: &alarm.name,
-            StartTime: StartTime { Datetime: &at.strftime("%Y-%m-%dT%H:%M:%SZ").to_string() },
-            Interval: Interval { Interval: &format!("P{}DT{}H{}M", every / 1440, every / 60 % 24, every % 60) },
-            DeleteOnCompletion: alarm.forget,
+            StartTime: StartTime { Datetime: &start_time.strftime("%Y-%m-%dT%H:%M:%SZ").to_string() },
+            Interval: Interval { Interval: &format!("P{}DT{}H{}M", minutes / 1440, minutes / 60 % 24, minutes % 60) },
+            DeleteOnCompletion: alarm.is_forget,
         };
+
         self.invoke(&AddAlarm { AlarmTemplate: template }).await?;
         Ok(())
     }
@@ -58,7 +60,7 @@ impl Client {
     }
 }
 
-// From go-wsman-messages' `amt/alarmclock`, Copyright Intel Corporation, Apache-2.0.
+// The inputs below are from go-wsman-messages' `amt/alarmclock`, Copyright Intel Corporation, Apache-2.0.
 
 const ALARM_CLOCK: &str = "http://intel.com/wbem/wscim/1/amt-schema/1/AMT_AlarmClockService";
 const OCCURRENCE: &str = "http://intel.com/wbem/wscim/1/ips-schema/1/IPS_AlarmClockOccurrence";
@@ -72,7 +74,7 @@ struct AddAlarm<'a> {
 
 method!(AddAlarm<'_>, ALARM_CLOCK);
 
-/// An `IPS_AlarmClockOccurrence` in the alarm clock's namespace.
+// NOTE: This is an `IPS_AlarmClockOccurrence`, but in the alarm clock's namespace.
 #[derive(ToXml)]
 #[xml(ns(ALARM_CLOCK))]
 struct AlarmTemplate<'a> {

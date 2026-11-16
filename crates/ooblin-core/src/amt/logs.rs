@@ -1,7 +1,3 @@
-//! The event log and the audit log. Decoding follows MeshCommander's `amt-0.2.0.js` (Intel Corporation, Apache-2.0),
-//! the method inputs are go-wsman-messages' (`pkg/wsman/amt/messagelog`, `auditlog`, Copyright Intel Corporation,
-//! Apache-2.0). Times are UTC, as AMT keeps them and MeshCommander shows them.
-
 use base64::prelude::{BASE64_STANDARD, Engine as _};
 use instant_xml::ToXml;
 use serde::Serialize;
@@ -15,8 +11,8 @@ use crate::{Error, Event, Result, Severity};
 #[derive(Debug, Serialize, TS)]
 #[ts(export, export_to = "core.ts")]
 pub struct AuditRecord {
-    /// Unix seconds.
-    pub time: u32,
+    /// When it happened, in Unix seconds.
+    pub occurred_at: u32,
     pub application: String,
     pub event: String,
     pub initiator: String,
@@ -24,26 +20,32 @@ pub struct AuditRecord {
     pub details: String,
 }
 
-/// Both logs come newest first: AMT keeps its event log that way round, its audit log the other. It hands them over in
-/// a page or two (AMT 19: 235 events, 76 audit records in one).
+// NOTE: We give both logs newest first. AMT keeps its event log that way round and its audit log the other. It hands
+// them over in a page or two (AMT 19: 235 events, 76 audit records in one). Times are UTC, as AMT keeps them and
+// MeshCommander shows them. We decode the records the way MeshCommander's `amt-0.2.0.js` does (Intel Corporation,
+// Apache-2.0).
 impl Client {
     pub async fn event_log(&mut self) -> Result<Vec<Event>> {
         let first = match self.query(&PositionToFirstRecord).await {
-            // 2 is NoRecordExists.
-            Err(Error::Method { code, .. }) if code == "2" => return Ok(Vec::new()),
+            Err(Error::Method { code, .. }) if code == "2" => return Ok(Vec::new()), // NoRecordExists
             first => first?,
         };
+
         let mut iteration = first.text("IterationIdentifier");
         let (mut events, mut pages) = (Vec::new(), 0..PAGES);
         loop {
             pages.next().ok_or_else(endless)?;
-            // 390 is the most AMT returns at once.
-            let page = self.query(&GetRecords { IterationIdentifier: &iteration, MaxReadRecords: 390 }).await?;
+
+            // 390 is the most records AMT returns at once.
+            let get_records = GetRecords { IterationIdentifier: &iteration, MaxReadRecords: 390 };
+            let page = self.query(&get_records).await?;
             let records: Vec<_> = page.all("RecordArray").collect();
             events.extend(records.iter().filter_map(|record| event(&base64(record)?)));
+
             if page.get("NoMoreRecords") == Some("true") || records.is_empty() {
                 return Ok(events);
             }
+
             iteration = page.text("IterationIdentifier");
         }
     }
@@ -52,10 +54,12 @@ impl Client {
         let (mut records, mut read, mut pages) = (Vec::new(), 0, 0..PAGES);
         loop {
             pages.next().ok_or_else(endless)?;
+
             let page = self.query(&ReadRecords { StartIndex: read + 1 }).await?;
             let page_records: Vec<_> = page.all("EventRecords").collect();
             records.extend(page_records.iter().filter_map(|record| audit_record(&base64(record)?)));
             read += page_records.len();
+
             let total = page.parse("TotalRecordCount").unwrap_or(0);
             if read >= total || page_records.is_empty() {
                 records.reverse();
@@ -64,6 +68,9 @@ impl Client {
         }
     }
 }
+
+// The inputs below are go-wsman-messages' (`pkg/wsman/amt/messagelog`, `auditlog`), Copyright Intel Corporation,
+// Apache-2.0.
 
 const MESSAGE_LOG: &str = "http://intel.com/wbem/wscim/1/amt-schema/1/AMT_MessageLog";
 const AUDIT_LOG: &str = "http://intel.com/wbem/wscim/1/amt-schema/1/AMT_AuditLog";
@@ -95,16 +102,17 @@ fn base64(record: &str) -> Option<Vec<u8>> {
     BASE64_STANDARD.decode(record).ok()
 }
 
-/// A 21-byte PET record, little-endian.
+/// Decodes a 21-byte PET record, which is little-endian.
 fn event(record: &[u8]) -> Option<Event> {
     let record: [u8; 21] = record.get(..21)?.try_into().ok()?;
     let [t0, t1, t2, t3, _, sensor, _, offset, _, severity, _, entity, _, data @ ..] = record;
-    let time = u32::from_le_bytes([t0, t1, t2, t3]);
-    if time == 0 || time == u32::MAX {
+    let occurred_at = u32::from_le_bytes([t0, t1, t2, t3]);
+    if occurred_at == 0 || occurred_at == u32::MAX {
         return None;
     }
+
     Some(Event {
-        time,
+        occurred_at,
         source: ENTITIES.get(usize::from(entity)).copied().unwrap_or("Unknown").to_owned(),
         description: describe(sensor, offset, data),
         severity: match severity {
@@ -115,27 +123,28 @@ fn event(record: &[u8]) -> Option<Event> {
     })
 }
 
-fn describe(sensor: u8, offset: u8, d: [u8; 8]) -> String {
+fn describe(sensor: u8, offset: u8, data: [u8; 8]) -> String {
     let unknown = || format!("Unknown Sensor Type #{sensor}");
-    let ocr = d[..2] == [170, 48];
-    let erase = d[..2] == [170, 64];
+    let is_one_click_recovery = data[..2] == [170, 48];
+    let is_platform_erase = data[..2] == [170, 64];
+
     match sensor {
-        15 if d[0] == 235 => "Invalid Data".into(),
-        15 if offset == 0 => nth(FIRMWARE_ERRORS, d[1]).into(),
-        15 if offset == 3 && ocr => format!("One Click Recovery: {}", nth(OCR_ERRORS, d[2])),
-        15 if offset == 3 && erase => match d[2] {
+        15 if data[0] == 235 => "Invalid Data".into(),
+        15 if offset == 0 => nth(FIRMWARE_ERRORS, data[1]).into(),
+        15 if offset == 3 && is_one_click_recovery => format!("One Click Recovery: {}", nth(OCR_ERRORS, data[2])),
+        15 if offset == 3 && is_platform_erase => match data[2] {
             1 => "Got an error erasing Device SSD".into(),
             2 => "Erasing Device TPM is not supported".into(),
             3 => "Reached Max Counter".into(),
             _ => unknown(),
         },
         15 if offset == 3 => "OEM Specific Firmware Error event".into(),
-        15 if offset == 5 && ocr => match d[2] {
-            1 => format!("One Click Recovery: CSME Boot Option {}:{} added successfully", d[3], ocr_source(d[3])),
-            0..7 => format!("One Click Recovery: {}", nth(OCR_PROGRESS, d[2])),
-            _ => format!("One Click Recovery: Unknown progress event {}", d[2]),
+        15 if offset == 5 && is_one_click_recovery => match data[2] {
+            1 => format!("One Click Recovery: CSME Boot Option {}:{} added successfully", data[3], ocr_source(data[3])),
+            0..7 => format!("One Click Recovery: {}", nth(OCR_PROGRESS, data[2])),
+            _ => format!("One Click Recovery: Unknown progress event {}", data[2]),
         },
-        15 if offset == 5 && erase => match (d[2], d[3]) {
+        15 if offset == 5 && is_platform_erase => match (data[2], data[3]) {
             (1, 2) => "Started erasing Device SSD".into(),
             (1, 3) => "Started erasing Device TPM".into(),
             (1, 5) => "Started erasing Device BIOS Reload of Golden Config".into(),
@@ -148,16 +157,16 @@ fn describe(sensor: u8, offset: u8, d: [u8; 8]) -> String {
             _ => unknown(),
         },
         15 if offset == 5 => "OEM Specific Firmware Progress event".into(),
-        15 => nth(FIRMWARE_PROGRESS, d[1]).into(),
-        18 if d[0] == 170 => format!(
+        15 => nth(FIRMWARE_PROGRESS, data[1]).into(),
+        18 if data[0] == 170 => format!(
             "Agent watchdog {:02X}{:02X}{:02X}{:02X}-{:02X}{:02X}-... changed to {}",
-            d[4],
-            d[3],
-            d[2],
-            d[1],
-            d[6],
-            d[5],
-            match d[7] {
+            data[4],
+            data[3],
+            data[2],
+            data[1],
+            data[6],
+            data[5],
+            match data[7] {
                 1 => "Not Started",
                 2 => "Stopped",
                 4 => "Running",
@@ -167,39 +176,42 @@ fn describe(sensor: u8, offset: u8, d: [u8; 8]) -> String {
             }
         ),
         5 if offset == 0 => "Case intrusion".into(),
-        192 if offset == 0 && ocr && d[2] < 4 => [
+        192 if offset == 0 && is_one_click_recovery && data[2] < 4 => [
             "A remote Serial Over LAN session was established.",
             "Remote Serial Over LAN session finished. User control was restored.",
             "A remote IDE-Redirection session was established.",
             "Remote IDE-Redirection session finished. User control was restored.",
-        ][usize::from(d[2])]
+        ][usize::from(data[2])]
         .into(),
         36 => {
-            let nic = if d[0] == 0xAA { "wired".into() } else { format!("#{}", d[0]) };
-            match u32::from_be_bytes([d[1], d[2], d[3], d[4]]) {
+            let nic = if data[0] == 0xAA { "wired".into() } else { format!("#{}", data[0]) };
+            match u32::from_be_bytes([data[1], data[2], data[3], data[4]]) {
                 4294967293 => format!("All received packet filter was matched on {nic} interface."),
                 4294967292 => format!("All outbound packet filter was matched on {nic} interface."),
                 4294967290 => format!("Spoofed packet filter was matched on {nic} interface."),
                 handle => format!("Filter {handle} was matched on {nic} interface."),
             }
         }
-        192 => match d[2] {
+        192 => match data[2] {
             0 => "Security policy invoked. Some or all network traffic (TX) was stopped.".into(),
             2 => "Security policy invoked. Some or all network traffic (RX) was stopped.".into(),
             _ => "Security policy invoked.".into(),
         },
-        193 => match d[..4] {
+        193 => match data[..4] {
             [0xAA, 0x30, 0x00, 0x00] => "User request for remote connection.".into(),
             [0xAA, 0x20, 0x03, 0x01] => "EAC error: attempt to get posture while NAC in Intel® AMT is disabled.".into(),
             [0xAA, 0x20, 0x04, 0x00] => "HWA Error: general error".into(),
             _ => unknown(),
         },
         6 => {
-            format!("Authentication failed {} times. The system may be under attack.", u16::from_le_bytes([d[1], d[2]]))
+            format!(
+                "Authentication failed {} times. The system may be under attack.",
+                u16::from_le_bytes([data[1], data[2]])
+            )
         }
         30 => "No bootable media".into(),
         32 => "Operating system lockup or power interrupt".into(),
-        35 if d[0] == 64 => "BIOS POST (Power On Self-Test) Watchdog Timeout.".into(),
+        35 if data[0] == 64 => "BIOS POST (Power On Self-Test) Watchdog Timeout.".into(),
         35 => "System boot failure".into(),
         37 => "System firmware started (at least one CPU is properly executing).".into(),
         _ => unknown(),
@@ -219,29 +231,31 @@ fn ocr_source(source: u8) -> &'static str {
     }
 }
 
-/// Big-endian: app and event ID, the initiator, time, network address and extended data, the last three length-prefixed.
+/// Decodes an audit record, which is big-endian: the application and event ID, the initiator, the time, the network
+/// address and the extended data. The initiator, address and extended data are length-prefixed.
 fn audit_record(record: &[u8]) -> Option<AuditRecord> {
     let (&[a0, a1, e0, e1, kind], mut rest) = record.split_first_chunk::<5>()?;
     let (application, event) = (u16::from_be_bytes([a0, a1]), u16::from_be_bytes([e0, e1]));
     let id = u32::from(application) * 100 + u32::from(event);
+
     let initiator = match kind {
         0 => text(prefixed(&mut rest)?),
         1 => {
-            // We skip the 4-byte "user in domain" flag.
-            rest = rest.get(4..)?;
+            rest = rest.get(4..)?; // We skip the 4-byte "user in domain" flag.
             sid(prefixed(&mut rest)?)?
         }
         2 => "Local".into(),
         3 => "KVM Default Port".into(),
         _ => return None,
     };
+
     let (&time, rest) = rest.split_first_chunk::<4>()?;
-    // We skip the location type byte.
-    let mut rest = rest.get(1..)?;
+    let mut rest = rest.get(1..)?; // We skip the location type byte.
     let address = text(prefixed(&mut rest)?).replace("0000:0000:0000:0000:0000:0000:0000:0001", "::1");
     let extended = prefixed(&mut rest)?;
+
     Some(AuditRecord {
-        time: u32::from_be_bytes(time),
+        occurred_at: u32::from_be_bytes(time),
         application: audit_name(application.into()).map_or_else(|| format!("#{application}"), str::to_owned),
         event: audit_name(id).map_or_else(|| format!("#{event}"), str::to_owned),
         initiator,
@@ -252,9 +266,10 @@ fn audit_record(record: &[u8]) -> Option<AuditRecord> {
 
 /// Takes a byte length and that many bytes off the front.
 fn prefixed<'a>(bytes: &mut &'a [u8]) -> Option<&'a [u8]> {
-    let (&len, rest) = bytes.split_first()?;
-    let (value, rest) = rest.split_at_checked(len.into())?;
+    let (&length, rest) = bytes.split_first()?;
+    let (value, rest) = rest.split_at_checked(length.into())?;
     *bytes = rest;
+
     Some(value)
 }
 
@@ -265,16 +280,21 @@ fn text(bytes: &[u8]) -> String {
 /// A Windows SID in its `S-1-5-21-…` form.
 fn sid(bytes: &[u8]) -> Option<String> {
     let (revision, authority) = (bytes.first()?, bytes.get(7)?);
-    let subs = bytes[8..].as_chunks().0.iter().map(|&sub| format!("-{}", u32::from_le_bytes(sub)));
-    Some(format!("S-{revision}-{authority}{}", subs.collect::<String>()))
+    let sub_authorities =
+        bytes[8..].as_chunks().0.iter().map(|&sub_authority| format!("-{}", u32::from_le_bytes(sub_authority)));
+
+    Some(format!("S-{revision}-{authority}{}", sub_authorities.collect::<String>()))
 }
 
-/// MeshCommander only decodes some events' extended data.
+/// The extended data of an audit event in words. `None` for most events, as MeshCommander only decodes some and we
+/// follow it.
 fn details(id: u32, data: &[u8]) -> Option<String> {
-    let byte = |i: usize| data.get(i).map(|&b| usize::from(b));
     const AUTH: [&str; 3] = ["NoAuth", "ServerAuth", "MutualAuth"];
     const OPT_IN: [&str; 3] = ["None", "KVM", "All"];
+
+    let byte = |i: usize| data.get(i).map(|&byte| usize::from(byte));
     let pick = |table: &[&str], i: usize| table.get(byte(i)?).map(|value| value.to_string());
+
     match id {
         1602 | 1604 if byte(0)? == 0 => Some(text(data.get(2..)?.get(..byte(1)?)?)),
         1603 if byte(1)? == 0 => Some(text(data.get(3..)?)),
@@ -290,11 +310,13 @@ fn details(id: u32, data: &[u8]) -> Option<String> {
         }
         1619 => pick(&["BIOS", "MEBx", "Local MEI", "Local WSMAN", "Remote WSAMN"], 0),
         1900 => {
-            let v: Vec<_> = data.get(..16)?.as_chunks().0.iter().map(|&v| u16::from_be_bytes(v)).collect();
-            Some(format!("From {}.{}.{}.{} to {}.{}.{}.{}", v[0], v[1], v[2], v[3], v[4], v[5], v[6], v[7]))
+            let versions = data.get(..16)?.as_chunks().0.iter().map(|&part| u16::from_be_bytes(part));
+            let [a, b, c, d, e, f, g, h] = versions.collect::<Vec<_>>().try_into().ok()?;
+            Some(format!("From {a}.{b}.{c}.{d} to {e}.{f}.{g}.{h}"))
         }
         2100 => {
-            Some(jiff::Timestamp::from_second(u32::from_be_bytes(*data.first_chunk::<4>()?).into()).ok()?.to_string())
+            let seconds = u32::from_be_bytes(*data.first_chunk::<4>()?);
+            Some(jiff::Timestamp::from_second(seconds.into()).ok()?.to_string())
         }
         3000 => Some(format!("From {} to {}", pick(&OPT_IN, 0)?, pick(&OPT_IN, 1)?)),
         3001 => pick(&["Success", "Failed 3 times"], 0),
@@ -426,7 +448,7 @@ const OCR_ERRORS: &[&str] = &[
     "HTTPS Boot File not found",
 ];
 
-/// MeshCommander's names for AMT's realms, by number. Unnamed ones are reserved.
+// MeshCommander's names for AMT's realms, by number. The unnamed ones are reserved.
 const REALMS: &[&str] = &[
     "",
     "",
@@ -455,7 +477,7 @@ const REALMS: &[&str] = &[
     "Local System",
 ];
 
-/// Applications by ID, their events by application ID * 100 + event ID.
+/// The name of an application by its ID, or of one of its events by application ID * 100 + event ID.
 fn audit_name(id: u32) -> Option<&'static str> {
     Some(match id {
         16 => "Security Admin",

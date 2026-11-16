@@ -1,5 +1,3 @@
-<!-- How the device is set up, in `Form`s. What can cut us off or lose something asks first. The footer says how it
-     went. -->
 <script lang="ts">
   import { Download, Plus, Trash2 } from "@lucide/svelte";
   import { invoke } from "@tauri-apps/api/core";
@@ -31,64 +29,67 @@
   }: {
     data?: Settings;
     connection: Connection;
-    /** Its name, or the address we reach it at. */
-    title: string;
-    say: (text: string, failed?: boolean) => void;
-    ask: (question: string, answers: string[], safe?: boolean) => Promise<string>;
+    title: string; // Its name, or the address we reach it at
+    say: (text: string, isFailed?: boolean) => void;
+    ask: (question: string, answers: string[], isSafe?: boolean) => Promise<string>;
     save: (done: string, change: Change) => Promise<boolean>;
     busy: boolean;
   } = $props();
-  /** Ours, as another device's settings may be open too. */
-  const id = $props.id();
+  const id = $props.id(); // Our own, as the settings of another device may be open too
 
   async function remoteAccess(fields: FormData, done: string) {
-    if (!data) return;
+    if (data === undefined) return;
+
     const was = data.remote_access;
     const access = {
       ...was,
-      kvm: was.kvm === null ? null : fields.has("kvm"),
-      sol: fields.has("sol"),
-      ider: fields.has("ider"),
+      is_kvm: was.is_kvm === null ? null : fields.has("kvm"),
+      is_sol: fields.has("sol"),
+      is_ider: fields.has("ider"),
       consent: (fields.get("consent") as Consent | null) ?? was.consent,
     };
     return save(done, { RemoteAccess: access });
   }
 
   async function recovery(fields: FormData, done: string) {
-    if (!data) return;
+    if (data === undefined) return;
+
     const was = data.recovery;
     const recovery = {
-      one_click: was.one_click === null ? null : fields.has("one_click"),
-      platform_erase: was.platform_erase === null ? null : fields.has("platform_erase"),
+      is_one_click: was.is_one_click === null ? null : fields.has("one_click"),
+      is_platform_erase: was.is_platform_erase === null ? null : fields.has("platform_erase"),
     };
     return save(done, { Recovery: recovery });
   }
 
   /** The name, ping and how long AMT stays awake are one setting in AMT, which `change` changes some of. */
   async function general(change: Partial<General>, done: string) {
-    if (!data) return;
+    if (data === undefined) return;
+
     return save(done, { General: { ...data.general, ...change } });
   }
 
   const WHEN = [
-    ["on", "On"],
-    ["asleep", "Asleep or off"],
-    ["on_battery", "On battery"],
-    ["asleep_on_battery", "Asleep or off on battery"],
+    ["is_on", "On"],
+    ["is_asleep", "Asleep or off"],
+    ["is_on_battery", "On battery"],
+    ["is_asleep_on_battery", "Asleep or off on battery"],
   ] as const;
 
   async function availability(fields: FormData) {
-    if (!data) return;
+    if (data === undefined) return;
+
     const was = data.network.available;
     const available = Object.fromEntries(WHEN.map(([when]) => [when, fields.has(when)])) as Availability;
-    const lost = WHEN.some(([when]) => was[when] && !available[when]);
+    const isLost = WHEN.some(([when]) => was[when] && !available[when]);
     const question = "AMT goes off the network then, and can't be reached until it's back on.";
-    if (lost && !(await ask(question, ["Turn off"]))) return;
+    if (isLost && (await ask(question, ["Turn off"])) === "") return;
+
     return save("Reachability saved.", { Availability: available });
   }
 
-  /** The IP forms' configurations while they're `edited`: only a manual one takes addresses. An edit outlasts the
-   * settings, which land again after every save, one that failed too. */
+  /** The configurations of the IP forms while they are `edited`, as only a manual one takes addresses. An edit outlasts
+   * the settings, which land again after every save, one that failed too. */
   let edited = $state<{ ipv4?: Configuration; ipv6?: Ipv6Configuration }>({});
   let ipv4Configuration = $derived(edited.ipv4 ?? data?.network.ipv4.configuration);
   let ipv6Configuration = $derived(edited.ipv6 ?? data?.network.ipv6.configuration);
@@ -106,7 +107,7 @@
     const addresses = Object.fromEntries(ADDRESSES.map(([name]) => [name, text(fields, `ipv4_${name}`)]));
     const ipv4 = { configuration: fields.get("ipv4") as Configuration, ...addresses } as Ipv4;
     const question = `AMT may get another address, which ${connection.host} doesn't reach.`;
-    if (await ask(question, ["Save"])) return save(done, { Ipv4: ipv4 });
+    if ((await ask(question, ["Save"])) !== "") return save(done, { Ipv4: ipv4 });
   }
 
   async function ipv6(fields: FormData, done: string) {
@@ -118,16 +119,18 @@
   async function addCertificate() {
     const extensions = ["pem", "crt", "cer", "der"];
     const path = await invoke<string | null>("pick", { kind: "Certificate", extensions });
-    if (!path) return;
-    const file = path.split(/[\\/]/).pop();
-    const question = `Add ${file} as a certificate, or as a trusted root: AMT then trusts the certificates it signs?`;
+    if (path === null) return;
+
+    const fileName = path.split(/[\\/]/).pop();
+    const question = `Add ${fileName} as a certificate, or as a trusted root: AMT then trusts the certificates it signs?`;
     const answer = await ask(question, ["Trusted root", "Certificate"], true);
-    if (answer) await save(`${file} added.`, { AddCertificate: { path, trusted_root: answer === "Trusted root" } });
+    if (answer !== "") await save(`${fileName} added.`, { AddCertificate: { path, is_trusted_root: answer === "Trusted root" } });
   }
 
   async function saveCertificate(certificate: Certificate) {
     const path = await invoke<string | null>("pick_save", { name: `${certificate.name}.pem` });
-    if (!path) return;
+    if (path === null) return;
+
     try {
       await invoke("save_certificate", { host: connection.host, id: certificate.id, path });
       say(`${certificate.name} saved.`);
@@ -137,64 +140,71 @@
   }
 
   async function deleteCertificate(certificate: Certificate) {
-    if (await ask(`Delete ${certificate.name} from ${title}?`, ["Delete"])) {
+    if ((await ask(`Delete ${certificate.name} from ${title}?`, ["Delete"])) !== "") {
       await save(`${certificate.name} deleted.`, { DeleteCertificate: certificate.id });
     }
   }
 
-  let alarmDialog: HTMLDialogElement;
+  let alarmDialogElement: HTMLDialogElement;
   const EVERY: Record<string, string> = { 0: "Not again", 60: "Every hour", 1440: "Every day", 10080: "Every week" };
   const every = (minutes: number) => EVERY[minutes]?.toLowerCase() ?? `every ${minutes} minutes`;
 
   /** A new alarm starts out tomorrow, at this hour. */
   function newAlarm() {
-    const form = alarmDialog.querySelector("form")!;
+    const form = alarmDialogElement.querySelector("form")!;
     form.reset();
+
     const tomorrow = new Date(Date.now() + 86_400_000);
     tomorrow.setMinutes(0, 0, 0);
-    // The field wants local time without a zone, which an ISO string shifted by the zone's offset is.
+    // The field wants local time without a zone, which an ISO string shifted by the offset of the zone is.
     tomorrow.setMinutes(-tomorrow.getTimezoneOffset());
     (form.elements.namedItem("at") as HTMLInputElement).value = tomorrow.toISOString().slice(0, 16);
-    alarmDialog.showModal();
+
+    alarmDialogElement.showModal();
   }
 
-  /** One that goes off once AMT forgets after. */
+  /** AMT forgets an alarm that goes off only once after it did. */
   async function addAlarm(event: SubmitEvent) {
+    // We close the dialog ourselves and only once the alarm is saved, else a failed save loses what was typed.
+    event.preventDefault();
+
     const fields = new FormData(event.currentTarget as HTMLFormElement);
     const name = text(fields, "name");
     const every_minutes = Number(fields.get("every"));
-    const alarm = { name, at: Math.floor(new Date(text(fields, "at")).getTime() / 1000), every_minutes, forget: !every_minutes };
-    await save(`Wake-up ${name} scheduled.`, { AddAlarm: alarm });
+    const alarm = { name, next_at: Math.floor(new Date(text(fields, "at")).getTime() / 1000), every_minutes, is_forget: every_minutes === 0 };
+    if (await save(`Wake-up ${name} scheduled.`, { AddAlarm: alarm })) alarmDialogElement.close();
   }
 
   async function deleteAlarm(name: string) {
-    if (await ask(`Cancel the wake-up ${name}?`, ["Cancel it"])) {
+    if ((await ask(`Cancel the wake-up ${name}?`, ["Cancel it"])) !== "") {
       await save(`Wake-up ${name} canceled.`, { DeleteAlarm: name });
     }
   }
 
-  /** The device's clock, ticking on from when we read it. */
+  /** The clock of the device, ticking on from when we read it. */
   let now = $state(Date.now());
   $effect(() => {
     if (data?.clock_offset == null) return;
+
     const ticking = setInterval(() => (now = Date.now()), 1000);
     return () => clearInterval(ticking);
   });
 
-  /** How far off the device's clock is, in the largest unit there are at least two of. */
+  /** How far off the clock of the device is, in the largest unit there are at least two of. */
   function offBy(offset: number) {
-    const off = Math.abs(offset);
+    const distance = Math.abs(offset);
     const units = { day: 86400, hour: 3600, minute: 60, second: 1 };
-    const [unit, seconds] = Object.entries(units).find(([, seconds]) => off >= 2 * seconds) ?? [];
-    if (!unit) return "as on this computer";
+    const [unit, seconds] = Object.entries(units).find(([, seconds]) => distance >= 2 * seconds) ?? [];
+    if (unit === undefined) return "as on this computer";
+
     const amount = new Intl.NumberFormat("en-US", { style: "unit", unit, unitDisplay: "long", maximumFractionDigits: 0 });
-    return `${amount.format(off / seconds!)} ${offset > 0 ? "ahead of" : "behind"} this computer`;
+    return `${amount.format(distance / seconds!)} ${offset > 0 ? "ahead of" : "behind"} this computer`;
   }
 
   const yes = (on?: boolean) => (on === undefined ? undefined : on ? "Yes" : "No");
 </script>
 
-<!-- A switch, which can't be switched where the device has none (`null`). -->
+<!-- A switch, which cannot be switched where the device has none (`null`). -->
 {#snippet check(name: string, label: string, checked: boolean | null | undefined, help?: string)}
   <div title={checked === null ? "This device can't." : help}>
     <label for="{id}-{name}">{label}</label>
@@ -228,17 +238,17 @@
   >
     {@const access = data?.remote_access}
     {@const recoveries = data?.recovery}
-    {@render check("kvm", "KVM", access?.kvm, "Seeing and using the device's screen.")}
-    {@render check("sol", "Serial console", access?.sol, "Its serial port, for consoles that write to one.")}
-    {@render check("ider", "Disk images", access?.ider, "Booting it from a disk image on this computer (IDE redirection).")}
-    <div title={access?.consent_fixed ? "In client control mode it's always asked for." : "Someone at the device reads out a code first."}>
+    {@render check("kvm", "KVM", access?.is_kvm, "Seeing and using the device's screen.")}
+    {@render check("sol", "Serial console", access?.is_sol, "Its serial port, for consoles that write to one.")}
+    {@render check("ider", "Disk images", access?.is_ider, "Booting it from a disk image on this computer (IDE redirection).")}
+    <div title={access?.is_consent_fixed ? "In client control mode it's always asked for." : "Someone at the device reads out a code first."}>
       <label for="{id}-consent">User consent</label>
-      <select id="{id}-consent" name="consent" class="field" disabled={access?.consent_fixed}>
+      <select id="{id}-consent" name="consent" class="field" disabled={access?.is_consent_fixed}>
         {@render choices(access?.consent, { None: "Not required", Kvm: "For KVM", All: "For all redirection" })}
       </select>
     </div>
-    {@render check("one_click", "One-Click Recovery", recoveries?.one_click, "Booting a recovery image, from the network or its disk.")}
-    {@render check("platform_erase", "Remote platform erase", recoveries?.platform_erase, "Erasing its disks and settings from here.")}
+    {@render check("one_click", "One-Click Recovery", recoveries?.is_one_click, "Booting a recovery image, from the network or its disk.")}
+    {@render check("platform_erase", "Remote platform erase", recoveries?.is_platform_erase, "Erasing its disks and settings from here.")}
   </Form>
 </section>
 
@@ -250,9 +260,9 @@
       <Form
         {busy}
         save={(fields, done, name) =>
-          name === "ping" ? general({ respond_to_ping: fields.has("ping") }, done) : availability(fields)}
+          name === "ping" ? general({ is_respond_to_ping: fields.has("ping") }, done) : availability(fields)}
       >
-        {@render check("ping", "Respond to ping", data?.general.respond_to_ping)}
+        {@render check("ping", "Respond to ping", data?.general.is_respond_to_ping)}
         <div title="When AMT is on the network: with the device on, or asleep or off, and on mains power or a battery.">
           <span class="text-muted">Reachable</span>
           <span class="flex flex-wrap gap-x-5 gap-y-1">
@@ -273,7 +283,7 @@
         {busy}
         save={(fields, done) =>
           general(
-            { name: text(fields, "name"), shared_with_os: fields.has("shared"), dns_update: fields.get("dns") as DnsUpdate },
+            { name: text(fields, "name"), is_shared_with_os: fields.has("shared"), dns_update: fields.get("dns") as DnsUpdate },
             done,
           )}
       >
@@ -290,7 +300,7 @@
             defaultValue={data?.general.name}
           />
         </div>
-        {@render check("shared", "Shared with the OS", data?.general.shared_with_os, "Whether the OS goes by the same name.")}
+        {@render check("shared", "Shared with the OS", data?.general.is_shared_with_os, "Whether the OS goes by the same name.")}
         <div title="Who puts AMT's name and address in DNS: the DHCP server when AMT asks it to, or AMT itself (DDNS).">
           <label for="{id}-dns">Registered in DNS by</label>
           <select id="{id}-dns" name="dns" class="field">
@@ -391,7 +401,7 @@
           <label for="{id}-power_policy">Power policy</label>
           <select id="{id}-power_policy" name="power_policy" class="field" disabled={data && data.power_policies.length < 2}>
             {@render choices(
-              data?.power_policies.find((policy) => policy.active)?.id,
+              data?.power_policies.find((policy) => policy.is_active)?.id,
               Object.fromEntries(data?.power_policies.map((policy) => [policy.id, policy.description]) ?? []),
             )}
           </select>
@@ -429,7 +439,7 @@
             <dd class="flex items-center gap-1">
               {#if alarm}
                 <span class="mr-auto">
-                  {new Date(alarm.at * 1000).toLocaleString() + (alarm.every_minutes ? `, then ${every(alarm.every_minutes)}` : "")}
+                  {new Date(alarm.next_at * 1000).toLocaleString() + (alarm.every_minutes ? `, then ${every(alarm.every_minutes)}` : "")}
                 </span>
                 <button type="button" class="btn-icon -my-1 size-7" title="Cancel…" onclick={() => deleteAlarm(alarm.name)}>
                   <Trash2 class="size-4" />
@@ -448,13 +458,13 @@
 <section>
   <h2>Security</h2>
   <div class="cards">
-    {#each data?.tls ?? [undefined] as tls (tls?.local)}
+    {#each data?.tls ?? [undefined] as tls (tls?.is_local)}
       <div title="As AMT was set up: changing it would lock us out, or isn't supported.">
-        <h3>{tls && (tls.local ? "TLS on the device" : "TLS on the network")}</h3>
+        <h3>{tls && (tls.is_local ? "TLS on the device" : "TLS on the network")}</h3>
         <dl class="card">
-          <div><dt>On</dt><dd>{yes(tls?.enabled)}</dd></div>
-          <div><dt>Mutual</dt><dd>{yes(tls?.mutual)}</dd></div>
-          <div><dt>Without TLS too</dt><dd>{tls && (tls.plain_supported ? yes(tls.plain_too) : "Not supported")}</dd></div>
+          <div><dt>On</dt><dd>{yes(tls?.is_enabled)}</dd></div>
+          <div><dt>Mutual</dt><dd>{yes(tls?.is_mutual)}</dd></div>
+          <div><dt>Without TLS too</dt><dd>{tls && (tls.is_plain_supported ? yes(tls.is_plain_too) : "Not supported")}</dd></div>
         </dl>
       </div>
     {/each}
@@ -478,8 +488,8 @@
             <dd class="flex items-center gap-1">
               {#if certificate}
                 <span class="mr-auto">
-                  {(certificate.trusted_root ? "Trusted root" : certificate.read_only ? "AMT's own" : "Certificate") +
-                    (certificate.in_use ? ", used by TLS" : "")}
+                  {(certificate.is_trusted_root ? "Trusted root" : certificate.is_read_only ? "AMT's own" : "Certificate") +
+                    (certificate.is_in_use ? ", used by TLS" : "")}
                 </span>
                 <button
                   type="button"
@@ -492,8 +502,8 @@
                 <button
                   type="button"
                   class="btn-icon -my-1 size-7"
-                  disabled={certificate.read_only || certificate.in_use}
-                  title={certificate.read_only || certificate.in_use ? "AMT keeps this one." : "Delete…"}
+                  disabled={certificate.is_read_only || certificate.is_in_use}
+                  title={certificate.is_read_only || certificate.is_in_use ? "AMT keeps this one." : "Delete…"}
                   onclick={() => deleteCertificate(certificate)}
                 >
                   <Trash2 class="size-4" />
@@ -509,7 +519,7 @@
   </div>
 </section>
 
-<dialog bind:this={alarmDialog}>
+<dialog bind:this={alarmDialogElement}>
   <form method="dialog" class="grid gap-4" onsubmit={addAlarm}>
     <p class="font-medium">Schedule a wake-up</p>
     <p class="text-muted">AMT turns {title} on then, or wakes it from sleep.</p>
@@ -525,7 +535,7 @@
       </select>
     </label>
     <div class="flex justify-end gap-2">
-      <button type="button" class="btn btn-secondary" onclick={() => alarmDialog.close()}>Cancel</button>
+      <button type="button" class="btn btn-secondary" onclick={() => alarmDialogElement.close()}>Cancel</button>
       <button class="btn btn-primary">Schedule</button>
     </div>
   </form>

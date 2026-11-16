@@ -1,5 +1,3 @@
-<!-- The server's settings a BMC keeps over IPMI, any flavor's: what it does when power comes back, and how fast its
-     serial console runs. Each saves as it changes; one the BMC doesn't say can't change. -->
 <script lang="ts">
   import type { PowerRestore, SolSettings } from "../../bindings/core";
   import Form, { select } from "../Form.svelte";
@@ -33,6 +31,7 @@
         : { SolBitRate: Number(fields.get("bit_rate")) },
     )}
 >
+  <!-- A setting the BMC does not say gets no options, so it cannot change. -->
   {@render select(
     id,
     "restore",

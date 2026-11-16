@@ -1,14 +1,10 @@
-//! Devices that say something else than the ones we recorded: every fixture with a few of its files garbled, replayed
-//! by the mock, as each flavor it can be logged in to as. Whatever a device says, we answer with an error or with what we could read, never with a panic and
-//! never by waiting forever. `GARBLED=500 cargo test --test garbled` tries more of them than a push needs.
-
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use mock::{Amt, Bmc, PASSWORD};
 use ooblin_core::{Client, Flavor};
 
-/// Numbers that follow from their seed alone (xorshift), so a round that fails can be had again.
+/// We want numbers that follow from their seed alone (xorshift), so that a round that fails can be had again.
 struct Random(u64);
 
 impl Random {
@@ -24,8 +20,8 @@ impl Random {
     }
 }
 
-/// Bytes as a device with a fault, or another firmware, might send them: cut short, blank, a few changed, more after
-/// them, or something else altogether.
+/// Changes bytes into what a device with a fault, or another firmware, might send: cut short, blank, a few changed,
+/// more after them, or something else altogether.
 fn garble(random: &mut Random, bytes: &mut Vec<u8>) {
     match random.below(6) {
         0 => bytes.truncate(random.below(bytes.len() + 1)),
@@ -33,8 +29,8 @@ fn garble(random: &mut Random, bytes: &mut Vec<u8>) {
         2 => bytes.fill(0),
         3 => {
             for _ in 0..=random.below(6) {
-                let at = random.below(bytes.len());
-                if let Some(byte) = bytes.get_mut(at) {
+                let index = random.below(bytes.len());
+                if let Some(byte) = bytes.get_mut(index) {
                     *byte = random.next() as u8;
                 }
             }
@@ -44,13 +40,15 @@ fn garble(random: &mut Random, bytes: &mut Vec<u8>) {
     }
 }
 
-/// A value in XML or JSON swapped for one a parser might trip over.
+/// Swaps a value in XML or JSON for one a parser might trip over.
 fn garble_value(random: &mut Random, text: &mut Vec<u8>) {
     const VALUES: [&str; 8] = ["", "0", "-1", "4294967295", "99999999999999999999999999", "null", "\u{0}", "é😀"];
-    let starts = (1..text.len()).filter(|&at| b">\": ".contains(&text[at - 1]) && text[at].is_ascii_alphanumeric());
+    let starts =
+        (1..text.len()).filter(|&index| b">\": ".contains(&text[index - 1]) && text[index].is_ascii_alphanumeric());
     let starts: Vec<usize> = starts.collect();
     let Some(&start) = starts.get(random.below(starts.len())) else { return };
-    let end = (start..text.len()).find(|&at| b"<\",\n}".contains(&text[at])).unwrap_or(text.len());
+
+    let end = (start..text.len()).find(|&index| b"<\",\n}".contains(&text[index])).unwrap_or(text.len());
     text.splice(start..end, VALUES[random.below(VALUES.len())].bytes());
 }
 
@@ -58,7 +56,8 @@ fn garble_value(random: &mut Random, text: &mut Vec<u8>) {
 fn garble_file(random: &mut Random, path: &Path) {
     let mut bytes = std::fs::read(path).unwrap();
     match path.extension().and_then(|extension| extension.to_str()) {
-        // Records of a direction, a length and bytes (see `mock::Transcript`): what the device sent.
+        // These are records of a direction, a length and bytes (see `mock::Transcript`), and we garble what the
+        // device sent.
         Some("transcript") => {
             let (mut garbled, mut rest) = (Vec::new(), &bytes[..]);
             while let [direction, a, b, c, d, tail @ ..] = rest {
@@ -72,11 +71,12 @@ fn garble_file(random: &mut Random, path: &Path) {
             }
             bytes = garbled;
         }
-        // Lines of `asked -> answered` in hex (see `mock::ipmi`): one answer.
+        // These are lines of `asked -> answered` in hex (see `mock::ipmi`), and we garble one answer.
         Some("txt") => {
             let text = String::from_utf8(bytes).unwrap();
             let mut lines: Vec<String> = text.lines().map(str::to_owned).collect();
-            let answers = (0..lines.len()).filter(|&at| lines[at].starts_with(|first: char| first.is_ascii_hexdigit()));
+            let answers =
+                (0..lines.len()).filter(|&index| lines[index].starts_with(|first: char| first.is_ascii_hexdigit()));
             let answers: Vec<usize> = answers.collect();
             let line = &mut lines[answers[random.below(answers.len())]];
             let (asked, answer) = line.split_once(" -> ").unwrap();
@@ -88,12 +88,13 @@ fn garble_file(random: &mut Random, path: &Path) {
         _ if random.below(2) == 0 => garble_value(random, &mut bytes),
         _ => garble(random, &mut bytes),
     }
-    // Not through the link, which is the fixture's own file.
+
+    // We do NOT write through the link, as that is the fixture's own file!
     std::fs::remove_file(path).unwrap();
     std::fs::write(path, bytes).unwrap();
 }
 
-/// `fixture` in a directory of its own, as links: a round garbles a few files of hundreds.
+/// Copies `fixture` into a directory of its own as links, because a round garbles only a few files of hundreds.
 fn copy(fixture: &Path, to: &Path, files: &mut Vec<PathBuf>) {
     std::fs::create_dir_all(to).unwrap();
     for entry in std::fs::read_dir(fixture).unwrap() {
@@ -107,12 +108,13 @@ fn copy(fixture: &Path, to: &Path, files: &mut Vec<PathBuf>) {
     }
 }
 
-/// What `work` comes to, unless it takes over `seconds`: a session waits for its device as long as the user does.
-async fn within<T, E>(seconds: u64, work: impl Future<Output = Result<T, E>>) -> Option<T> {
-    tokio::time::timeout(Duration::from_secs(seconds), work).await.ok()?.ok()
+/// Returns what `work` comes to unless it takes too long, because a session waits for its device as long as the user
+/// does.
+async fn within<T, E>(timeout_seconds: u64, work: impl Future<Output = Result<T, E>>) -> Option<T> {
+    tokio::time::timeout(Duration::from_secs(timeout_seconds), work).await.ok()?.ok()
 }
 
-/// Everything we read of the device in `fixture`, and each session opened, used and closed. What fails, fails.
+/// Reads everything we read of the device in `fixture` and opens, uses and closes each session. What fails, fails.
 async fn read(fixture: &Path, flavor: Flavor) {
     let (_amt, _bmc, target);
     if flavor == Flavor::Amt {
@@ -122,6 +124,7 @@ async fn read(fixture: &Path, flavor: Flavor) {
         let bmc = Bmc::start("127.0.0.1:0", fixture).await;
         (target, _amt, _bmc) = (bmc.target(PASSWORD), None, Some(bmc));
     }
+
     let Ok((mut client, _)) = Client::login(&target, None, Some(flavor)).await else { return };
 
     let _ = client.power().await;
@@ -146,7 +149,7 @@ async fn read(fixture: &Path, flavor: Flavor) {
     }
 
     if let Some(kvm) = within(5, client.kvm()).await {
-        // A frame of a size alone is a quiet second: the recording is through.
+        // A frame of a size alone is a quiet second, which means the recording is through.
         while within(2, kvm.frame()).await.is_some_and(|frame| frame.len() > 4) {}
         kvm.close().await;
     }
@@ -155,6 +158,7 @@ async fn read(fixture: &Path, flavor: Flavor) {
         within(2, sol.write(b"ls\r")).await;
         sol.close().await;
     }
+
     let image = fixture.join("disc.iso");
     std::fs::write(&image, [0x5A; 2048 * 8]).unwrap();
     if let Some(media) = within(5, client.mount(std::fs::File::open(image).unwrap())).await {
@@ -162,9 +166,14 @@ async fn read(fixture: &Path, flavor: Flavor) {
     }
 }
 
+/// Devices may say something else than the ones we recorded. So we garble a few files of every fixture and let the mock
+/// replay it as each flavor it can be logged in to as. Whatever a device says, we answer with an error or with what we
+/// could read, never with a panic and never by waiting forever.
 #[tokio::test(flavor = "multi_thread")]
 async fn survives_what_a_device_says() {
+    // NOTE: `GARBLED=500 cargo test --test garbled` tries more rounds than a push needs
     let rounds: u64 = std::env::var("GARBLED").map_or(8, |rounds| rounds.parse().unwrap());
+
     let mut reads = tokio::task::JoinSet::new();
     for fixture in mock::fixtures().filter(|fixture| !fixture.ends_with("go-wsman-messages")) {
         for (flavor, round) in
@@ -173,25 +182,27 @@ async fn survives_what_a_device_says() {
             let fixture = fixture.clone();
             reads.spawn(async move {
                 let mut random = Random(round.wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1);
-                let (dir, mut files) = (tempfile::tempdir().unwrap(), Vec::new());
-                copy(&fixture, dir.path(), &mut files);
+                let (directory, mut files) = (tempfile::tempdir().unwrap(), Vec::new());
+                copy(&fixture, directory.path(), &mut files);
                 files.sort();
 
-                // Sessions and recordings are few among hundreds of pages: every other file is one of them.
+                // Sessions and recordings are few among hundreds of pages, so every other file we garble is one of
+                // them.
                 let (sessions, pages): (Vec<_>, Vec<_>) = files.iter().partition(|file| {
-                    file.extension().is_some_and(|kind| !kind.eq_ignore_ascii_case("xml") && kind != "json")
+                    file.extension()
+                        .is_some_and(|extension| !extension.eq_ignore_ascii_case("xml") && extension != "json")
                 });
                 let mut garbled = Vec::new();
                 for _ in 0..=random.below(3) {
                     let files = if random.below(2) == 0 || pages.is_empty() { &sessions } else { &pages };
                     if let Some(file) = files.get(random.below(files.len())) {
                         garble_file(&mut random, file);
-                        garbled.push(file.strip_prefix(dir.path()).unwrap());
+                        garbled.push(file.strip_prefix(directory.path()).unwrap());
                     }
                 }
 
                 let name = format!("round {round} of {} as {flavor:?}, garbled {garbled:?}", fixture.display());
-                let reading = tokio::spawn(async move { read(dir.path(), flavor).await });
+                let reading = tokio::spawn(async move { read(directory.path(), flavor).await });
                 match tokio::time::timeout(Duration::from_secs(120), reading).await {
                     Ok(read) => read.unwrap_or_else(|panic| panic!("{name}: {panic}")),
                     Err(_) => panic!("{name}: still waiting after two minutes"),
@@ -199,6 +210,7 @@ async fn survives_what_a_device_says() {
             });
         }
     }
+
     while let Some(read) = reads.join_next().await {
         read.unwrap();
     }

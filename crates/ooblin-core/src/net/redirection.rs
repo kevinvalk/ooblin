@@ -1,7 +1,3 @@
-//! AMT's redirection protocol on port 16995. Every session (SOL, KVM or IDER) gets its own TLS connection, opened with
-//! StartRedirectionSession and authenticated with Digest over the socket itself, after which the stream carries that
-//! session's own protocol. Byte layouts follow MeshCommander's `amt-redir-ws-0.1.0.js` (Apache-2.0).
-
 use digest_auth::{AuthContext, Charset, Qop, WwwAuthenticateHeader};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, ReadHalf, WriteHalf};
 
@@ -9,21 +5,21 @@ use super::{HUNG, Pin, Stream, tls};
 use crate::{Error, Result, Target};
 
 pub const REDIRECTION_PORT: u16 = 16995;
-const AUTH_URI: &str = "/RedirectionService";
-/// Digest with qop, the one authentication type we speak.
-const DIGEST: u8 = 4;
-/// The most a message may say it carries, far above any AMT sends (SOL's lengths are u16, a tile 64 by 64), so a
-/// garbled length can't make us allocate gigabytes.
-const MOST: usize = 1 << 20;
+const AUTHENTICATION_URI: &str = "/RedirectionService";
+const DIGEST: u8 = 4; // Digest with qop, the one authentication type we speak
+
+// The most a message may say it carries, far above any AMT sends (SOL's lengths are u16, a tile is 64 by 64). That way
+// a garbled length cannot make us allocate gigabytes.
+const MESSAGE_MAX_BYTES: usize = 1 << 20;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Session {
+pub enum RedirectionSession {
     Sol,
     Kvm,
     Ider,
 }
 
-impl Session {
+impl RedirectionSession {
     fn start(self) -> [u8; 8] {
         match self {
             Self::Sol => [0x10, 0, 0, 0, b'S', b'O', b'L', b' '],
@@ -33,21 +29,23 @@ impl Session {
     }
 }
 
-/// An authenticated redirection session, ready for the session's own protocol.
+// NOTE: This is AMT's redirection protocol on port 16995. Every session (SOL, KVM or IDER) gets its own TLS connection,
+// which we open with StartRedirectionSession and authenticate with Digest over the socket itself. After that the stream
+// carries the session's own protocol. The byte layouts follow MeshCommander's `amt-redir-ws-0.1.0.js` (Apache-2.0).
 pub struct Redirection {
     stream: Stream,
 }
 
 impl Redirection {
-    pub async fn open(target: &Target, pin: Option<String>, session: Session) -> Result<Self> {
+    pub async fn open(target: &Target, pin: Option<String>, session: RedirectionSession) -> Result<Self> {
         let stream = tls(&target.host, target.redirection_port, &Pin::new(pin)).await?;
         let mut redirection = Self { stream };
         redirection.handshake(target, session).await?;
         Ok(redirection)
     }
 
-    pub async fn read(&mut self, buf: &mut [u8]) -> Result<usize> {
-        Ok(self.stream.read(buf).await?)
+    pub async fn read(&mut self, buffer: &mut [u8]) -> Result<usize> {
+        Ok(self.stream.read(buffer).await?)
     }
 
     /// The next message's first byte, however long that takes.
@@ -55,20 +53,20 @@ impl Redirection {
         Ok(self.stream.read_u8().await?)
     }
 
-    pub async fn read_exact(&mut self, len: usize) -> Result<Vec<u8>> {
-        read_exact(&mut self.stream, len).await
+    pub async fn read_exact(&mut self, length: usize) -> Result<Vec<u8>> {
+        read_exact(&mut self.stream, length).await
     }
 
     pub async fn write_all(&mut self, bytes: &[u8]) -> Result<()> {
         write_all(&mut self.stream, bytes).await
     }
 
-    /// Its two directions, to read and write at once.
+    /// Its two directions, so we can read and write at once.
     pub fn split(self) -> (ReadHalf<Stream>, WriteHalf<Stream>) {
         tokio::io::split(self.stream)
     }
 
-    async fn handshake(&mut self, target: &Target, session: Session) -> Result<()> {
+    async fn handshake(&mut self, target: &Target, session: RedirectionSession) -> Result<()> {
         self.write_all(&session.start()).await?;
         let reply = self.read_exact(13).await?;
         if reply[0] != 0x11 {
@@ -77,22 +75,23 @@ impl Redirection {
         if reply[1] != 0 {
             return Err(Error::Protocol(format!("redirection refused (status {}), is it enabled?", reply[1])));
         }
-        self.read_exact(usize::from(reply[12])).await?; // OEM data we have no use for
+        self.read_exact(usize::from(reply[12])).await?; // We have no use for the OEM data
 
         let (_, offered) = self.authenticate(0, &[]).await?;
         if !offered.contains(&DIGEST) {
             return Err(Error::Protocol(format!("no Digest authentication on offer, only {offered:?}")));
         }
 
-        // Fields are user, realm, nonce, uri, cnonce, nc, response and qop. Sent empty, AMT answers with a challenge.
-        let (user, uri) = (target.user.as_str(), AUTH_URI);
+        // The fields are user, realm, nonce, uri, cnonce, nc, response and qop. When we send them empty, AMT answers
+        // with a challenge.
+        let (user, uri) = (target.user.as_str(), AUTHENTICATION_URI);
         let (_, challenge) = self.authenticate(DIGEST, &encode_fields(&[user, "", "", uri, "", "", "", ""])).await?;
         let Ok([realm, nonce, qop]) = <[String; 3]>::try_from(decode_fields(&challenge)) else {
             return Err(Error::Protocol("not a Digest challenge".into()));
         };
 
-        // This is the session's second message, so its count is 2, the way MeshCommander has it: `respond` counts up
-        // from `nc` before it answers.
+        // This is the session's second message, so its count is 2, the way MeshCommander has it. We set `nc` to 1
+        // because `respond` counts up from it before it answers.
         let mut challenge = WwwAuthenticateHeader {
             domain: None,
             realm,
@@ -117,7 +116,7 @@ impl Redirection {
         }
     }
 
-    /// One AuthenticateSession round trip, returning the reply's status and data.
+    /// One AuthenticateSession round trip, which returns the reply's status and data.
     async fn authenticate(&mut self, kind: u8, data: &[u8]) -> Result<(u8, Vec<u8>)> {
         let mut message = vec![0x13, 0, 0, 0, kind];
         message.extend_from_slice(&u32::try_from(data.len()).unwrap().to_le_bytes());
@@ -128,17 +127,19 @@ impl Redirection {
         if header[0] != 0x14 {
             return Err(Error::Protocol(format!("expected an authentication reply, got {:#04x}", header[0])));
         }
-        let len = u32::from_le_bytes(header[5..9].try_into().unwrap());
-        Ok((header[1], self.read_exact(len as usize).await?))
+
+        let length = u32::from_le_bytes(header[5..9].try_into().unwrap());
+        Ok((header[1], self.read_exact(length as usize).await?))
     }
 }
 
-/// `len` bytes of a message under way, unless the device hung on it or says it carries more than any message does.
-pub(crate) async fn read_exact(reader: &mut (impl AsyncRead + Unpin), len: usize) -> Result<Vec<u8>> {
-    if len > MOST {
-        return Err(Error::Protocol(format!("a {len}-byte message")));
+/// `length` bytes of a message under way, unless the device hung on it or says it carries more than any message does.
+pub(crate) async fn read_exact(reader: &mut (impl AsyncRead + Unpin), length: usize) -> Result<Vec<u8>> {
+    if length > MESSAGE_MAX_BYTES {
+        return Err(Error::Protocol(format!("a {length}-byte message")));
     }
-    let mut bytes = vec![0; len];
+
+    let mut bytes = vec![0; length];
     tokio::time::timeout(HUNG, reader.read_exact(&mut bytes)).await.map_err(|_| Error::Timeout)??;
     Ok(bytes)
 }
@@ -149,17 +150,17 @@ pub(crate) async fn write_all(writer: &mut (impl AsyncWrite + Unpin), bytes: &[u
     Ok(writer.flush().await?)
 }
 
-/// Authentication fields travel as length-prefixed strings, both ways.
+/// The authentication fields travel as length-prefixed strings, both ways.
 pub fn encode_fields(values: &[&str]) -> Vec<u8> {
     values.iter().flat_map(|value| std::iter::once(value.len() as u8).chain(value.bytes())).collect()
 }
 
-pub fn decode_fields(mut data: &[u8]) -> Vec<String> {
+pub fn decode_fields(mut bytes: &[u8]) -> Vec<String> {
     let mut fields = Vec::new();
-    while let Some((&len, rest)) = data.split_first() {
-        let len = usize::from(len).min(rest.len());
-        fields.push(String::from_utf8_lossy(&rest[..len]).into_owned());
-        data = &rest[len..];
+    while let Some((&length, rest)) = bytes.split_first() {
+        let length = usize::from(length).min(rest.len());
+        fields.push(String::from_utf8_lossy(&rest[..length]).into_owned());
+        bytes = &rest[length..];
     }
     fields
 }

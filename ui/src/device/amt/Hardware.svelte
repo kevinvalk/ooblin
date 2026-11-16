@@ -1,7 +1,7 @@
 <script lang="ts">
   import type { Hardware } from "../../bindings/core";
 
-  /** While loading, every list shows one of its thing. Several are told apart by number, from 0 like the OS does. */
+  // While loading every list shows one of its thing. Several are told apart by number, from 0 like the OS does.
   let { data }: { data?: Hardware } = $props();
 </script>
 
@@ -31,7 +31,7 @@
     <div><dt>Version</dt><dd>{data?.motherboard.version}</dd></div>
     <div><dt>Serial number</dt><dd>{data?.motherboard.serial_number}</dd></div>
     <div><dt>Asset tag</dt><dd>{data?.motherboard.asset_tag}</dd></div>
-    <div><dt>Replaceable</dt><dd>{data && (data.motherboard.replaceable ? "Yes" : "No")}</dd></div>
+    <div><dt>Replaceable</dt><dd>{data && (data.motherboard.is_replaceable ? "Yes" : "No")}</dd></div>
   </dl>
 </section>
 

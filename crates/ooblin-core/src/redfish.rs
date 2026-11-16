@@ -1,8 +1,4 @@
-//! Any BMC over Redfish (DSP0266), as far as the standard goes: the first server, BMC and chassis its service lists,
-//! power, hardware, the event log, sensors and the identify light. No screen, serial console or disk image, which
-//! every vendor does its own way: a vendor's flavor is this and what the vendor adds, as `supermicro` is.
-
-#![allow(non_snake_case, reason = "our JSON types name their fields the way Redfish does, `PowerState` say")]
+#![allow(non_snake_case, reason = "We name the fields of our JSON types the way Redfish does, `PowerState` say.")]
 
 pub use crate::net::redfish::{Connection, probe};
 
@@ -22,13 +18,17 @@ use crate::{
     Target,
 };
 
+// NOTE: This is any BMC over Redfish (DSP0266), as far as the standard goes. It has no screen, serial console or disk
+// image, because every vendor does those its own way: a vendor's flavor is this client and what the vendor adds, as
+// `supermicro` is.
 pub struct Client {
     pub(crate) connection: Connection,
-    /// Where its server, BMC and chassis are, which a service says once.
+
+    /// Where its server, BMC and chassis are, which we ask a service only once.
     paths: OnceCell<Paths>,
 }
 
-/// The resources we read of a service: a server, the BMC that manages it and the chassis it's in.
+/// The resources we read of a service: a server, the BMC that manages it and the chassis it is in.
 pub(crate) struct Paths {
     pub system: String,
     pub manager: String,
@@ -60,11 +60,10 @@ pub struct Lan {
     pub mac: String,
 }
 
-/// The most pages of a log we follow: a service that keeps naming a next one would have us read forever.
-const PAGES: usize = 100;
+const MAX_PAGES: usize = 100; // A service that keeps naming a next page of a log would have us read forever
 
 impl Client {
-    /// Connects lazily, as `amt::Client::new` does.
+    /// We connect lazily, as `amt::Client::new` does.
     pub fn new(target: &Target, pin: Option<String>) -> Result<Self> {
         Ok(Self { connection: Connection::new(target, pin)?, paths: OnceCell::new() })
     }
@@ -74,19 +73,22 @@ impl Client {
         Ok(Self { connection: Connection::new(target, pin)?, paths: OnceCell::from(paths) })
     }
 
-    /// The first of each the service lists. Its BMCs alone first, so a login tries a wrong password once: some lock
-    /// the account after a few.
+    /// The first server, BMC and chassis the service lists.
     pub(crate) async fn paths(&self) -> Result<&Paths> {
         let first = async |collection: &str| {
             let members = self.get::<Collection<Link>>(collection).await?.Members;
-            let first = members.into_iter().next().map(|member| member.id);
-            first.ok_or_else(|| Error::Protocol(format!("a Redfish service with nothing in {collection}")))
+            let path = members.into_iter().next().map(|member| member.id);
+            path.ok_or_else(|| Error::Protocol(format!("a Redfish service with nothing in {collection}")))
         };
+
         let read = async || {
+            // Its BMCs alone first, so a login tries a wrong password once: some lock the account after a few.
             let manager = first("/redfish/v1/Managers").await?;
             let (system, chassis) = tokio::try_join!(first("/redfish/v1/Systems"), first("/redfish/v1/Chassis"))?;
+
             Ok(Paths { system, manager, chassis })
         };
+
         self.paths.get_or_try_init(read).await
     }
 
@@ -99,6 +101,7 @@ impl Client {
         let manager: Manager = self.get(&self.paths().await?.manager).await?;
         let interface = self.linked::<EthernetInterface>(&manager.EthernetInterfaces).await?;
         let interface = interface.into_iter().next().unwrap_or_default();
+
         let info = Info {
             flavor: Flavor::Redfish,
             name: if interface.FQDN.is_empty() { interface.HostName.clone() } else { interface.FQDN.clone() },
@@ -107,21 +110,24 @@ impl Client {
             control_mode: String::new(),
             fingerprint: self.connection.fingerprint().expect("a successful call has pinned a certificate"),
             remote_access: RemoteAccess {
-                kvm: None,
-                sol: false,
-                ider: false,
+                is_kvm: None,
+                is_sol: false,
+                is_ider: false,
                 consent: Consent::None,
-                consent_fixed: true,
+                is_consent_fixed: true,
             },
         };
+
         Ok((info, interface))
     }
 
     pub async fn status(&self) -> Result<BmcStatus> {
         let (info, interface) = self.manager().await?;
+
         let system = self.get::<ComputerSystem>(&self.paths().await?.system);
         let (system, root) = tokio::try_join!(system, self.get::<Root>("/redfish/v1/"))?;
         let lans = self.linked::<EthernetInterface>(&system.EthernetInterfaces).await?;
+
         Ok(BmcStatus {
             info,
             power: system.state(),
@@ -135,20 +141,22 @@ impl Client {
         })
     }
 
-    /// What it offers is what its Reset allows (boot once only into a target it allows), on or off.
+    /// We offer what its Reset allows for a server that is on or off, and boot once only into a target it allows.
     pub async fn power(&self) -> Result<Power> {
         use PowerAction::*;
+
         let system: ComputerSystem = self.get(&self.paths().await?.system).await?;
         let state = system.state();
-        let offered: &[_] = match state {
+        let actions: &[_] = match state {
             PowerState::Off => &[On, OnToBios, OnToPxe, OnToImage],
             _ => &[SoftOff, Off, SoftReset, Reset, Cycle, Nmi, ResetToBios, ResetToPxe, ResetToImage],
         };
-        // Newer services say what a Reset allows in a resource of its own.
-        let resets = match system.Actions.reset {
-            ResetAction { types, .. } if !types.is_empty() => types,
-            ResetAction { info: Some(info), .. } => {
-                let parameters = self.get::<ActionInfo>(&info).await?.Parameters;
+
+        let reset_types = match system.Actions.reset {
+            ResetAction { reset_types, .. } if !reset_types.is_empty() => reset_types,
+            // Newer services say what a Reset allows in a resource of its own.
+            ResetAction { action_info: Some(action_info), .. } => {
+                let parameters = self.get::<ActionInfo>(&action_info).await?.Parameters;
                 parameters
                     .into_iter()
                     .find(|parameter| parameter.Name == "ResetType")
@@ -158,36 +166,43 @@ impl Client {
             _ => vec![],
         };
         let targets = &system.Boot.targets;
-        let offers = |(reset, target): (&str, Option<&str>)| {
-            resets.iter().any(|allowed| allowed == reset)
-                && target.is_none_or(|target| targets.iter().any(|t| t == target))
+
+        let is_allowed = |(reset_type, target): (&str, Option<&str>)| {
+            reset_types.iter().any(|allowed| allowed == reset_type)
+                && target.is_none_or(|target| targets.iter().any(|allowed| allowed == target))
         };
-        let actions = offered.iter().copied().filter(|&action| reset(action).is_some_and(offers)).collect();
+        let actions = actions.iter().copied().filter(|&action| reset(action).is_some_and(is_allowed)).collect();
+
         Ok(Power { state, actions })
     }
 
     /// Boot once is a boot override first, then the power change.
     pub async fn set_power(&self, action: PowerAction) -> Result<()> {
-        let (reset, target) = reset(action).ok_or(Error::Unsupported)?;
+        let (reset_type, target) = reset(action).ok_or(Error::Unsupported)?;
         let system = &self.paths().await?.system;
+
         if let Some(target) = target {
             let boot = json!({"Boot": {"BootSourceOverrideEnabled": "Once", "BootSourceOverrideTarget": target}});
             self.connection.patch(system, &boot).await?;
         }
-        let reset = json!({"ResetType": reset});
+
+        let reset = json!({"ResetType": reset_type});
         self.connection.post(&format!("{system}/Actions/ComputerSystem.Reset"), &reset).await
     }
 
-    /// The system alone first, so a wrong password is tried once where this is the first we ask.
     pub async fn hardware(&self) -> Result<Hardware> {
         let paths = self.paths().await?;
+
+        // We ask for the system alone first, so a wrong password is tried once where this is the first we ask.
         let system: ComputerSystem = self.get(&paths.system).await?;
+
         let (chassis, processors, memory, disks) = tokio::try_join!(
             self.get::<Chassis>(&paths.chassis),
             self.linked::<Cpu>(&system.Processors),
             self.linked::<Dimm>(&system.Memory),
             self.disks(&system),
         )?;
+
         Ok(Hardware {
             motherboard: Motherboard {
                 product: chassis.Model,
@@ -195,10 +210,10 @@ impl Client {
                 version: String::new(),
                 serial_number: chassis.SerialNumber,
                 asset_tag: chassis.AssetTag,
-                replaceable: false,
+                is_replaceable: false,
             },
-            // Not its FPGAs and GPUs, which Redfish lists among them, nor sockets and slots with nothing in them.
-            processors: processors.into_iter().filter(Cpu::central).map(Cpu::processor).collect(),
+            // We leave out the FPGAs and GPUs Redfish lists among them, and sockets and slots with nothing in them.
+            processors: processors.into_iter().filter(Cpu::is_central).map(Cpu::processor).collect(),
             memory: memory.into_iter().filter(|dimm| dimm.Status.State != "Absent").map(Dimm::module).collect(),
             disks,
             batteries: vec![],
@@ -210,37 +225,42 @@ impl Client {
     /// The server's drives, of its storage controllers where it lists them, else as its simple storage says.
     async fn disks(&self, system: &ComputerSystem) -> Result<Vec<Disk>> {
         if system.Storage.is_none() {
-            let storage = self.linked::<Storage>(&system.SimpleStorage).await?;
-            return Ok(storage.into_iter().flat_map(Storage::disks).collect());
+            let storages = self.linked::<Storage>(&system.SimpleStorage).await?;
+            return Ok(storages.into_iter().flat_map(Storage::disks).collect());
         }
+
         let mut disks = Vec::new();
         for storage in self.linked::<Storage>(&system.Storage).await? {
             for drive in storage.Drives {
                 disks.extend(self.get::<Device>(&drive.id).await?.disk());
             }
         }
+
         Ok(disks)
     }
 
     /// The server's logs, newest first, every page of each.
     pub async fn event_log(&self) -> Result<Vec<Event>> {
         let system: ComputerSystem = self.get(&self.paths().await?.system).await?;
+
         let mut events = Vec::new();
         for log in self.linked::<LogService>(&system.LogServices).await? {
             let (mut page, mut seen) = (log.Entries.map(|entries| entries.id), HashSet::new());
-            while let Some(path) = page.filter(|path| seen.len() < PAGES && seen.insert(path.clone())) {
+            while let Some(path) = page.filter(|path| seen.len() < MAX_PAGES && seen.insert(path.clone())) {
                 let entries: Entries = self.get(&path).await?;
                 events.extend(entries.Members.into_iter().map(Entry::event));
                 page = entries.next;
             }
         }
-        events.sort_by_key(|event| std::cmp::Reverse(event.time));
+        events.sort_by_key(|event| std::cmp::Reverse(event.occurred_at));
+
         Ok(events)
     }
 
     /// The chassis's sensors, each a resource of its own where it lists them, else as its thermal and power say.
     pub async fn sensors(&self) -> Result<Vec<Sensor>> {
         let chassis: Chassis = self.get(&self.paths().await?.chassis).await?;
+
         let readings = match (chassis.Sensors, chassis.Thermal, chassis.Power) {
             (Some(sensors), ..) => self.members::<Reading>(&sensors.id).await?,
             (None, thermal, power) => {
@@ -253,66 +273,73 @@ impl Client {
                 readings.into_iter().flatten().collect()
             }
         };
+
         Ok(readings.into_iter().filter_map(Reading::sensor).collect())
     }
 
-    /// The identify light, which Redfish names two ways. It knows no POST code.
+    /// The identify light, which Redfish names two ways. Redfish knows no POST code.
     pub async fn panel(&self) -> Result<Panel> {
         let system: ComputerSystem = self.get(&self.paths().await?.system).await?;
-        let lit = system.IndicatorLED.map(|light| light != "Off");
-        Ok(Panel { identify: system.LocationIndicatorActive.or(lit), post_code: None })
+        let is_lit = system.IndicatorLED.map(|light| light != "Off");
+
+        Ok(Panel { is_identifying: system.LocationIndicatorActive.or(is_lit), post_code: None })
     }
 
-    /// Lights the identify light until turned off, or turns it off, by the name the server has for it.
-    pub async fn identify(&self, on: bool) -> Result<()> {
+    /// The identify light stays lit until we turn it off. We set it by the name the server has for it.
+    pub async fn identify(&self, is_on: bool) -> Result<()> {
         let system = &self.paths().await?.system;
+
         let light = match self.get::<ComputerSystem>(system).await? {
-            ComputerSystem { LocationIndicatorActive: Some(_), .. } => json!({"LocationIndicatorActive": on}),
+            ComputerSystem { LocationIndicatorActive: Some(_), .. } => json!({"LocationIndicatorActive": is_on}),
             ComputerSystem { IndicatorLED: Some(_), .. } => {
-                json!({"IndicatorLED": if on { "Blinking" } else { "Off" }})
+                json!({"IndicatorLED": if is_on { "Blinking" } else { "Off" }})
             }
             _ => return Err(Error::Unsupported),
         };
+
         self.connection.patch(system, &light).await
     }
 
-    /// The BMC's own web pages, where everything we don't do can be done.
+    /// The URL of the BMC's own web pages, where everything we do not do can be done.
     pub fn web_pages(&self) -> String {
         format!("{}/", self.connection.url())
     }
 
-    /// The resource at `path`, or its default where this BMC doesn't have it: an OEM one, say.
-    pub(crate) async fn optional<T: DeserializeOwned + Default>(&self, path: &str) -> Result<T> {
+    /// The resource at `path`, or its default where this BMC does not have it: an OEM one, say.
+    pub(crate) async fn optional<Resource: DeserializeOwned + Default>(&self, path: &str) -> Result<Resource> {
         match self.get(path).await {
-            Err(Error::Http(404)) => Ok(T::default()),
+            Err(Error::Http(404)) => Ok(Resource::default()),
             resource => resource,
         }
     }
 
-    /// Each member of the collection a resource links, none where it doesn't.
-    async fn linked<T: DeserializeOwned>(&self, collection: &Option<Link>) -> Result<Vec<T>> {
+    /// Each member of the collection a resource links, none where it does not link one.
+    async fn linked<Member: DeserializeOwned>(&self, collection: &Option<Link>) -> Result<Vec<Member>> {
         match collection {
             Some(collection) => self.members(&collection.id).await,
             None => Ok(vec![]),
         }
     }
 
-    /// Each member of the collection at `path`, one request each: few services expand a collection, and the X10's
-    /// `$expand` is broken.
-    pub(crate) async fn members<T: DeserializeOwned>(&self, path: &str) -> Result<Vec<T>> {
+    /// We ask for each member of the collection in a request of its own, because few services expand a collection and
+    /// the X10's `$expand` is broken.
+    pub(crate) async fn members<Member: DeserializeOwned>(&self, path: &str) -> Result<Vec<Member>> {
         let collection: Collection<Link> = self.get(path).await?;
+
         let mut members = Vec::new();
         for member in collection.Members {
             members.push(self.get(&member.id).await?);
         }
+
         Ok(members)
     }
 
-    /// The resource at `path`, tidied.
-    pub(crate) async fn get<T: DeserializeOwned>(&self, path: &str) -> Result<T> {
-        let mut value = self.connection.get(path).await?;
-        tidy(&mut value);
-        T::deserialize(value).map_err(|error| Error::Protocol(format!("{path}: {error}")))
+    /// The resource at `path`, tidied (see `tidy`).
+    pub(crate) async fn get<Resource: DeserializeOwned>(&self, path: &str) -> Result<Resource> {
+        let mut resource = self.connection.get(path).await?;
+        tidy(&mut resource);
+
+        Resource::deserialize(resource).map_err(|error| Error::Protocol(format!("{path}: {error}")))
     }
 }
 
@@ -355,21 +382,26 @@ fn tidy(value: &mut Value) {
     }
 }
 
-/// The BMC's own port. It names one list of DNS servers for both IPv4 and IPv6, and the X10 its own link-local address
-/// as its IPv6 gateway, OpenBMC all zeros for none.
+/// The BMC's own port.
 pub(crate) fn port(interface: EthernetInterface) -> Port {
+    // A BMC names one list of DNS servers for both IPv4 and IPv6.
     let mut ipv4_dns = interface.NameServers.iter().filter(|server| server.parse::<Ipv4Addr>().is_ok()).cloned();
     let mut ipv6_dns = interface.NameServers.iter().filter(|server| server.parse::<Ipv6Addr>().is_ok()).cloned();
+
     let ipv4 = interface.IPv4Addresses.into_iter().next().unwrap_or_default();
     let addresses: Vec<_> = interface.IPv6Addresses.into_iter().map(|address| address.Address.to_lowercase()).collect();
+
+    // The X10 names its own link-local address as its IPv6 gateway and OpenBMC all zeros for none.
     let gateway = Some(interface.IPv6DefaultGateway.to_lowercase()).filter(|gateway| {
         !addresses.contains(gateway) && gateway.parse::<Ipv6Addr>().is_ok_and(|gateway| !gateway.is_unspecified())
     });
-    let enabled = interface.Status.State == "Enabled" && interface.InterfaceEnabled;
+
+    let is_enabled = interface.Status.State == "Enabled" && interface.InterfaceEnabled;
+
     Port {
-        wireless: false,
+        is_wireless: false,
         mac: mac(&interface.MACAddress),
-        link_up: interface.LinkStatus.map_or(enabled, |link| link == "LinkUp"),
+        is_link_up: interface.LinkStatus.map_or(is_enabled, |link| link == "LinkUp"),
         mbps: interface.SpeedMbps.filter(|&mbps| mbps > 0),
         ipv4: Ipv4 {
             configuration: if ipv4.AddressOrigin == "DHCP" { Configuration::Dhcp } else { Configuration::Manual },
@@ -388,7 +420,7 @@ pub(crate) fn port(interface: EthernetInterface) -> Port {
     }
 }
 
-// Redfish's resources, only what we read of them.
+// NOTE: These are Redfish's resources with only the fields we read of them.
 
 #[derive(Default, Deserialize)]
 #[serde(default)]
@@ -500,9 +532,9 @@ struct Actions {
 #[serde(default)]
 struct ResetAction {
     #[serde(rename = "ResetType@Redfish.AllowableValues")]
-    types: Vec<String>,
+    reset_types: Vec<String>,
     #[serde(rename = "@Redfish.ActionInfo")]
-    info: Option<String>,
+    action_info: Option<String>,
 }
 
 #[derive(Default, Deserialize)]
@@ -543,7 +575,7 @@ pub(crate) struct Cpu {
 }
 
 impl Cpu {
-    fn central(&self) -> bool {
+    fn is_central(&self) -> bool {
         matches!(&*self.ProcessorType, "" | "CPU") && self.Status.State != "Absent"
     }
 
@@ -616,7 +648,7 @@ struct Device {
 }
 
 impl Device {
-    /// None for a bay that's empty.
+    /// `None` for a bay that is empty.
     fn disk(self) -> Option<Disk> {
         let disk = Disk { model: self.Model, serial_number: self.SerialNumber, bytes: self.CapacityBytes };
         (self.Status.State != "Absent").then_some(disk)
@@ -650,7 +682,7 @@ struct Entry {
 impl Entry {
     fn event(self) -> Event {
         Event {
-            time: self.Created.parse::<jiff::Timestamp>().map_or(0, |time| time.as_second() as u32),
+            occurred_at: self.Created.parse::<jiff::Timestamp>().map_or(0, |time| time.as_second() as u32),
             source: if self.SensorType.is_empty() { self.MessageId } else { self.SensorType },
             description: self.Message,
             severity: severity(&self.Severity),
@@ -708,9 +740,10 @@ struct Threshold {
 }
 
 impl Reading {
-    /// None for one that isn't there: an empty fan bay, say.
+    /// `None` for one that is not there: an empty fan bay, say.
     fn sensor(self) -> Option<Sensor> {
         use SensorKind::*;
+
         let (reading, kind, unit) = match (self.ReadingCelsius, self.ReadingVolts, self.PowerConsumedWatts) {
             (Some(celsius), ..) => (Some(celsius), Temperature, "°C"),
             (_, Some(volts), _) => (Some(volts), Voltage, "V"),
@@ -724,6 +757,7 @@ impl Reading {
                 (_, unit) => (self.Reading, Other, unit),
             },
         };
+
         let sensor = Sensor {
             name: self.Name,
             kind,
@@ -747,8 +781,8 @@ pub(crate) struct Condition {
 }
 
 #[derive(Deserialize)]
-pub(crate) struct Collection<T> {
-    pub Members: Vec<T>,
+pub(crate) struct Collection<Member> {
+    pub Members: Vec<Member>,
 }
 
 #[derive(Deserialize)]

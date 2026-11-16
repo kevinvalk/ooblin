@@ -1,5 +1,3 @@
-//! A device of any flavor, for what they do alike.
-
 use std::ops::Range;
 
 use crate::redfish::BmcStatus;
@@ -8,8 +6,7 @@ use crate::{
     supermicro,
 };
 
-/// A device we're logged in to, of any flavor.
-#[allow(clippy::large_enum_variant, reason = "there are a few at most, and it minds only without `verify`")]
+#[allow(clippy::large_enum_variant, reason = "we hold a few at most, and clippy only minds without `verify`")]
 pub enum Client {
     Amt(amt::Client),
     Supermicro(supermicro::Client),
@@ -17,27 +14,25 @@ pub enum Client {
     Redfish(redfish::Client),
 }
 
-/// An open screen: AMT's, or a Supermicro's.
 pub enum Kvm {
     Amt(amt::Kvm),
     Supermicro(supermicro::Kvm),
 }
 
-/// An open serial console: AMT's own, or a BMC's over IPMI.
 pub enum Sol {
     Amt(amt::Sol),
     Ipmi(ipmi::Sol),
 }
 
 /// A disc in the device's drive: AMT's IDER, or a BMC's virtual media.
-#[expect(clippy::large_enum_variant, reason = "there's one at a time")]
+#[expect(clippy::large_enum_variant, reason = "we hold one at a time")]
 pub enum Media {
     Amt(amt::Ider),
     Supermicro(supermicro::Media),
 }
 
-/// `$call` on whichever of `$variants` `$value` holds, named `$it`; those it's `not` for are `Unsupported`. Every
-/// variant is named, so a new flavor is asked about each.
+// `$call` on whichever of `$variants` `$value` holds, named `$it`, and `Unsupported` for those it is `not` for. We name
+// every variant, so a new flavor has to be asked about each.
 macro_rules! either {
     ($value:expr, $it:ident => $call:expr, $($variant:ident)|+ $(, not $($without:ident)|+)?) => {
         match $value {
@@ -48,7 +43,7 @@ macro_rules! either {
 }
 
 impl Client {
-    /// Logs in as `flavor`, or not knowing it as what the host turns out to be: see `guess`.
+    /// Logs in as `flavor`, or when we do not know it as what the host turns out to be: see `guess`.
     pub async fn login(target: &Target, pin: Option<String>, flavor: Option<Flavor>) -> Result<(Self, Info)> {
         match flavor {
             Some(flavor) => Self::login_as(target, pin, flavor).await,
@@ -81,42 +76,45 @@ impl Client {
         })
     }
 
-    /// AMT first, unless it can't be reached (a host naming a port can't be, its URL carries AMT's own). Then a
-    /// Supermicro, if the host answers Redfish without a login: no web server that isn't a BMC gets the password, and
-    /// another vendor's Redfish says it isn't one. Then IPMI, whose login never sends the password and which has a
-    /// serial console, and where IPMI is off the Redfish that answered. Nothing answering at all says why AMT didn't.
     async fn guess(target: &Target, pin: Option<String>) -> Result<(Self, Info)> {
-        let amt = match Self::login_as(target, pin.clone(), Flavor::Amt).await {
+        // AMT goes first, and we only go on when it cannot be reached. A host that names a port never can be, because
+        // the URL carries AMT's own port.
+        let amt_error = match Self::login_as(target, pin.clone(), Flavor::Amt).await {
             Err(error @ (Error::Transport(_) | Error::Timeout | Error::Http(_))) => error,
-            done => return done,
+            login => return login,
         };
-        let redfish = redfish::probe(&target.authority()).await;
-        if redfish {
+
+        // Then a Supermicro, but ONLY if the host answers Redfish without a login. That way no web server that is not
+        // a BMC gets the password, and another vendor's Redfish says it is not a Supermicro.
+        let has_redfish = redfish::probe(&target.authority()).await;
+        if has_redfish {
             match Self::login_as(target, pin.clone(), Flavor::Supermicro).await {
                 Err(Error::Protocol(_)) => {}
-                done => return done,
+                login => return login,
             }
         }
+
+        // Then IPMI, whose login never sends the password and which has a serial console, and where IPMI is off the
+        // Redfish that answered. When nothing answers at all we say why AMT did not.
         match Self::login_as(target, None, Flavor::Ipmi).await {
-            Err(Error::Timeout | Error::Transport(_)) if redfish => Self::login_as(target, pin, Flavor::Redfish).await,
-            Err(Error::Timeout | Error::Transport(_)) => Err(amt),
-            done => done,
+            Err(Error::Timeout | Error::Transport(_)) if has_redfish => {
+                Self::login_as(target, pin, Flavor::Redfish).await
+            }
+            Err(Error::Timeout | Error::Transport(_)) => Err(amt_error),
+            login => login,
         }
     }
 
-    /// The AMT client, for what only AMT does.
     pub fn amt(&mut self) -> Result<&mut amt::Client> {
         let Self::Amt(client) = self else { return Err(Error::Unsupported) };
         Ok(client)
     }
 
-    /// The Supermicro client, for what only it does.
     pub fn supermicro(&mut self) -> Result<&mut supermicro::Client> {
         let Self::Supermicro(client) = self else { return Err(Error::Unsupported) };
         Ok(client)
     }
 
-    /// The IPMI client, for what only it does.
     pub fn ipmi(&mut self) -> Result<&mut ipmi::Client> {
         let Self::Ipmi(client) = self else { return Err(Error::Unsupported) };
         Ok(client)
@@ -130,8 +128,8 @@ impl Client {
         either!(self, client => client.set_power(action).await, Amt | Supermicro | Ipmi | Redfish)
     }
 
-    /// What IPMI says of the hardware is its FRU, see `ipmi::Client::fru`.
     pub async fn hardware(&mut self) -> Result<Hardware> {
+        // NOTE: What IPMI says of the hardware is its FRU, see `ipmi::Client::fru`.
         either!(self, client => client.hardware().await, Amt | Supermicro | Redfish, not Ipmi)
     }
 
@@ -139,27 +137,23 @@ impl Client {
         either!(self, client => client.event_log().await, Amt | Supermicro | Ipmi | Redfish)
     }
 
-    /// What a server and its BMC are, as Redfish says it.
     pub async fn bmc_status(&mut self) -> Result<BmcStatus> {
         either!(self, client => client.status().await, Supermicro | Redfish, not Amt | Ipmi)
     }
 
-    /// A BMC's sensors.
     pub async fn sensors(&mut self) -> Result<Vec<Sensor>> {
         either!(self, client => client.sensors().await, Supermicro | Ipmi | Redfish, not Amt)
     }
 
-    /// A BMC's front panel.
     pub async fn panel(&mut self) -> Result<Panel> {
         either!(self, client => client.panel().await, Supermicro | Ipmi | Redfish, not Amt)
     }
 
-    /// Lights a BMC's identify light until turned off, or turns it off.
-    pub async fn identify(&mut self, on: bool) -> Result<()> {
-        either!(self, client => client.identify(on).await, Supermicro | Ipmi | Redfish, not Amt)
+    /// Lights a BMC's identify light until it is turned off, or turns it off.
+    pub async fn identify(&mut self, is_on: bool) -> Result<()> {
+        either!(self, client => client.identify(is_on).await, Supermicro | Ipmi | Redfish, not Amt)
     }
 
-    /// Opens the device's screen.
     pub async fn kvm(&mut self) -> Result<Kvm> {
         match self {
             Self::Amt(client) => client.kvm().await.map(Kvm::Amt),
@@ -168,7 +162,6 @@ impl Client {
         }
     }
 
-    /// Opens the device's serial console.
     pub async fn sol(&mut self) -> Result<Sol> {
         match self {
             Self::Amt(client) => client.sol().await.map(Sol::Amt),
@@ -187,7 +180,7 @@ impl Client {
         }
     }
 
-    /// The device's own web pages, where what we don't do can be done.
+    /// The device's own web pages, where what we do not do can be done.
     pub fn web_pages(&self) -> String {
         match self {
             Self::Amt(client) => client.web_pages(),
@@ -217,7 +210,7 @@ impl Kvm {
 }
 
 impl Media {
-    /// Answers the device until it's done with the disc or `eject` takes it out, see `amt::Ider::serve`.
+    /// Answers the device until it is done with the disc or `eject` takes it out, see `amt::Ider::serve`.
     pub async fn serve(self, read: impl FnMut(Range<u64>), eject: impl Future<Output = ()>) -> Result<()> {
         match self {
             Self::Amt(ider) => ider.serve(read, eject).await,
@@ -227,13 +220,13 @@ impl Media {
 }
 
 impl Sol {
-    /// What the device wrote to its serial port since, or nothing after a second.
+    /// What the device wrote to its serial port since the last read, or nothing after a second.
     pub async fn read(&self) -> Result<Vec<u8>> {
         either!(self, sol => sol.read().await, Amt | Ipmi)
     }
 
-    pub async fn write(&self, data: &[u8]) -> Result<()> {
-        either!(self, sol => sol.write(data).await, Amt | Ipmi)
+    pub async fn write(&self, bytes: &[u8]) -> Result<()> {
+        either!(self, sol => sol.write(bytes).await, Amt | Ipmi)
     }
 
     pub async fn close(&self) {

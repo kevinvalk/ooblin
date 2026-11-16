@@ -7,7 +7,7 @@ use super::wsman::{Instance, Reference, method};
 use crate::{Error, Power, PowerAction, PowerState, Result};
 
 impl PowerAction {
-    /// Its CIM `PowerState`, as go-wsman-messages names them: 8 is a hard off, 12 the soft one.
+    /// The CIM `PowerState` to request, as go-wsman-messages names them: 8 is a hard off and 12 the soft one.
     fn state(self) -> u8 {
         match self {
             Self::On | Self::OnToBios | Self::OnToPxe | Self::OnToImage | Self::OnToSerial => 2,
@@ -44,6 +44,7 @@ impl Client {
         let associations = self.enumerate("CIM_ServiceAvailableToElement").await?;
         let association = associations.iter().find(|association| association.get("PowerState").is_some());
         let association = association.ok_or_else(|| Error::Protocol("no PowerState on the device".into()))?;
+
         let state = match association.get("PowerState") {
             Some("2") => PowerState::On,
             Some("3" | "4") => PowerState::Asleep,
@@ -53,9 +54,10 @@ impl Client {
         };
         let mut actions: Vec<_> =
             association.all("AvailableRequestedPowerStates").filter_map(PowerAction::from_state).collect();
-        // Like Intel's console: into the BIOS, PXE or IDER, or on SOL, when it says it can.
-        let boot = self.get("AMT_BootCapabilities").await?;
-        let can = |capability| boot.get(capability) == Some("true");
+
+        // Like Intel's console, we offer booting into the BIOS, PXE or IDER, or on SOL, when the device says it can.
+        let capabilities = self.get("AMT_BootCapabilities").await?;
+        let can = |capability| capabilities.get(capability) == Some("true");
         for (via, bios, pxe, image, serial) in [
             (
                 PowerAction::On,
@@ -78,6 +80,7 @@ impl Client {
                     .extend(targets.into_iter().filter(|&(capability, _)| can(capability)).map(|(_, action)| action));
             }
         }
+
         Ok(Power { state, actions })
     }
 
@@ -89,21 +92,26 @@ impl Client {
             PowerAction::OnToSerial | PowerAction::ResetToSerial => self.boot_once(Boot::Serial).await?,
             _ => {}
         }
+
         self.invoke(&RequestPowerStateChange { PowerState: action.state(), ManagedElement: SYSTEM }).await?;
+
         Ok(())
     }
 
-    /// Sets up the next boot like Intel's console does (`internal/usecase/devices/power.go`): clear the boot order,
-    /// put the boot settings, make that configuration the next boot's, and boot from PXE if that's where.
+    /// We set up the next boot like Intel's console does (`internal/usecase/devices/power.go`): clear the boot order,
+    /// put the boot settings, make that configuration the one of the next boot, and boot from PXE if that is the
+    /// target.
     async fn boot_once(&mut self, boot: Boot) -> Result<()> {
         let current = self.get("AMT_BootSettingData").await?;
         self.invoke(&ChangeBootOrder { Source: None }).await?;
         self.put("AMT_BootSettingData", &BootSettingData::once(&current, boot)).await?;
+
         let configuration = Reference {
             class: "CIM_BootConfigSetting",
             selectors: &[("InstanceID", "Intel(r) AMT: Boot Configuration 0")],
         };
         self.invoke(&SetBootConfigRole { BootConfigSetting: configuration, Role: 1 }).await?;
+
         if boot == Boot::Pxe {
             let pxe = Reference {
                 class: "CIM_BootSourceSetting",
@@ -111,40 +119,52 @@ impl Client {
             };
             self.invoke(&ChangeBootOrder { Source: Some(pxe) }).await?;
         }
+
         Ok(())
     }
 }
 
 /// One-Click Recovery (booting a recovery image) and remote platform erase, which the BIOS has to allow as well: `None`
-/// where the device can't.
+/// where the device cannot do it.
 #[derive(Debug, Serialize, Deserialize, TS)]
 #[ts(export, export_to = "core.ts")]
 pub struct Recovery {
-    pub one_click: Option<bool>,
-    pub platform_erase: Option<bool>,
+    pub is_one_click: Option<bool>,
+    pub is_platform_erase: Option<bool>,
 }
 
 impl Client {
-    /// As Intel's console reads them: the boot service's state from 32768 on has One-Click Recovery as bit 0 and
-    /// platform erase as bit 1.
     pub async fn recovery(&mut self) -> Result<Recovery> {
         let capabilities = self.get("AMT_BootCapabilities").await?;
-        let state = self.get("CIM_BootService").await?.parse::<u16>("EnabledState").unwrap_or(0);
-        let on = |bit| state >= 32768 && state & bit != 0;
-        let can = |name| capabilities.get(name) == Some("true");
-        let one_click = can("ForceUEFIHTTPSBoot") || can("ForceWinREBoot") || can("ForceUEFIPBABoot");
-        let platform_erase = capabilities.parse::<u32>("PlatformErase").unwrap_or(0) & 1 != 0;
-        Ok(Recovery { one_click: one_click.then(|| on(1)), platform_erase: platform_erase.then(|| on(2)) })
+        let boot_service = self.get("CIM_BootService").await?;
+
+        // We read them as Intel's console does: the state of the boot service has, from 32768 on, One-Click Recovery
+        // as bit 0 and platform erase as bit 1.
+        let state = boot_service.parse::<u16>("EnabledState").unwrap_or(0);
+        let is_on = |bit| state >= 32768 && state & bit != 0;
+
+        let can = |capability| capabilities.get(capability) == Some("true");
+        let has_one_click = can("ForceUEFIHTTPSBoot") || can("ForceWinREBoot") || can("ForceUEFIPBABoot");
+        let has_platform_erase = capabilities.parse::<u32>("PlatformErase").unwrap_or(0) & 1 != 0;
+
+        Ok(Recovery {
+            is_one_click: has_one_click.then(|| is_on(1)),
+            is_platform_erase: has_platform_erase.then(|| is_on(2)),
+        })
     }
 
-    /// Like MeshCommander, a state the device didn't take is one its BIOS doesn't allow.
     pub(super) async fn set_recovery(&mut self, wanted: &Recovery) -> Result<()> {
-        let state =
-            32768 | u16::from(wanted.one_click == Some(true)) | u16::from(wanted.platform_erase == Some(true)) << 1;
+        let state = 32768
+            | u16::from(wanted.is_one_click == Some(true))
+            | u16::from(wanted.is_platform_erase == Some(true)) << 1;
         self.invoke(&BootStateChange { RequestedState: state }).await?;
-        if self.get("CIM_BootService").await?.parse("EnabledState") != Some(state) {
+
+        // Like MeshCommander, we take a state the device did not keep as one its BIOS does not allow.
+        let boot_service = self.get("CIM_BootService").await?;
+        if boot_service.parse("EnabledState") != Some(state) {
             return Err(Error::Protocol("the device didn't take it, its BIOS may not allow it".into()));
         }
+
         Ok(())
     }
 }
@@ -157,7 +177,7 @@ const BOOT_CONFIG: &str = "http://schemas.dmtf.org/wbem/wscim/1/cim-schema/2/CIM
 const BOOT_SERVICE: &str = "http://schemas.dmtf.org/wbem/wscim/1/cim-schema/2/CIM_BootService";
 const BOOT_SETTINGS: &str = "http://intel.com/wbem/wscim/1/amt-schema/1/AMT_BootSettingData";
 
-/// The host, the one system AMT changes the power of.
+// The host, which is the one system AMT changes the power of.
 const SYSTEM: Reference = Reference {
     class: "CIM_ComputerSystem",
     selectors: &[("CreationClassName", "CIM_ComputerSystem"), ("Name", "ManagedSystem")],
@@ -172,7 +192,7 @@ struct RequestPowerStateChange<'a> {
 
 method!(RequestPowerStateChange<'_>, POWER_MANAGEMENT);
 
-/// Without a `Source`, it clears the boot order.
+// NOTE: Without a `Source`, this clears the boot order.
 #[derive(ToXml)]
 #[xml(rename = "ChangeBootOrder_INPUT", ns(BOOT_CONFIG))]
 struct ChangeBootOrder<'a> {
@@ -198,7 +218,7 @@ struct BootStateChange {
 
 method!(BootStateChange, BOOT_SERVICE, "RequestStateChange");
 
-/// Exactly the settings AMT takes back.
+// NOTE: These are exactly the settings AMT takes back.
 #[derive(ToXml)]
 #[xml(rename = "AMT_BootSettingData", ns(BOOT_SETTINGS))]
 struct BootSettingData<'a> {
@@ -229,7 +249,7 @@ struct BootSettingData<'a> {
     UserPasswordBypass: bool,
 }
 
-/// Where to boot once: the BIOS setup, the network, the disk image in the IDER drive, or as usual on the serial console.
+// Where to boot once: the BIOS setup, the network, the disk image in the IDER drive, or as usual on the serial console.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Boot {
     Bios,
@@ -239,10 +259,11 @@ enum Boot {
 }
 
 impl<'a> BootSettingData<'a> {
-    /// Intel's console keeps the device's own names and secure boot, clears the rest, and says where to boot: the
-    /// BIOS setup, or IDER's CD-ROM (its device 1), or that the BIOS's screen goes to SOL.
+    /// Like Intel's console, we keep the device's own names and secure boot, clear the rest, and say where to boot:
+    /// the BIOS setup, or IDER's CD-ROM (its device 1), or that the BIOS's screen goes to SOL.
     fn once(current: &'a Instance, boot: Boot) -> Self {
         let kept = |name| current.get(name).unwrap_or_default();
+
         Self {
             BIOSPause: false,
             BIOSSetup: boot == Boot::Bios,

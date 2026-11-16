@@ -1,5 +1,3 @@
-//! A webview over `ooblin-core`. The webview never holds a socket or a stored password, it calls these commands.
-
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod connections;
@@ -17,7 +15,7 @@ use connections::{Changed, Connected, Connections, Serving, Task};
 use hosts::Device;
 use ooblin_core::amt::{AuditRecord, Change, Screens, Settings, Status};
 use ooblin_core::ipmi::{Change as IpmiChange, Fru, IpmiSettings, IpmiStatus};
-use ooblin_core::supermicro::{BmcSettings, BmcStatus, Change as BmcChange};
+use ooblin_core::supermicro::{BmcChange, BmcSettings, BmcStatus};
 use ooblin_core::{
     Client, Error, Event, Flavor, Found, Hardware, Input, Media, Panel, Power, PowerAction, RMCP_PORT, Sensor, Target,
 };
@@ -46,8 +44,9 @@ struct Args {
 struct Launch(std::sync::Mutex<Args>);
 
 impl Launch {
-    /// The login the command line gives `host`, if it gives a password, once: tried on every click, a wrong one would
-    /// lock a BMC's account, in place of the one typed and remembered since.
+    /// The login the command line gives `host`, if it gives a password. We only hand it out ONCE, because tried on
+    /// every click a wrong one would lock a BMC's account, and it would stand in for the one typed and remembered
+    /// since.
     fn login(&self, host: &str) -> Option<Target> {
         let args = &mut *self.0.lock().unwrap();
         let password = args.password.take_if(|_| args.host.as_deref() == Some(host))?;
@@ -56,14 +55,15 @@ impl Launch {
 }
 
 /// The device the command line names, if any. The webview opens it like a click in the sidebar would, on start and when
-/// we're started again.
+/// we are started again.
 #[tauri::command]
 fn launch(connections: State<'_, Connections>, launch: State<'_, Launch>) -> Result<Option<Device>, CommandError> {
     let args = launch.0.lock().unwrap();
     let Some(host) = args.host.clone() else { return Ok(None) };
+
     let saved = connections.hosts()?.device(&host).filter(|_| args.password.is_none());
-    let (user, remembered) = (args.user.clone(), args.password.is_some());
-    let unsaved = Device { host, name: String::new(), version: String::new(), user, remembered, flavor: None };
+    let (user, is_remembered) = (args.user.clone(), args.password.is_some());
+    let unsaved = Device { host, name: String::new(), version: String::new(), user, is_remembered, flavor: None };
     Ok(Some(saved.unwrap_or(unsaved)))
 }
 
@@ -72,8 +72,9 @@ fn devices(connections: State<'_, Connections>) -> Result<Vec<Device>, CommandEr
     Ok(connections.hosts()?.devices())
 }
 
-/// Without a `password`, with the one we have: from the command line (once) or the OS credential store. `remember`
-/// keeps a typed one there, as does a device remembered already: the password that last worked replaces the one before.
+/// Without a `password` we log in with the one we have, from the command line (once) or the OS credential store.
+/// `is_remember` keeps a typed one there, and so does a device we remember already, as the password that last worked
+/// replaces the one before.
 #[tauri::command]
 async fn connect(
     connections: State<'_, Connections>,
@@ -81,18 +82,20 @@ async fn connect(
     host: String,
     user: String,
     password: Option<String>,
-    remember: bool,
+    is_remember: bool,
     flavor: Option<Flavor>,
 ) -> Result<Connected, CommandError> {
     let hosts = connections.hosts()?;
-    let remembered = hosts.device(&host).is_some_and(|device| device.remembered);
-    let remember = password.is_some() && (remember || remembered);
+    let is_remembered = hosts.device(&host).is_some_and(|device| device.is_remembered);
+    let is_remember = password.is_some() && (is_remember || is_remembered);
+
     let target = match (password, launch.login(&host)) {
         (Some(password), _) => Target::new(host, user, password),
         (None, Some(target)) => target,
         (None, None) => hosts.target(&host)?,
     };
-    connections.connect(target, flavor, remember).await
+
+    connections.connect(target, flavor, is_remember).await
 }
 
 #[tauri::command]
@@ -111,22 +114,19 @@ fn trust(connections: State<'_, Connections>, host: &str, fingerprint: String) -
     Ok(connections.edit(|hosts| hosts.trust(host, fingerprint))?)
 }
 
-/// Whether this is the verify build (AGENTS.md), which keeps to the mock and off the user's screen.
-const VERIFY: bool = cfg!(feature = "verify");
+const IS_VERIFY_BUILD: bool = cfg!(feature = "verify"); // It keeps to the mock and off the user's screen (AGENTS.md).
 
 /// The network to look for devices on unless told otherwise, see `ooblin_core::nearby`. The verify build looks on this
-/// machine only, where the mock is, never at the user's devices.
+/// machine only, where the mock is, and never at the user's devices.
 #[tauri::command]
 fn networks() -> String {
-    if VERIFY { "127.0.0.1/32".into() } else { ooblin_core::nearby() }
+    if IS_VERIFY_BUILD { "127.0.0.1/32".into() } else { ooblin_core::nearby() }
 }
 
-/// The search for devices underway, see `discover`.
 #[derive(Default)]
 struct Discovery(std::sync::Mutex<Option<Task>>);
 
-/// Looks for devices on `networks` and says each on `found` as it answers, see `ooblin_core::discover`. It ends the
-/// search before, as does `stop_discovery`.
+/// Looks for devices on `networks` and sends each on `found` as it answers, see `ooblin_core::discover`.
 #[tauri::command]
 async fn discover(
     discovery: State<'_, Discovery>,
@@ -135,11 +135,15 @@ async fn discover(
 ) -> Result<(), CommandError> {
     let (done, mut ended) = tauri::async_runtime::channel(1);
     let search = async move {
-        let result = ooblin_core::discover(&networks, RMCP_PORT, |device| found.send(device).unwrap_or_default()).await;
-        done.send(result).await.unwrap_or_default();
+        let outcome =
+            ooblin_core::discover(&networks, RMCP_PORT, |device| found.send(device).unwrap_or_default()).await;
+        done.send(outcome).await.unwrap_or_default();
     };
+
+    // Replacing the task drops the one before, which ends that search, as `stop_discovery` does.
     *discovery.0.lock().unwrap() = Some(Task(tauri::async_runtime::spawn(search)));
-    // A stopped search never says how it went.
+
+    // A stopped search never says how it went, so we call that fine.
     Ok(ended.recv().await.unwrap_or(Ok(()))?)
 }
 
@@ -151,15 +155,16 @@ fn stop_discovery(discovery: State<'_, Discovery>) {
 #[tauri::command]
 async fn set_power(connections: State<'_, Connections>, host: &str, action: PowerAction) -> Result<(), CommandError> {
     let connection = connections.get(host)?;
-    if matches!(action, PowerAction::OnToImage | PowerAction::ResetToImage) && !connection.image.serving().await {
+    if matches!(action, PowerAction::OnToImage | PowerAction::ResetToImage) && !connection.image.is_serving().await {
         return Err(CommandError::failed("No disk image is mounted, mount one again."));
     }
+
     log::info!("{action:?} on {host}");
     Ok(connection.client.lock().await.set_power(action).await?)
 }
 
-/// What the UI reads from a device: a command per `Client` read, named after it, and per read only one flavor makes,
-/// `= flavor.method` of that flavor's client.
+// What the UI reads from a device is a command per `Client` read, named after it. A read that only one flavor makes
+// names it as `= flavor.method`, the method of that flavor's client.
 macro_rules! reads {
     ($($name:ident $(= $flavor:ident.$method:ident)?: $type:ty);* $(;)?) => {$(
         #[tauri::command]
@@ -178,15 +183,12 @@ reads!(power: Power; hardware: Hardware; event_log: Vec<Event>; sensors: Vec<Sen
        bmc_status: BmcStatus; bmc_settings = supermicro.bmc_settings: BmcSettings;
        ipmi_status = ipmi.status: IpmiStatus; fru = ipmi.fru: Fru; ipmi_settings = ipmi.settings: IpmiSettings);
 
-/// Lights a BMC's identify light, or turns it off.
 #[tauri::command]
-async fn identify(connections: State<'_, Connections>, host: &str, on: bool) -> Result<(), CommandError> {
-    log::info!("Identify {} on {host}", if on { "on" } else { "off" });
-    Ok(connections.get(host)?.client.lock().await.identify(on).await?)
+async fn identify(connections: State<'_, Connections>, host: &str, is_on: bool) -> Result<(), CommandError> {
+    log::info!("Identify {} on {host}", if is_on { "on" } else { "off" });
+    Ok(connections.get(host)?.client.lock().await.identify(is_on).await?)
 }
 
-/// Changes a setting and says how it went, see `Connections::change`: the name goes in the saved devices, and a disk
-/// image comes out of a drive that's off. The webview closes the screen and serial console once they're off.
 #[tauri::command]
 async fn change(
     connections: State<'_, Connections>,
@@ -197,23 +199,28 @@ async fn change(
     if let Change::AddCertificate { path, .. } = &change {
         picked.check(path, false)?;
     }
+
     let make = async |client: &mut Client, change| client.amt()?.change(change).await;
     let changed = connections.change(host, change, make, async |client| client.amt()?.settings().await).await?;
+
     if let Ok(settings) = &changed.settings {
         let name = &settings.general.name;
         if let Err(error) = connections.edit(|hosts| hosts.renamed(host, name)) {
             log::warn!("Saving {host}'s name {name} failed: {error}");
         }
-        if !settings.remote_access.ider
+
+        // A drive that is turned off cannot hold a disk image, so we take it out. The screen and serial console are
+        // closed by the webview once they are off.
+        if !settings.remote_access.is_ider
             && let Ok(connection) = connections.get(host)
         {
             connection.image.close(None).await;
         }
     }
+
     Ok(changed)
 }
 
-/// Like `change`, for an IPMI BMC.
 #[tauri::command]
 async fn ipmi_change(
     connections: State<'_, Connections>,
@@ -224,7 +231,6 @@ async fn ipmi_change(
     connections.change(host, change, make, async |client| client.ipmi()?.settings().await).await
 }
 
-/// Like `change`, for a BMC.
 #[tauri::command]
 async fn bmc_change(
     connections: State<'_, Connections>,
@@ -235,7 +241,6 @@ async fn bmc_change(
     connections.change(host, change, make, async |client| client.supermicro()?.bmc_settings().await).await
 }
 
-/// Writes the certificate as PEM to `path`.
 #[tauri::command]
 async fn save_certificate(
     connections: State<'_, Connections>,
@@ -245,18 +250,18 @@ async fn save_certificate(
     path: PathBuf,
 ) -> Result<(), CommandError> {
     picked.check(&path, true)?;
+
     let pem = connections.get(host)?.client.lock().await.amt()?.certificate(id).await?;
     Ok(std::fs::write(path, pem)?)
 }
 
-/// Opens the device's own web pages in the browser.
 #[tauri::command]
 async fn web_pages(connections: State<'_, Connections>, host: &str) -> Result<(), CommandError> {
     let url = connections.get(host)?.client.lock().await.web_pages();
     tauri_plugin_opener::open_url(url, None::<&str>).map_err(CommandError::failed)
 }
 
-/// Has the device show a code for someone at it to read out, see `amt::Client::start_consent`.
+/// The device shows a code for someone at it to read out, see `amt::Client::start_consent`.
 #[tauri::command]
 async fn consent_start(connections: State<'_, Connections>, host: &str) -> Result<(), CommandError> {
     Ok(connections.get(host)?.client.lock().await.amt()?.start_consent().await?)
@@ -272,13 +277,12 @@ async fn consent_cancel(connections: State<'_, Connections>, host: &str) -> Resu
     Ok(connections.get(host)?.client.lock().await.amt()?.cancel_consent().await?)
 }
 
-/// Opens the device's screen and says its id, which the other `kvm_` commands take. See `Connections::open`.
+/// Returns the id of the screen, which the other `kvm_` commands take.
 #[tauri::command]
 async fn kvm_open(connections: State<'_, Connections>, host: &str) -> Result<u64, CommandError> {
     connections.open(host, |connection| &connection.kvm, async |client| client.kvm().await.map(Arc::new)).await
 }
 
-/// See `amt::Client::screens`.
 #[tauri::command]
 async fn screens(connections: State<'_, Connections>, host: &str) -> Result<Screens, CommandError> {
     Ok(connections.get(host)?.client.lock().await.amt()?.screens().await?)
@@ -289,7 +293,7 @@ async fn show_screen(connections: State<'_, Connections>, host: &str, screen: u8
     Ok(connections.get(host)?.client.lock().await.amt()?.show_screen(screen).await?)
 }
 
-/// The next change on screen, as bytes rather than JSON (see `Kvm::frame`).
+/// The next change on screen, which we answer as bytes instead of JSON (see `Kvm::frame`).
 #[tauri::command]
 async fn kvm_frame(connections: State<'_, Connections>, host: &str, id: u64) -> Result<Response, CommandError> {
     Ok(Response::new(connections.get(host)?.kvm.get(id).await?.frame().await?))
@@ -305,7 +309,7 @@ async fn kvm_input(
     Ok(connections.get(host)?.kvm.get(id).await?.input(inputs).await?)
 }
 
-/// Closes the screen `id` names, unless another one opened since or the device was disconnected, which closed it.
+/// Another screen opening since, or disconnecting the device, closed this one already. So that is fine too.
 #[tauri::command]
 async fn kvm_close(connections: State<'_, Connections>, host: &str, id: u64) -> Result<(), CommandError> {
     if let Ok(connection) = connections.get(host) {
@@ -314,24 +318,24 @@ async fn kvm_close(connections: State<'_, Connections>, host: &str, id: u64) -> 
     Ok(())
 }
 
-/// Opens the device's serial console and says its id, which the other `sol_` commands take, like `kvm_open`.
+/// Returns the id of the serial console, which the other `sol_` commands take.
 #[tauri::command]
 async fn sol_open(connections: State<'_, Connections>, host: &str) -> Result<u64, CommandError> {
     connections.open(host, |connection| &connection.sol, async |client| client.sol().await.map(Arc::new)).await
 }
 
-/// What the device wrote to its serial port since, see `Sol::read`, as bytes rather than JSON.
+/// What the device wrote to its serial port since, which we answer as bytes instead of JSON (see `Sol::read`).
 #[tauri::command]
 async fn sol_read(connections: State<'_, Connections>, host: &str, id: u64) -> Result<Response, CommandError> {
     Ok(Response::new(connections.get(host)?.sol.get(id).await?.read().await?))
 }
 
 #[tauri::command]
-async fn sol_write(connections: State<'_, Connections>, host: &str, id: u64, data: String) -> Result<(), CommandError> {
-    Ok(connections.get(host)?.sol.get(id).await?.write(data.as_bytes()).await?)
+async fn sol_write(connections: State<'_, Connections>, host: &str, id: u64, text: String) -> Result<(), CommandError> {
+    Ok(connections.get(host)?.sol.get(id).await?.write(text.as_bytes()).await?)
 }
 
-/// Like `kvm_close`.
+/// Another serial console opening since, or disconnecting the device, closed this one already. So that is fine too.
 #[tauri::command]
 async fn sol_close(connections: State<'_, Connections>, host: &str, id: u64) -> Result<(), CommandError> {
     if let Ok(connection) = connections.get(host) {
@@ -340,37 +344,41 @@ async fn sol_close(connections: State<'_, Connections>, host: &str, id: u64) -> 
     Ok(())
 }
 
-/// The files the user picked in a dialog, to save to or to open: the only ones a command takes from the webview, which
-/// could name any other, were a device ever to get a script into it.
+/// The files the user picked in a dialog, to save to or to open. A command only takes these from the webview, because
+/// the webview could name any other file if a device ever got a script into it.
 #[derive(Default)]
 struct Picked(std::sync::Mutex<HashSet<(PathBuf, bool)>>);
 
 impl Picked {
-    fn keep(&self, path: Option<PathBuf>, save: bool) -> Option<PathBuf> {
-        self.0.lock().unwrap().extend(path.clone().map(|path| (path, save)));
+    fn keep(&self, path: Option<PathBuf>, is_save: bool) -> Option<PathBuf> {
+        self.0.lock().unwrap().extend(path.clone().map(|path| (path, is_save)));
         path
     }
 
-    fn check(&self, path: &Path, save: bool) -> Result<(), CommandError> {
-        let picked = self.0.lock().unwrap().contains(&(path.to_owned(), save));
-        picked.then_some(()).ok_or_else(|| CommandError::failed("That file wasn't picked here."))
+    fn check(&self, path: &Path, is_save: bool) -> Result<(), CommandError> {
+        let is_picked = self.0.lock().unwrap().contains(&(path.to_owned(), is_save));
+        is_picked.then_some(()).ok_or_else(|| CommandError::failed("That file wasn't picked here."))
     }
 }
 
-/// Asks for a file to open, of a `kind` ("Disk image") and its `extensions`. Native dialogs want the main thread, where
-/// a command that isn't async runs. The verify build never shows one, it picks the file `OOBLIN_PICK` names.
+/// Asks for a file to open, of a `kind` ("Disk image") and its `extensions`. The verify build never shows a dialog, it
+/// picks the file `OOBLIN_PICK` names.
+///
+/// NOTE: Native dialogs want the main thread, which is where a command that is not async runs.
 #[tauri::command]
 fn pick(window: WebviewWindow, picked: State<'_, Picked>, kind: &str, extensions: Vec<String>) -> Option<PathBuf> {
     let dialog = || rfd::FileDialog::new().set_parent(&window).add_filter(kind, &extensions).pick_file();
-    picked.keep(if VERIFY { std::env::var_os("OOBLIN_PICK").map(PathBuf::from) } else { dialog() }, false)
+    let path = if IS_VERIFY_BUILD { std::env::var_os("OOBLIN_PICK").map(PathBuf::from) } else { dialog() };
+    picked.keep(path, false)
 }
 
-/// Asks where to save a file, suggesting `name`, see `pick`. The verify build saves to `OOBLIN_SAVE`, never over the
-/// file it picks.
+/// Asks where to save a file, suggesting `name`, see `pick`. The verify build saves to `OOBLIN_SAVE`, so never over
+/// the file it picks.
 #[tauri::command]
 fn pick_save(window: WebviewWindow, picked: State<'_, Picked>, name: &str) -> Option<PathBuf> {
     let dialog = || rfd::FileDialog::new().set_parent(&window).set_file_name(name).save_file();
-    picked.keep(if VERIFY { std::env::var_os("OOBLIN_SAVE").map(PathBuf::from) } else { dialog() }, true)
+    let path = if IS_VERIFY_BUILD { std::env::var_os("OOBLIN_SAVE").map(PathBuf::from) } else { dialog() };
+    picked.keep(path, true)
 }
 
 /// A disk image in a device's drive: the id `eject` takes, its file's name and its size.
@@ -379,7 +387,7 @@ fn pick_save(window: WebviewWindow, picked: State<'_, Picked>, name: &str) -> Op
 struct Mounted {
     id: u64,
     name: String,
-    size: u64,
+    size_bytes: u64,
 }
 
 /// What the device does with the disk image in its drive: reads part of it, in bytes, or ends the session, a reset say,
@@ -392,7 +400,7 @@ enum Drive {
     Ended { error: Option<CommandError> },
 }
 
-/// Puts the image at `path` in the device's drive (see `Client::mount`), taking out the one in it, then says on
+/// Puts the image at `path` in the device's drive (see `Client::mount`), taking out the one in it, then sends on
 /// `drive` what the device does with it.
 #[tauri::command]
 async fn mount(
@@ -403,32 +411,37 @@ async fn mount(
     drive: Channel<Drive>,
 ) -> Result<Mounted, CommandError> {
     picked.check(&path, false)?;
+
     let file = std::fs::File::open(&path)?;
-    let size = file.metadata()?.len();
+    let size_bytes = file.metadata()?.len();
     let name = path.file_name().unwrap_or_default().to_string_lossy().into_owned();
     let image = format!("{name} in {host}'s drive");
+
     let open = async |client: &mut Client| {
         let media = client.mount(file).await?;
         let (eject, ejected) = tauri::async_runtime::channel(1);
-        Ok(Serving { task: Task(tauri::async_runtime::spawn(serve(media, drive, image, ejected))), eject })
+        let task = Task(tauri::async_runtime::spawn(serve(media, drive, image, ejected)));
+        Ok(Serving { task, eject })
     };
     let id = connections.open(host, |connection| &connection.image, open).await?;
-    Ok(Mounted { id, name, size })
+    Ok(Mounted { id, name, size_bytes })
 }
 
-/// Serves the disk `image` until `ejected` (see `Media::serve`), saying on `drive` what the device reads of it and how
+/// Serves the disk `image` until `ejected` (see `Media::serve`), sending on `drive` what the device reads of it and how
 /// serving it ended.
 async fn serve(media: Media, drive: Channel<Drive>, image: String, mut ejected: Receiver<()>) {
     let read = |read| drive.send(Drive::Read(read)).unwrap_or_default();
     let ended = media.serve(read, async move { ejected.recv().await.unwrap_or_default() }).await;
+
     match &ended {
         Ok(()) => log::info!("{image} is out"),
         Err(error) => log::warn!("Serving {image} broke off: {error}"),
     }
+
     drive.send(Drive::Ended { error: ended.err().map(Into::into) }).unwrap_or_default();
 }
 
-/// Takes the disk image `id` names out of the drive, like `kvm_close`.
+/// Another disk image mounted since, or disconnecting the device, took this one out already. So that is fine too.
 #[tauri::command]
 async fn eject(connections: State<'_, Connections>, host: &str, id: u64) -> Result<(), CommandError> {
     if let Ok(connection) = connections.get(host) {
@@ -437,46 +450,46 @@ async fn eject(connections: State<'_, Connections>, host: &str, id: u64) -> Resu
     Ok(())
 }
 
-/// The window is titled after the device on screen.
 #[tauri::command]
 fn title(window: WebviewWindow, title: &str) -> Result<(), CommandError> {
     window.set_title(title).map_err(CommandError::failed)
 }
 
-/// The window fills the screen, for the KVM's own full screen.
 #[tauri::command]
-fn fullscreen(window: WebviewWindow, on: bool) -> Result<(), CommandError> {
-    window.set_fullscreen(on).map_err(CommandError::failed)
+fn fullscreen(window: WebviewWindow, is_on: bool) -> Result<(), CommandError> {
+    window.set_fullscreen(is_on).map_err(CommandError::failed)
 }
 
 /// Grows or shrinks the window by `width` and `height` in points, for the KVM to show the device's screen at its own
-/// size: out of maximized first, which a size doesn't apply to.
+/// size.
 #[tauri::command]
 fn grow(window: WebviewWindow, width: f64, height: f64) -> Result<(), CommandError> {
-    window.unmaximize().map_err(CommandError::failed)?;
-    let size = window
-        .inner_size()
-        .map_err(CommandError::failed)?
-        .to_logical::<f64>(window.scale_factor().map_err(CommandError::failed)?);
+    window.unmaximize().map_err(CommandError::failed)?; // A size does not apply to a maximized window.
+
+    let scale_factor = window.scale_factor().map_err(CommandError::failed)?;
+    let size = window.inner_size().map_err(CommandError::failed)?.to_logical::<f64>(scale_factor);
     let size = tauri::LogicalSize::new(size.width + width, size.height + height);
     window.set_size(size).map_err(CommandError::failed)
 }
 
-/// Writes the log (see `main`) to `path`, the older file first.
 #[tauri::command]
 fn save_log(app: AppHandle, picked: State<'_, Picked>, path: PathBuf) -> Result<(), CommandError> {
     picked.check(&path, true)?;
-    let logs = app.path().app_log_dir().map_err(CommandError::failed)?;
-    let mut files = std::fs::read_dir(logs)?.collect::<io::Result<Vec<_>>>()?;
+
+    // The log is the current file and the one before it (see `main`), which we write as one with the older file first.
+    let log_directory = app.path().app_log_dir().map_err(CommandError::failed)?;
+    let mut files = std::fs::read_dir(log_directory)?.collect::<io::Result<Vec<_>>>()?;
     files.retain(|file| file.path().extension().is_some_and(|extension| extension == "log"));
     files.sort_by_key(|file| file.metadata().and_then(|metadata| metadata.modified()).ok());
-    let log = files.iter().map(|file| std::fs::read(file.path())).collect::<io::Result<Vec<_>>>()?;
-    Ok(std::fs::write(path, log.concat())?)
+    let logs = files.iter().map(|file| std::fs::read(file.path())).collect::<io::Result<Vec<_>>>()?;
+
+    Ok(std::fs::write(path, logs.concat())?)
 }
 
 /// What the webview gets when a command fails: always a message, and both fingerprints when the certificate changed.
 /// `Unreachable` means the device stopped answering, even to a second try, `Consent` that someone at it has to read out
-/// a code first (see `consent_start`), `Ended` that it ended a session on purpose, which we don't open again ourselves.
+/// a code first (see `consent_start`), `Ended` that it ended a session on purpose, which we do not open again
+/// ourselves.
 #[derive(Debug, Serialize, TS)]
 #[ts(export_to = "ooblin.ts")]
 #[serde(tag = "kind")]
@@ -530,8 +543,9 @@ impl From<keyring::Error> for CommandError {
     }
 }
 
-/// Writes our types the webview sees to ui/src/bindings/ooblin.ts (see .cargo/config.toml), without the ooblin-core
-/// types they hold: ooblin-core's tests write those, and ts-rs writes a file anew on a test run's first write to it.
+/// Writes our types the webview sees to ui/src/bindings/ooblin.ts (see .cargo/config.toml). We leave out the
+/// ooblin-core types they hold, because the tests of ooblin-core write those and ts-rs writes a file anew on a test
+/// run's first write to it.
 #[test]
 fn bindings() -> Result<(), ts_rs::ExportError> {
     let config = ts_rs::Config::from_env();
@@ -566,14 +580,15 @@ fn only_a_file_picked_for_it_is_taken() {
 
 fn main() {
     let args = Args::try_parse().unwrap_or_else(|error| {
-        // A Windows release has no console to say it on (see `windows_subsystem`): a typo, --help or --version.
+        // A Windows release has no console (see `windows_subsystem`), so we say a typo, --help or --version in a
+        // dialog.
         #[cfg(all(windows, not(debug_assertions)))]
         rfd::MessageDialog::new().set_title("Ooblin").set_description(error.to_string()).show();
         error.exit()
     });
 
-    // First, so a second start hands its command line to us and quits before anything else of it starts: we open its
-    // host, if it names one, as on start.
+    // IMPORTANT: This plugin has to be the first, so a second start hands its command line to us and quits before
+    // anything else of it starts. We open its host, if it names one, as on start.
     let builder = tauri::Builder::default().plugin(tauri_plugin_single_instance::init(|app, args, _| {
         if let Ok(args) = Args::try_parse_from(args)
             && args.host.is_some()
@@ -581,18 +596,20 @@ fn main() {
             *app.state::<Launch>().0.lock().unwrap() = args;
             app.emit("launch", ()).unwrap_or_default();
         }
+
         if let Some(window) = app.get_webview_window("main") {
             window.unminimize().unwrap_or_default();
             window.set_focus().unwrap_or_default();
         }
     }));
-    // The verify build lets agents drive the app through a localhost WebSocket (mcp-server-tauri), others don't.
+
+    // Only the verify build lets agents drive the app through a localhost WebSocket (mcp-server-tauri).
     #[cfg(feature = "verify")]
     let builder = builder.plugin(tauri_plugin_mcp_bridge::Builder::new().bind_address("127.0.0.1").build());
 
     builder
-        // What happened, from Rust and the webview, in the OS's log folder: a megabyte at most and the one before, which
-        // `save_log` saves.
+        // We log what happened in Rust and the webview to the OS's log folder. That is a megabyte at most plus the
+        // file before it, which `save_log` saves.
         .plugin(
             tauri_plugin_log::Builder::new()
                 .level(log::LevelFilter::Info)
@@ -601,20 +618,22 @@ fn main() {
                 .build(),
         )
         .setup(|app| {
-            let hosts = app.path().app_config_dir()?.join("hosts.json");
-            app.manage(Connections::new(hosts, app.config().identifier.clone()));
+            let hosts_path = app.path().app_config_dir()?.join("hosts.json");
+            app.manage(Connections::new(hosts_path, app.config().identifier.clone()));
+
             #[cfg(feature = "verify")]
             app.add_capability(
                 tauri::ipc::CapabilityBuilder::new("mcp-bridge")
                     .window("main")
                     .permission("mcp-bridge:default")
-                    // The bridge's script emits events, which the window otherwise may not.
-                    .permission("core:event:default"),
+                    .permission("core:event:default"), // The bridge's script emits events, which the window may not.
             )?;
+
             log::info!("Ooblin {} on {}", app.package_info().version, std::env::consts::OS);
             Ok(())
         })
-        // The window opens where and as large as it was, but neither hidden (the verify build's) nor full screen.
+        // The window opens where and as large as it was. We do not restore hidden (the verify build's window is) nor
+        // full screen.
         .plugin(
             tauri_plugin_window_state::Builder::default()
                 .with_state_flags(StateFlags::SIZE | StateFlags::POSITION | StateFlags::MAXIMIZED)
@@ -623,6 +642,7 @@ fn main() {
         .manage(Launch(args.into()))
         .manage(Discovery::default())
         .manage(Picked::default())
+        // NOTE: The webview never holds a socket or a stored password, it calls these commands instead.
         .invoke_handler(tauri::generate_handler![
             launch,
             devices,

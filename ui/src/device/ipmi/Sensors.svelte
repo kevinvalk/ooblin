@@ -1,5 +1,3 @@
-<!-- A BMC's sensors, any flavor's, by what they measure. Warnings and critical readings stand out by color, as in the
-     event log; between its critical thresholds a reading is a bar too. A sensor that only has states says them. -->
 <script lang="ts">
   import type { Sensor, SensorKind } from "../../bindings/core";
 
@@ -21,7 +19,7 @@
 <!-- While loading every group shows one sensor. -->
 {#each Object.entries(KINDS) as [kind, title] (kind)}
   {@const sensors = data ? data.filter((sensor) => sensor.kind === kind) : [undefined]}
-  {#if sensors.length}
+  {#if sensors.length > 0}
     <section>
       <h2>{title}</h2>
       <dl class="card">

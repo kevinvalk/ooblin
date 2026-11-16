@@ -5,7 +5,8 @@ edition = "2024"
 license = "Apache-2.0"
 publish = false
 
-# The verify build's (`cargo verify`): agents drive it through a WebSocket on localhost (mcp-server-tauri).
+# Only for the verify build (`cargo verify`), where agents drive the app through a WebSocket on localhost
+# (mcp-server-tauri).
 [features]
 verify = ["dep:tauri-plugin-mcp-bridge"]
 
@@ -18,7 +19,7 @@ futures-util = { version = "0.3", default-features = false, features = ["std"] }
 keyring = "4"
 log = "0.4"
 ooblin-core = { path = "../ooblin-core" }
-# Native file dialogs, GTK on Linux as Tauri is.
+# Native file dialogs, with GTK on Linux as that is what Tauri itself uses there.
 rfd = { version = "0.17", default-features = false, features = ["gtk3"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

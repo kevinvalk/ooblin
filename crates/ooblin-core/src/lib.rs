@@ -1,7 +1,5 @@
-//! Intel AMT, Supermicro BMCs and any BMC over IPMI or Redfish, without a webview. Each flavor has its own protocols
-//! (`amt`, `ipmi` and `redfish`, which a vendor's `supermicro` adds its own to), `Client` speaks to any, and all hand
-//! over what's here. Every socket lives in `net`.
-
+// NOTE: Each flavor has its own protocols (`amt`, `ipmi` and `redfish`, which a vendor's `supermicro` adds its own to),
+// `Client` speaks to any of them and they all hand over the types of this file. Every socket lives in `net`.
 pub mod amt;
 mod cdrom;
 mod client;
@@ -19,14 +17,13 @@ use std::time::Duration;
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
-/// A device and how to log in to it. `host` may name a port (`host:port`, `[v6]:port`): a BMC's web port behind a
-/// tunnel or our mock. AMT's ports and IPMI's are fields of their own, which only tests change.
+/// A device and how we log in to it. `host` may name a port (`host:port`, `[v6]:port`), as a BMC's web port can sit
+/// behind a tunnel or be our mock. The ports of AMT and IPMI are fields of their own, which only tests change.
 #[derive(Clone)]
 pub struct Target {
     pub host: String,
     pub wsman_port: u16,
     pub redirection_port: u16,
-    /// IPMI's UDP port, a BMC's.
     pub ipmi_port: u16,
     pub user: String,
     pub password: String,
@@ -44,16 +41,18 @@ impl Target {
         }
     }
 
-    /// `host` for IPMI, bare: one naming its web port (`host:port`, `[v6]:port`) says nothing of IPMI's.
+    /// The bare `host` for IPMI, because a host that names its web port (`host:port`, `[v6]:port`) says nothing about
+    /// the port of IPMI.
     pub fn ipmi_host(&self) -> &str {
         let host = match self.host.rsplit_once(':') {
             Some((host, port)) if port.parse::<u16>().is_ok() && (host.ends_with(']') || !host.contains(':')) => host,
             _ => &self.host,
         };
+
         host.trim_matches(['[', ']'])
     }
 
-    /// `host` as a URL has it, an IPv6 address in brackets.
+    /// `host` as a URL wants it, so an IPv6 address goes in brackets.
     fn authority(&self) -> String {
         match self.host.parse::<Ipv6Addr>() {
             Ok(_) => format!("[{}]", self.host),
@@ -69,11 +68,12 @@ fn mac(mac: &str) -> String {
     mac.to_uppercase().replace('-', ":")
 }
 
-/// A system GUID as SMBIOS and the OS write it: its first three fields little-endian.
 fn uuid(mut guid: [u8; 16]) -> String {
+    // We write a system GUID as SMBIOS and the OS do, so its first three fields are little-endian.
     guid[0..4].reverse();
     guid[4..6].reverse();
     guid[6..8].reverse();
+
     let hex = format!("{:032X}", u128::from_be_bytes(guid));
     [&hex[..8], &hex[8..12], &hex[12..16], &hex[16..20], &hex[20..]].join("-")
 }
@@ -94,7 +94,7 @@ pub enum Error {
     Method { method: String, code: String },
     #[error("WS-Man fault: {0}")]
     Fault(String),
-    /// This device doesn't do that: AMT's `UnsupportedFeature` fault (a class or a setting), or another flavor's call.
+    /// AMT's `UnsupportedFeature` fault (a class or a setting), or a call that only another flavor has.
     #[error("this device doesn't support that")]
     Unsupported,
     #[error("unexpected response: {0}")]
@@ -106,14 +106,14 @@ pub enum Error {
     Consent,
     #[error("that's not the code the device shows")]
     WrongCode,
-    /// The device ended a session on purpose, which we don't open again by ourselves: see `supermicro::Kvm::frame` and
-    /// `ipmi::Sol::read`.
+    /// The device ended a session on purpose, so we do not open it again by ourselves: see `supermicro::Kvm::frame`
+    /// and `ipmi::Sol::read`.
     #[error("the BMC ended the session: {0}")]
     Ended(&'static str),
-    /// An IPMI command's completion code, or a session setup's status, that isn't 0: see `net::ipmi`.
+    /// An IPMI command's completion code, or a session setup's status, that is not 0: see `net::ipmi`.
     #[error("the BMC refused that (IPMI code {0:#04X})")]
     Refused(u8),
-    /// Shown as it is, so a sentence with its capital and period.
+    /// We show this as it is, so it has to be a sentence with its capital and period.
     #[error("{0}")]
     Invalid(String),
 }
@@ -121,7 +121,7 @@ pub enum Error {
 impl From<std::io::Error> for Error {
     fn from(error: std::io::Error) -> Self {
         match error.kind() {
-            // TLS says so in more words, with a link.
+            // We say this ourselves, because TLS says it in more words and with a link.
             std::io::ErrorKind::UnexpectedEof => Self::Transport("the device closed the connection".into()),
             _ => Self::Transport(error.to_string()),
         }
@@ -141,7 +141,7 @@ pub enum Flavor {
     Redfish,
 }
 
-/// What a login says about the device. Text it doesn't have is empty: AMT's own facts (`build`, `control_mode`) on a
+/// What a login says about the device. Text it does not have is empty: AMT's own facts (`build`, `control_mode`) on a
 /// BMC, the `fingerprint` over IPMI.
 #[derive(Debug, Serialize, TS)]
 #[ts(export, export_to = "core.ts")]
@@ -165,12 +165,12 @@ pub struct Info {
 #[ts(export, export_to = "core.ts")]
 pub struct RemoteAccess {
     /// `None` on a device without KVM.
-    pub kvm: Option<bool>,
-    pub sol: bool,
-    pub ider: bool,
+    pub is_kvm: Option<bool>,
+    pub is_sol: bool,
+    pub is_ider: bool,
     pub consent: Consent,
-    /// Only read: whether `consent` may change, which in client control mode it can't.
-    pub consent_fixed: bool,
+    /// Only read: whether `consent` may change, which in client control mode it cannot.
+    pub is_consent_fixed: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
@@ -189,7 +189,7 @@ pub struct Power {
     pub actions: Vec<PowerAction>,
 }
 
-/// The power states the devices report, folded into what a person cares about and named the way they'd say it.
+/// The power states the devices report, folded into what a person cares about and named the way they would say it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, TS)]
 #[ts(export, export_to = "core.ts")]
 pub enum PowerState {
@@ -225,8 +225,8 @@ pub enum PowerAction {
     ResetToSerial,
 }
 
-/// Everything the device knows about its hardware, gathered by the BIOS at boot. Only what's installed, no empty memory
-/// slots or drive bays. Text the device left out is empty, numbers it left out are `None`.
+/// Everything the device knows about its hardware, gathered by the BIOS at boot. Only what is installed, no empty
+/// memory slots or drive bays. Text the device left out is empty, numbers it left out are `None`.
 #[derive(Debug, Serialize, TS)]
 #[ts(export, export_to = "core.ts")]
 pub struct Hardware {
@@ -257,7 +257,7 @@ pub struct Motherboard {
     pub version: String,
     pub serial_number: String,
     pub asset_tag: String,
-    pub replaceable: bool,
+    pub is_replaceable: bool,
 }
 
 /// `released` is a date, SMBIOS keeps no time.
@@ -317,9 +317,9 @@ pub struct Battery {
 #[derive(Debug, Serialize, TS)]
 #[ts(export, export_to = "core.ts")]
 pub struct Port {
-    pub wireless: bool,
+    pub is_wireless: bool,
     pub mac: String,
-    pub link_up: bool,
+    pub is_link_up: bool,
     pub mbps: Option<u64>,
     pub ipv4: Ipv4,
     /// `None` when IPv6 is off.
@@ -360,13 +360,13 @@ pub struct Ipv6 {
 #[ts(export, export_to = "core.ts")]
 pub struct Event {
     /// Unix seconds.
-    pub time: u32,
+    pub occurred_at: u32,
     pub source: String,
     pub description: String,
     pub severity: Severity,
 }
 
-/// A sensor's reading in its `unit` ("°C", "RPM", "V", "A", "W", "%" or the unit's name), `None` where it's absent or
+/// A sensor's reading in its `unit` ("°C", "RPM", "V", "A", "W", "%" or the unit's name), `None` where it is absent or
 /// unreadable, or a discrete sensor's asserted `state` in words; `low` and `high` are its critical thresholds.
 #[derive(Debug, Clone, PartialEq, Serialize, TS)]
 #[ts(export, export_to = "core.ts")]
@@ -394,11 +394,11 @@ pub enum SensorKind {
 }
 
 /// What can be seen of a server's front panel from here: whether its identify light (UID) is lit, and the last POST
-/// code its BIOS wrote, each `None` where the BMC doesn't say.
+/// code its BIOS wrote, each `None` where the BMC does not say.
 #[derive(Debug, Serialize, TS)]
 #[ts(export, export_to = "core.ts")]
 pub struct Panel {
-    pub identify: Option<bool>,
+    pub is_identifying: Option<bool>,
     pub post_code: Option<u8>,
 }
 
@@ -418,11 +418,11 @@ pub enum Severity {
 #[ts(export, export_to = "core.ts")]
 #[serde(tag = "kind")]
 pub enum Input {
-    Key { code: String, down: bool },
+    Key { code: String, is_down: bool },
     Pointer { x: u16, y: u16, buttons: u8, scroll: i8 },
     Text { text: String },
     Release,
 }
 
-/// How long a session's goodbye may take, after which dropping it hangs up all the same.
+// We give a session's goodbye this long, after which dropping the session hangs up all the same.
 pub(crate) const GOODBYE: Duration = Duration::from_secs(2);

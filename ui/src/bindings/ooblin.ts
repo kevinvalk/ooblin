@@ -3,27 +3,28 @@ import type { Flavor, Info } from "./core";
 
 /**
  * How a change went: why it failed, if it did, and the settings read after it either way, as a change that failed may
- * have made some of it, or why they couldn't be read. AMT's settings or a BMC's.
+ * have made some of it, or why they could not be read. AMT's settings or a BMC's.
  */
 export type Changed<T> = { error: CommandError | null, settings: { Ok : T } | { Err : CommandError }, };
 
 /**
  * What the webview gets when a command fails: always a message, and both fingerprints when the certificate changed.
  * `Unreachable` means the device stopped answering, even to a second try, `Consent` that someone at it has to read out
- * a code first (see `consent_start`), `Ended` that it ended a session on purpose, which we don't open again ourselves.
+ * a code first (see `consent_start`), `Ended` that it ended a session on purpose, which we do not open again
+ * ourselves.
  */
 export type CommandError = { "kind": "PinMismatch", message: string, expected: string, actual: string, } | { "kind": "Unreachable", message: string, } | { "kind": "Consent", message: string, } | { "kind": "Ended", message: string, } | { "kind": "Failed", message: string, };
 
 /**
- * A login that worked, and why its password wasn't remembered, if it was to be.
+ * A login that worked, and why its password was not remembered, if it was to be.
  */
-export type Connected = { info: Info, unremembered: string | null, };
+export type Connected = { info: Info, remember_error: string | null, };
 
 /**
- * A device as the webview sees it. We keep reaching it at the address it was given as, as AMT's own `name` (with its
- * domain) may well not be in DNS. `remembered` means we can log in without asking for the password.
+ * A device as the webview sees it. We keep reaching it at the `host` it was given as, because AMT's own `name` (with
+ * its domain) may well not be in DNS. `is_remembered` means we can log in without asking for the password.
  */
-export type Device = { host: string, name: string, version: string, user: string, remembered: boolean, 
+export type Device = { host: string, name: string, version: string, user: string, is_remembered: boolean, 
 /**
  * Unknown until we logged in to it.
  */
@@ -38,4 +39,4 @@ export type Drive = { "kind": "Read" } & { start: number, end: number, } | { "ki
 /**
  * A disk image in a device's drive: the id `eject` takes, its file's name and its size.
  */
-export type Mounted = { id: number, name: string, size: number, };
+export type Mounted = { id: number, name: string, size_bytes: number, };

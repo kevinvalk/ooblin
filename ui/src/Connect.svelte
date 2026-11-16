@@ -1,10 +1,8 @@
-<!-- The connect form, for `device` if given: a device with a saved password needs none typed. A failed attempt leaves
-     everything in place to fix and retry, a pin mismatch shows both fingerprints and a way to trust the new one. -->
 <script module lang="ts">
   import type { Flavor } from "./bindings/core";
 
-  /** `flavor` null is Automatic: the device's saved one, else what it turns out to be. */
-  export type Login = { host: string; user: string; password: string; remember: boolean; flavor: Flavor | null };
+  /** `flavor` null is Automatic: the saved one of the device, else what it turns out to be. */
+  export type Login = { host: string; user: string; password: string; isRemember: boolean; flavor: Flavor | null };
 </script>
 
 <script lang="ts">
@@ -29,9 +27,11 @@
 
   // The form starts from the device and goes its own way, App gives us a fresh one for another device.
   let login: Login = $state(
-    untrack(() => ({ host: device?.host ?? "", user: device?.user ?? "admin", password: "", remember: false, flavor: null })),
+    untrack(() => ({ host: device?.host ?? "", user: device?.user ?? "admin", password: "", isRemember: false, flavor: null })),
   );
-  let saved = $derived(device?.remembered && login.host === device.host);
+
+  // A device with a saved password needs none typed.
+  let isSaved = $derived(device?.is_remembered === true && login.host === device.host);
 </script>
 
 <form
@@ -66,13 +66,13 @@
       bind:value={login.password}
       class="field font-normal"
       type="password"
-      placeholder={saved ? "Saved in the keychain" : ""}
-      required={!saved}
-      autofocus={!!device && !saved}
+      placeholder={isSaved ? "Saved in the keychain" : ""}
+      required={!isSaved}
+      autofocus={device !== undefined && !isSaved}
     />
   </label>
-  {#if !saved}
-    <label class="flex items-center gap-2"><input type="checkbox" bind:checked={login.remember} /> Remember the password</label>
+  {#if !isSaved}
+    <label class="flex items-center gap-2"><input type="checkbox" bind:checked={login.isRemember} /> Remember the password</label>
   {/if}
   <button class="btn btn-primary mt-2 h-9">
     {#if connecting}<LoaderCircle class="size-4 animate-spin" /> Connecting…{:else}Connect{/if}

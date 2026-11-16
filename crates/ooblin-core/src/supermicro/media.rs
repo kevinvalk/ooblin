@@ -1,7 +1,3 @@
-//! Virtual media: a USB CD-ROM drive on the host whose disc is an image file here, over the BMC's `/vm` WebSocket as
-//! its HTML5 viewer does it (`vstorage.js`), and ikvmt (Apache-2.0) after it. The BMC hands us the host's commands in
-//! USB mass storage's wrappers, `Cdrom` answers them.
-
 use std::ops::Range;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -19,7 +15,9 @@ pub struct Media {
     web: Web,
 }
 
-// The PDUs' classes.
+// NOTE: Virtual media is a USB CD-ROM drive on the host whose disc is an image file here. We speak to the BMC's `/vm`
+// WebSocket as its HTML5 viewer does (`vstorage.js`), and as ikvmt (Apache-2.0) does after it. These are the classes of
+// its PDUs.
 const PLUG_IN: [u8; 4] = [0, 0, 0, 1];
 const PLUGGED_IN: [u8; 4] = [0, 0, 0, 2];
 const ALIVE: [u8; 4] = [0, 0, 0, 3];
@@ -29,14 +27,14 @@ const PLUGGED_OUT: [u8; 4] = [0, 0, 0, 6];
 const ENDPOINTS: [u8; 4] = [0, 0, 0, 7];
 const SLOTS: [u8; 4] = [0, 0, 0, 8];
 
-/// The most a PDU carries, as ikvmt.
-const MOST: usize = 1 << 20;
+const MAX_PDU_LENGTH: usize = 1 << 20; // The most a PDU carries, as ikvmt has it
 
 impl Client {
-    /// Plugs a USB CD-ROM drive with `image` in it into the host, in the first of the BMC's three slots that's free.
+    /// Plugs a USB CD-ROM drive with `image` in it into the host, in the first of the BMC's three slots that is free.
     pub async fn media(&mut self, image: std::fs::File) -> Result<Media> {
         let cdrom = Cdrom::new(image).await?;
         let web = Web::login(&self.redfish.connection).await?;
+
         match plug_in(&self.redfish.connection, &web).await {
             Ok((receiver, plug)) => Ok(Media { receiver, plug, cdrom, web }),
             Err(error) => {
@@ -47,8 +45,8 @@ impl Client {
     }
 }
 
-/// Into the first free slot, as the viewer: the slots asked on a socket of their own, the KVM token for a password,
-/// then the drive's endpoints.
+/// We plug into the first free slot as the viewer does: we ask for the slots on a socket of their own, then plug in
+/// with the KVM token for a password and send the drive's endpoints.
 async fn plug_in(connection: &Connection, web: &Web) -> Result<(Receiver, Plug)> {
     let token = web.token().await?;
     if !(15..=35).contains(&token.len()) {
@@ -67,7 +65,7 @@ async fn plug_in(connection: &Connection, web: &Web) -> Result<(Receiver, Plug)>
     let (mut receiver, mut plug) = ikvm::media(connection, web).await?;
     plug.send(&plug_in_packet(&token, slot as u8)).await?;
     let (class, status) = next(&mut receiver, &mut plug, false).await?;
-    let why = match (class, status.first()) {
+    let reason = match (class, status.first()) {
         (PLUGGED_IN, Some(0)) => {
             plug.send(&pdu(ENDPOINTS, &[6, 3, 1, 0x10, 2, 0x20, 3, 0x30])).await?;
             return Ok((receiver, plug));
@@ -79,14 +77,15 @@ async fn plug_in(connection: &Connection, web: &Web) -> Result<(Receiver, Plug)>
         (PLUGGED_IN, Some(6)) => "says the web session expired",
         _ => "said no",
     };
+
     plug.close().await;
     receiver.closed().await;
-    Err(Error::Protocol(format!("the BMC's virtual media {why}: {class:?} {status:?}")))
+    Err(Error::Protocol(format!("the BMC's virtual media {reason}: {class:?} {status:?}")))
 }
 
 impl Media {
-    /// Answers the host until the BMC takes the drive out, or `eject` does, telling `read` what of the image, in bytes,
-    /// after every read.
+    /// Answers the host until the BMC takes the drive out, or `eject` does. After every read we tell `read` what of the
+    /// image the host read, in bytes.
     pub async fn serve(mut self, mut read: impl FnMut(Range<u64>), eject: impl Future<Output = ()>) -> Result<()> {
         let served = tokio::select! {
             served = self.answer(&mut read) => served,
@@ -95,9 +94,11 @@ impl Media {
                 Ok(())
             }
         };
+
         self.plug.close().await;
         self.receiver.closed().await;
         self.web.logout().await;
+
         served
     }
 
@@ -107,21 +108,25 @@ impl Media {
             if class == PLUGGED_OUT {
                 return Ok(());
             }
-            // USB mass storage's command wrapper, for drive `class[2]`.
+
+            // The BMC hands us the host's commands in USB mass storage's command wrapper, for drive `class[2]`.
             if wrapper.len() != 31 || !wrapper.starts_with(b"USBC") || !(1..=16).contains(&wrapper[14]) {
                 return Err(Error::Protocol(format!("a virtual media message we don't know: {class:?} {wrapper:?}")));
             }
+
             let length = u32::from_le_bytes(wrapper[8..12].try_into().unwrap()) as usize;
-            let to_host = wrapper[12] & 0x80 != 0;
-            // What the host writes comes next, a CD-ROM has no use for it.
-            if !to_host && length > 0 {
+            let is_to_host = wrapper[12] & 0x80 != 0;
+
+            // What the host writes comes next, and we drop it as a CD-ROM has no use for it.
+            if !is_to_host && length > 0 {
                 next(&mut self.receiver, &mut self.plug, false).await?;
             }
-            let (mut data, range, failed) = match self.cdrom.answer(&wrapper[15..]) {
+
+            let (mut data, range, has_failed) = match self.cdrom.answer(&wrapper[15..]) {
                 Answer::Data(data) => (data, 0..0, false),
                 Answer::Read { lba, blocks } => {
                     let start = lba * 2048;
-                    let range = start..(start + blocks * 2048).min(start + length.min(MOST) as u64);
+                    let range = start..(start + blocks * 2048).min(start + length.min(MAX_PDU_LENGTH) as u64);
                     let mut data = vec![0; (range.end - start) as usize];
                     self.cdrom.read(start, &mut data).await?;
                     (data, range, false)
@@ -130,46 +135,52 @@ impl Media {
                 Answer::Failed(_) => (vec![], 0..0, true),
             };
             data.truncate(length);
-            let residue = if to_host || failed { length - data.len() } else { 0 };
-            let status = [b"USBS", &wrapper[4..8], &(residue as u32).to_le_bytes()[..], &[u8::from(failed)]].concat();
+
+            let residue = if is_to_host || has_failed { length - data.len() } else { 0 };
+            let status =
+                [b"USBS", &wrapper[4..8], &(residue as u32).to_le_bytes()[..], &[u8::from(has_failed)]].concat();
             let device = class[2];
-            let mut answer = if to_host { pdu([0x22, 0, device, 0], &data) } else { vec![] };
+            let mut answer = if is_to_host { pdu([0x22, 0, device, 0], &data) } else { vec![] };
             answer.extend(pdu([0x22, 0, device, 0xFF], &status));
             self.plug.send(&answer).await?;
+
             if !range.is_empty() {
                 read(range);
             }
         }
     }
 
-    /// Takes the drive out, waiting `GOODBYE` at most for the BMC to say it's out: once asked it is, whatever the BMC
-    /// says then, or doesn't.
+    /// We wait `GOODBYE` at most for the BMC to say the drive is out: once asked it is out, whatever the BMC says then,
+    /// or does not say.
     async fn plug_out(&mut self) {
-        let out = async {
+        let plugged_out = async {
             self.plug.send(&pdu(PLUG_OUT, &[])).await?;
             while next(&mut self.receiver, &mut self.plug, true).await?.0 != PLUGGED_OUT {}
             Ok::<_, Error>(())
         };
-        let _ = tokio::time::timeout(GOODBYE, out).await;
+        let _ = tokio::time::timeout(GOODBYE, plugged_out).await;
     }
 }
 
-/// The BMC's next PDU, its class and body, keep-alives answered on the way. Its start is `wait`ed for as long as it
-/// takes, or as long as anything on the BMC's web port.
-async fn next(receiver: &mut Receiver, plug: &mut Plug, wait: bool) -> Result<([u8; 4], Vec<u8>)> {
+/// The BMC's next PDU, its class and body, with keep-alives answered on the way. We wait for its start as long as it
+/// takes when `is_waiting_forever`, else as long as for anything on the BMC's web port.
+async fn next(receiver: &mut Receiver, plug: &mut Plug, is_waiting_forever: bool) -> Result<([u8; 4], Vec<u8>)> {
     loop {
         let header = match receiver.read(8).await {
-            Err(Error::Timeout) if wait => continue,
+            Err(Error::Timeout) if is_waiting_forever => continue,
             header => header?,
         };
+
         let length = u32::from_le_bytes(header[4..8].try_into().unwrap()) as usize;
-        if length > MOST {
+        if length > MAX_PDU_LENGTH {
             return Err(Error::Protocol(format!("a {length}-byte virtual media message")));
         }
+
         let (class, body) = (header[..4].try_into().unwrap(), receiver.read(length).await?);
         if class != KEEP_ALIVE {
             return Ok((class, body));
         }
+
         plug.send(&pdu(ALIVE, &[0xFF; 4])).await?;
     }
 }
@@ -178,10 +189,11 @@ fn pdu(class: [u8; 4], body: &[u8]) -> Vec<u8> {
     [&class[..], &(body.len() as u32).to_le_bytes(), body].concat()
 }
 
-/// As the viewer: the KVM token, of 15 to 35 bytes, split at 15, a random stamp, one drive in `slot` of an
-/// authenticated HTML5 viewer's, a CD-ROM. Then the drive's USB descriptors, which the PDU's length leaves out.
+/// As the viewer sends it: the KVM token, of 15 to 35 bytes, split at 15, a random stamp, and one drive in `slot` of an
+/// authenticated HTML5 viewer's, a CD-ROM. Then come the drive's USB descriptors, which the PDU's length leaves out.
 fn plug_in_packet(token: &str, slot: u8) -> Vec<u8> {
     let token = token.as_bytes();
+
     let mut packet = pdu(PLUG_IN, &[0; 44]);
     packet[8..23].copy_from_slice(&token[..15]);
     packet[24..24 + token.len() - 15].copy_from_slice(&token[15..]);
@@ -189,16 +201,18 @@ fn plug_in_packet(token: &str, slot: u8) -> Vec<u8> {
     packet[44..48].copy_from_slice(&stamp.to_be_bytes());
     packet[48] = 0xC1 | (slot + 1) << 1;
     packet[49] = 3;
+
     for descriptor in DESCRIPTORS {
         packet.push(descriptor.len() as u8);
         packet.extend(descriptor);
     }
+
     packet
 }
 
-/// The viewer's drive's, as ikvmt has them: the device (ATEN's), its configuration (one mass storage interface, SCSI
-/// over bulk-only transport), the language, its strings ("Flash Disk", a serial number and another), a class reply and
-/// the device qualifier.
+/// The USB descriptors of the viewer's drive, as ikvmt has them: the device (ATEN's), its configuration (one mass
+/// storage interface, SCSI over bulk-only transport), the language, its strings ("Flash Disk", a serial number and
+/// another), a class reply and the device qualifier.
 const DESCRIPTORS: [&[u8]; 8] = [
     &[18, 1, 0, 2, 0, 0, 0, 64, 0x1F, 0x0B, 0xEA, 3, 0, 2, 0, 0, 0, 1],
     &[

@@ -1,20 +1,14 @@
-<!-- A card of settings, AMT's or a BMC's. With a `title` its fields go together and save together, from the title's
-     ✓ and ✕ (or Enter and Escape), there all along so it's clear what saves this way and enabled once something
-     changed. Without one each switch or choice saves as it changes. `save` gets the form's fields and what changed in
-     words ("IPv4 saved.", "KVM turned off."), the changed control's name too; one that says it didn't go through keeps
-     what was typed in a titled form, to try again or cancel. Otherwise the form then shows what the device took: the
-     settings are the fields' defaults. -->
 <script module lang="ts">
-  /** A select's options, the device's `current` one selected: unlike the select's own default, a selected option counts
-   * when it comes in after the select, the settings being read. A `current` none of them is shows as it is, so saving
-   * what's around it doesn't change it. */
+  /** The options of a select, with the `current` one of the device selected: unlike the default of the select itself, a
+   * selected option counts when it comes in after the select, once the settings are read. A `current` that is none of
+   * them shows as it is, so that saving what is around it does not change it. */
   export { choices };
 
-  /** A choice of `options`, `help` saying what it is, which can't change where a `loaded` BMC offers none. Its `id` is
-   * its page's `$props.id()`. */
+  /** A choice of `options`, with `help` saying what it is, which cannot change where a `loaded` BMC offers none. Its
+   * `id` is the `$props.id()` of its page. */
   export { select };
 
-  /** A text field's value, trimmed. */
+  /** The value of a text field, trimmed. */
   export const text = (fields: FormData, name: string) => ((fields.get(name) as string | null) ?? "").trim();
 
   /** What a control just changed to, in words: "KVM turned off.", "User consent set to For KVM.". */
@@ -36,19 +30,28 @@
     reset = () => {},
     children,
   }: {
+    /** With a `title` the fields go together and save together, from the ✓ and ✕ of the title (or Enter and Escape).
+     * Those are there all along so that it is clear what saves this way, and enabled once something changed. Without a
+     * title each switch or choice saves as it changes. */
     title?: string;
-    /** While the settings are read or anything saves. */
-    busy: boolean;
+
+    busy: boolean; // While the settings are read or anything saves
+
+    /** Gets the fields of the form, what changed in words ("IPv4 saved.", "KVM turned off.") and the name of the
+     * changed control. When it says the change did not go through, a titled form keeps what was typed, to try again or
+     * cancel. Otherwise the form then shows what the device took, as the settings are the defaults of the fields. */
     save: (fields: FormData, done: string, name: string) => Promise<unknown>;
+
     reset?: () => void;
     children: Snippet;
   } = $props();
   const id = $props.id();
-  let changed = $state(false);
+  let isChanged = $state(false);
 
   /** Saves, then shows what the device took, unless what was typed is kept. */
   async function apply(form: HTMLFormElement, done: string, name = "") {
-    if (!(await save(new FormData(form), done, name)) && title) return;
+    if (!(await save(new FormData(form), done, name)) && title !== undefined) return;
+
     await tick();
     form.reset();
   }
@@ -70,10 +73,10 @@
   help: string,
   loaded: boolean,
 )}
-  {@const none = loaded && !Object.keys(options).length}
-  <div title={none ? "This BMC can't." : help}>
+  {@const hasNone = loaded && Object.keys(options).length <= 0}
+  <div title={hasNone ? "This BMC can't." : help}>
     <label for="{id}-{name}">{label}</label>
-    <select id="{id}-{name}" {name} class="field" disabled={none}>
+    <select id="{id}-{name}" {name} class="field" disabled={hasNone}>
       {@render choices(current, options)}
     </select>
   </div>
@@ -86,17 +89,19 @@
     {id}
     class="card"
     inert={busy}
-    oninput={() => (changed = !!title)}
-    onreset={() => ((changed = false), reset())}
-    onkeydown={(event) => title && event.key === "Escape" && event.currentTarget.reset()}
+    oninput={() => (isChanged = title !== undefined)}
+    onreset={() => ((isChanged = false), reset())}
+    onkeydown={(event) => title !== undefined && event.key === "Escape" && event.currentTarget.reset()}
     onsubmit={(event) => {
       event.preventDefault();
-      if (title) apply(event.currentTarget, `${title} saved.`);
+      if (title !== undefined) apply(event.currentTarget, `${title} saved.`);
     }}
     onchange={(event) => {
       const control = event.target as HTMLInputElement;
+
       // A typed field saves only what it takes: an empty number or one out of range says so instead.
-      if (title || !control.reportValidity()) return;
+      if (title !== undefined || !control.reportValidity()) return;
+
       apply(event.currentTarget, changedTo(control), control.name);
     }}
   >
@@ -104,15 +109,15 @@
   </form>
 {/snippet}
 
-{#if title}
+{#if title !== undefined}
   <div>
     <h3 class="flex h-7 items-center gap-1">
       {title}
-      <button type="reset" form={id} class="btn-icon ml-auto size-7" disabled={!changed} title="Cancel (Esc)">
+      <button type="reset" form={id} class="btn-icon ml-auto size-7" disabled={!isChanged} title="Cancel (Esc)">
         <X class="size-4" />
       </button>
-      <button form={id} class="btn btn-primary size-7 px-0" disabled={!changed || busy} title="Save (Enter)">
-        {#if busy && changed}<LoaderCircle class="size-4 animate-spin" />{:else}<Check class="size-4" />{/if}
+      <button form={id} class="btn btn-primary size-7 px-0" disabled={!isChanged || busy} title="Save (Enter)">
+        {#if busy && isChanged}<LoaderCircle class="size-4 animate-spin" />{:else}<Check class="size-4" />{/if}
       </button>
     </h3>
     {@render form()}

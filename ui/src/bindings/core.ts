@@ -2,28 +2,28 @@
 
 export type Alarm = { name: string, 
 /**
- * Unix seconds, of the next time.
+ * When it goes off next, in Unix seconds.
  */
-at: number, 
+next_at: number, 
 /**
- * How long until it goes off again, none for once.
+ * How long until it goes off again, 0 for an alarm that goes off once.
  */
 every_minutes: number, 
 /**
  * Whether AMT forgets it once it went off for the last time.
  */
-forget: boolean, };
+is_forget: boolean, };
 
 export type AuditRecord = { 
 /**
- * Unix seconds.
+ * When it happened, in Unix seconds.
  */
-time: number, application: string, event: string, initiator: string, address: string, details: string, };
+occurred_at: number, application: string, event: string, initiator: string, address: string, details: string, };
 
 /**
  * When AMT is on the network: with the device on or asleep (or off), on mains power or a battery.
  */
-export type Availability = { on: boolean, asleep: boolean, on_battery: boolean, asleep_on_battery: boolean, };
+export type Availability = { is_on: boolean, is_asleep: boolean, is_on_battery: boolean, is_asleep_on_battery: boolean, };
 
 export type Battery = { name: string, charge_percent: number | null, design_capacity_mwh: number | null, };
 
@@ -39,15 +39,26 @@ export type Bios = { vendor: string, version: string, released: string, features
 export type BmcChange = { "FanMode": string } | { "MouseMode": string } | { "Ntp": Ntp } | { "Syslog": Syslog } | { "PowerRestore": PowerRestore } | { "SolBitRate": number } | { "Services": Array<Service> } | { "Network": BmcNetwork } | { "Fru": Fru };
 
 /**
- * A BMC's own network settings: its host name and DNS server where its flavor sets them (`None` over IPMI alone),
- * DHCP or these IPv4 addresses, and its VLAN, `None` for none.
+ * A BMC's own network settings: DHCP, or else these IPv4 addresses.
  */
-export type BmcNetwork = { hostname: string | null, dhcp: boolean, address: string, subnet_mask: string, gateway: string, dns: string | null, vlan: number | null, };
+export type BmcNetwork = { 
+/**
+ * `None` where the BMC's flavor does not set a host name, as over IPMI alone.
+ */
+hostname: string | null, is_dhcp: boolean, address: string, subnet_mask: string, gateway: string, 
+/**
+ * `None` where the BMC's flavor does not set a DNS server, as over IPMI alone.
+ */
+dns: string | null, 
+/**
+ * `None` for no VLAN.
+ */
+vlan: number | null, };
 
 /**
  * How the BMC is set up: its network, what it serves on which port, how it runs the fans and our mouse, where it gets
  * the time and sends its log, and the server's power restore policy, serial console and FRU, `None` where the BMC
- * doesn't say. An empty mode is one this BMC doesn't have.
+ * does not say. An empty mode is one this BMC does not have.
  */
 export type BmcSettings = { network: BmcNetwork, services: Array<Service>, 
 /**
@@ -71,22 +82,22 @@ export type Certificate = { id: string,
  */
 name: string, issuer: string, 
 /**
- * Trusted to sign the certificates of others (mutual TLS, 802.1X), rather than one of AMT's own.
+ * Is it trusted to sign the certificates of others (mutual TLS, 802.1X), instead of being one of AMT's own?
  */
-trusted_root: boolean, 
+is_trusted_root: boolean, 
 /**
- * AMT's own, which stays.
+ * Is it AMT's own, which cannot be deleted?
  */
-read_only: boolean, 
+is_read_only: boolean, 
 /**
- * What AMT's TLS shows us.
+ * Is it the one AMT's TLS shows us?
  */
-in_use: boolean, };
+is_in_use: boolean, };
 
 /**
  * A change to the settings, see `Client::change`.
  */
-export type Change = { "RemoteAccess": RemoteAccess } | { "General": General } | { "PowerPolicy": string } | { "Ipv4": Ipv4 } | { "Ipv6": Ipv6Settings } | { "Availability": Availability } | { "Recovery": Recovery } | "Clock" | { "AddAlarm": Alarm } | { "DeleteAlarm": string } | { "AddCertificate": { path: string, trusted_root: boolean, } } | { "DeleteCertificate": string };
+export type Change = { "RemoteAccess": RemoteAccess } | { "General": General } | { "PowerPolicy": string } | { "Ipv4": Ipv4 } | { "Ipv6": Ipv6Settings } | { "Availability": Availability } | { "Recovery": Recovery } | "Clock" | { "AddAlarm": Alarm } | { "DeleteAlarm": string } | { "AddCertificate": { path: string, is_trusted_root: boolean, } } | { "DeleteCertificate": string };
 
 export type Configuration = "Dhcp" | "Os" | "Manual";
 
@@ -103,7 +114,7 @@ export type Event = {
 /**
  * Unix seconds.
  */
-time: number, source: string, description: string, severity: Severity, };
+occurred_at: number, source: string, description: string, severity: Severity, };
 
 /**
  * What a device is, which says how we speak to it.
@@ -118,19 +129,19 @@ export type Found = { host: string, flavor: Flavor, version: string,
 /**
  * Whether it was set up to be managed, rather than not yet or not completely: only then can we log in.
  */
-provisioned: boolean, };
+is_provisioned: boolean, };
 
 /**
- * A FRU's information, by area: one the FRU doesn't have is `None` and can't be set. Its strings as we decode them,
- * whatever their encoding, trimmed.
+ * A FRU's information by area: an area the FRU does not have is `None` and cannot be set. Its strings are as we decode
+ * them, whatever their encoding, trimmed.
  */
 export type Fru = { chassis: FruChassis | null, board: FruBoard | null, product: FruProduct | null, };
 
 export type FruBoard = { 
 /**
- * In Unix seconds, `None` where the FRU doesn't say.
+ * In Unix seconds, `None` where the FRU does not say.
  */
-manufactured: number | null, manufacturer: string, product: string, serial_number: string, part_number: string, };
+manufactured_at: number | null, manufacturer: string, product: string, serial_number: string, part_number: string, };
 
 export type FruChassis = { 
 /**
@@ -149,22 +160,22 @@ export type General = {
  */
 name: string, 
 /**
- * Whether the OS's name is AMT's too.
+ * Is the OS's name AMT's too?
  */
-shared_with_os: boolean, respond_to_ping: boolean, 
+is_shared_with_os: boolean, is_respond_to_ping: boolean, 
 /**
  * How long AMT stays powered after the device sleeps or it woke for us, as far as the power policy has it sleep.
  */
 awake_minutes: number, dns_update: DnsUpdate, };
 
 /**
- * Everything the device knows about its hardware, gathered by the BIOS at boot. Only what's installed, no empty memory
- * slots or drive bays. Text the device left out is empty, numbers it left out are `None`.
+ * Everything the device knows about its hardware, gathered by the BIOS at boot. Only what is installed, no empty
+ * memory slots or drive bays. Text the device left out is empty, numbers it left out are `None`.
  */
 export type Hardware = { system: System, motherboard: Motherboard, bios: Bios, processors: Array<Processor>, memory: Array<Module>, disks: Array<Disk>, batteries: Array<Battery>, };
 
 /**
- * What a login says about the device. Text it doesn't have is empty: AMT's own facts (`build`, `control_mode`) on a
+ * What a login says about the device. Text it does not have is empty: AMT's own facts (`build`, `control_mode`) on a
  * BMC, the `fingerprint` over IPMI.
  */
 export type Info = { flavor: Flavor, 
@@ -190,24 +201,27 @@ remote_access: RemoteAccess, };
  * `buttons` it holds and a notch of `scroll` up (negative) or down (positive), text to type, and letting go of every
  * key and mouse button still held, when the screen loses focus say.
  */
-export type Input = { "kind": "Key", code: string, down: boolean, } | { "kind": "Pointer", x: number, y: number, buttons: number, scroll: number, } | { "kind": "Text", text: string, } | { "kind": "Release" };
+export type Input = { "kind": "Key", code: string, is_down: boolean, } | { "kind": "Pointer", x: number, y: number, buttons: number, scroll: number, } | { "kind": "Text", text: string, } | { "kind": "Release" };
 
-/**
- * A change to what IPMI sets, see `Client::change`.
- */
 export type IpmiChange = { "Network": BmcNetwork } | { "PowerRestore": PowerRestore } | { "SolBitRate": number } | { "Fru": Fru };
 
 /**
- * What can be set over IPMI: the BMC's network, the server's power restore policy, its serial console and its FRU, and
- * the BMC's users to read. `None` where the BMC doesn't say.
+ * What can be set over IPMI, and the BMC's users to read. A setting is `None` where the BMC does not say.
  */
 export type IpmiSettings = { network: BmcNetwork | null, power_restore: PowerRestore | null, sol: SolSettings | null, fru: Fru | null, users: Array<User>, };
 
 /**
- * What the BMC says it is, and its own network port. `manufacturer` by name where we know the vendor, else its IANA
- * number, blank where it's unset; `system_id` is the system GUID as SMBIOS and the OS write it.
+ * What the BMC says it is, and its own network port.
  */
-export type IpmiStatus = { info: Info, power: PowerState, manufacturer: string, product_id: number, ipmi_version: string, system_id: string, ports: Array<Port>, };
+export type IpmiStatus = { info: Info, power: PowerState, 
+/**
+ * The vendor's name where we know it, else its IANA number, and blank where it is unset.
+ */
+manufacturer: string, product_id: number, ipmi_version: string, 
+/**
+ * The system GUID as SMBIOS and the OS write it.
+ */
+system_id: string, ports: Array<Port>, };
 
 /**
  * The addresses the management port uses, from DHCP, from what was set (`Manual`) or on AMT shared with the OS.
@@ -235,25 +249,25 @@ export type Mode = { mode: string, modes: Array<string>, };
 
 export type Module = { slot: string, bytes: number | null, mhz: number | null, kind: string, form_factor: string, manufacturer: string, part_number: string, serial_number: string, asset_tag: string, };
 
-export type Motherboard = { product: string, manufacturer: string, version: string, serial_number: string, asset_tag: string, replaceable: boolean, };
+export type Motherboard = { product: string, manufacturer: string, version: string, serial_number: string, asset_tag: string, is_replaceable: boolean, };
 
 /**
- * The wired port's: its IPv4 addresses, and when AMT is on the network at all.
+ * The network settings of the wired port: its addresses, and when AMT is on the network at all.
  */
 export type Network = { ipv4: Ipv4, ipv6: Ipv6Settings, available: Availability, };
 
-export type Ntp = { enabled: boolean, primary: string, secondary: string, };
+export type Ntp = { is_enabled: boolean, primary: string, secondary: string, };
 
 /**
  * What can be seen of a server's front panel from here: whether its identify light (UID) is lit, and the last POST
- * code its BIOS wrote, each `None` where the BMC doesn't say.
+ * code its BIOS wrote, each `None` where the BMC does not say.
  */
-export type Panel = { identify: boolean | null, post_code: number | null, };
+export type Panel = { is_identifying: boolean | null, post_code: number | null, };
 
 /**
  * A device's management port: a BMC's own, or AMT's wired one and maybe a wireless one.
  */
-export type Port = { wireless: boolean, mac: string, link_up: boolean, mbps: number | null, ipv4: Ipv4, 
+export type Port = { is_wireless: boolean, mac: string, is_link_up: boolean, mbps: number | null, ipv4: Ipv4, 
 /**
  * `None` when IPv6 is off.
  */
@@ -272,13 +286,13 @@ export type Power = { state: PowerState, actions: Array<PowerAction>, };
 export type PowerAction = "On" | "SoftOff" | "Off" | "SoftReset" | "Reset" | "Cycle" | "Sleep" | "Hibernate" | "Nmi" | "OnToBios" | "OnToPxe" | "OnToImage" | "OnToSerial" | "ResetToBios" | "ResetToPxe" | "ResetToImage" | "ResetToSerial";
 
 /**
- * When AMT itself is powered, the device's maker offering one or more.
+ * When AMT itself is powered. The device's maker offers one or more of these.
  */
 export type PowerPolicy = { id: string, 
 /**
  * As AMT has it but for its kind ("Mobile: …", "Desktop: …"), which the device's maker set.
  */
-description: string, active: boolean, };
+description: string, is_active: boolean, };
 
 /**
  * What a server does when its power comes back after it was cut.
@@ -286,7 +300,7 @@ description: string, active: boolean, };
 export type PowerRestore = "StayOff" | "Previous" | "PowerOn";
 
 /**
- * The power states the devices report, folded into what a person cares about and named the way they'd say it.
+ * The power states the devices report, folded into what a person cares about and named the way they would say it.
  */
 export type PowerState = "On" | "Asleep" | "Hibernating" | "Off" | "Unknown";
 
@@ -294,9 +308,9 @@ export type Processor = { model: string, manufacturer: string, family: string, s
 
 /**
  * One-Click Recovery (booting a recovery image) and remote platform erase, which the BIOS has to allow as well: `None`
- * where the device can't.
+ * where the device cannot do it.
  */
-export type Recovery = { one_click: boolean | null, platform_erase: boolean | null, };
+export type Recovery = { is_one_click: boolean | null, is_platform_erase: boolean | null, };
 
 /**
  * What may be redirected, each only while the listener is on too, and when someone at the device has to read out a
@@ -306,20 +320,20 @@ export type RemoteAccess = {
 /**
  * `None` on a device without KVM.
  */
-kvm: boolean | null, sol: boolean, ider: boolean, consent: Consent, 
+is_kvm: boolean | null, is_sol: boolean, is_ider: boolean, consent: Consent, 
 /**
- * Only read: whether `consent` may change, which in client control mode it can't.
+ * Only read: whether `consent` may change, which in client control mode it cannot.
  */
-consent_fixed: boolean, };
+is_consent_fixed: boolean, };
 
 /**
- * The device's screens KVM can show, by number from 0, and the one it shows. Like MeshCommander, there's a choice once
- * more than one is active.
+ * The device's screens KVM can show, by number from 0, and the one it shows. Like MeshCommander, there is a choice
+ * once more than one is active.
  */
 export type Screens = { active: Array<number>, shown: number, };
 
 /**
- * A sensor's reading in its `unit` ("°C", "RPM", "V", "A", "W", "%" or the unit's name), `None` where it's absent or
+ * A sensor's reading in its `unit` ("°C", "RPM", "V", "A", "W", "%" or the unit's name), `None` where it is absent or
  * unreadable, or a discrete sensor's asserted `state` in words; `low` and `high` are its critical thresholds.
  */
 export type Sensor = { name: string, kind: SensorKind, reading: number | null, unit: string, state: string, severity: Severity, low: number | null, high: number | null, };
@@ -330,10 +344,10 @@ export type Sensor = { name: string, kind: SensorKind, reading: number | null, u
 export type SensorKind = "Temperature" | "Fan" | "Voltage" | "Current" | "Power" | "Other";
 
 /**
- * A service by Redfish's name (`HTTPS`, `KVMIP`), on or off and on which port. IPMI and HTTPS, which we speak, don't
+ * A service by Redfish's name (`HTTPS`, `KVMIP`), on or off and on which port. IPMI and HTTPS, which we speak, do not
  * change here.
  */
-export type Service = { name: string, enabled: boolean, port: number | null, };
+export type Service = { name: string, is_enabled: boolean, port: number | null, };
 
 /**
  * How the device is set up.
@@ -353,11 +367,15 @@ tls: Array<Tls>, certificates: Array<Certificate>, };
  */
 export type Severity = "Info" | "Warning" | "Critical";
 
+export type SolSettings = { 
 /**
- * Its serial console's settings: whether SOL may be used, and how fast the server's serial port runs (bits a
- * second, `None` for the BMC's own setting).
+ * Whether SOL may be used.
  */
-export type SolSettings = { enabled: boolean, bit_rate: number | null, };
+is_enabled: boolean, 
+/**
+ * How fast the server's serial port runs in bits a second, `None` for the BMC's own setting.
+ */
+bit_rate: number | null, };
 
 /**
  * What the device's own status page shows: the device, its AMT and its network.
@@ -367,18 +385,25 @@ export type Status = { info: Info, power: PowerState, system_id: string, ports: 
 /**
  * Where the BMC sends its log, `port` 0 for the usual (514).
  */
-export type Syslog = { enabled: boolean, server: string, port: number, };
+export type Syslog = { is_enabled: boolean, server: string, port: number, };
 
 export type System = { model: string, manufacturer: string, version: string, serial_number: string, id: string, };
 
 /**
- * AMT's TLS, for the network or software on the device itself (`local`, through LMS): whether the other side must
+ * AMT's TLS, for the network or software on the device itself (`is_local`, through LMS): whether the other side must
  * show a certificate too, and whether it takes connections without TLS, where AMT supports that.
  */
-export type Tls = { local: boolean, enabled: boolean, mutual: boolean, plain_too: boolean, plain_supported: boolean, };
+export type Tls = { is_local: boolean, is_enabled: boolean, is_mutual: boolean, is_plain_too: boolean, is_plain_supported: boolean, };
 
 /**
- * A user slot with a name: its privilege ("Administrator", "Operator", "User", "Callback", "No access") and whether
- * it's enabled, where the BMC says.
+ * A user slot that has a name.
  */
-export type User = { id: number, name: string, privilege: string, enabled: boolean | null, };
+export type User = { id: number, name: string, 
+/**
+ * "Administrator", "Operator", "User", "Callback", "OEM" or "No access".
+ */
+privilege: string, 
+/**
+ * `None` where the BMC does not say.
+ */
+is_enabled: boolean | null, };

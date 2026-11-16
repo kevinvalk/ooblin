@@ -1,41 +1,42 @@
-<!-- The server's front panel, in the header: its identify light (UID) to switch, lit like the real one while it's on,
-     and the last POST code its BIOS wrote, what the BMC doesn't say left out. Read every 5 seconds or so while the
-     device is shown, and at once after a switch. -->
 <script lang="ts">
   import { Lightbulb, LoaderCircle } from "@lucide/svelte";
   import { invoke } from "@tauri-apps/api/core";
   import type { Panel } from "../../bindings/core";
   import { reason } from "../../connection";
 
-  let { host, hidden, say }: { host: string; hidden: boolean; say: (text: string, failed?: boolean) => void } = $props();
+  let { host, hidden, say }: { host: string; hidden: boolean; say: (text: string, isFailed?: boolean) => void } = $props();
 
   let panel = $state<Panel>();
-  let switching = $state(false);
+  let isSwitching = $state(false);
 
   async function read() {
+    // We read every few seconds, so a read that failed keeps what we had instead of nagging the user each time.
     panel = await invoke<Panel>("panel", { host }).catch(() => panel);
   }
 
-  // Each read 5 seconds after the one before landed, so a slow BMC isn't asked again before it answered.
+  // We read while the device is shown, each time 5 seconds after the read before landed, so that a slow BMC is not
+  // asked again before it answered.
   $effect(() => {
     if (hidden) return;
-    let shown = true;
+
+    let isShown = true;
     (async () => {
-      for (; shown; await new Promise((resume) => setTimeout(resume, 5000))) await read();
+      for (; isShown; await new Promise((resume) => setTimeout(resume, 5000))) await read();
     })();
-    return () => (shown = false);
+
+    return () => (isShown = false);
   });
 
-  async function identify(on: boolean) {
-    switching = true;
+  async function identify(isOn: boolean) {
+    isSwitching = true;
     try {
-      await invoke("identify", { host, on });
-      say(on ? "Identify light on." : "Identify light off.");
+      await invoke("identify", { host, isOn });
+      say(isOn ? "Identify light on." : "Identify light off.");
       await read();
     } catch (error) {
       say(reason(error), true);
     } finally {
-      switching = false;
+      isSwitching = false;
     }
   }
 </script>
@@ -48,19 +49,19 @@
     POST {panel.post_code.toString(16).toUpperCase().padStart(2, "0")}
   </span>
 {/if}
-{#if panel?.identify != null}
+{#if panel?.is_identifying != null}
   <button
     type="button"
-    class={["btn btn-secondary", panel.identify && "border-accent/60 text-accent"]}
-    aria-pressed={panel.identify}
-    disabled={switching}
+    class={["btn btn-secondary", panel.is_identifying && "border-accent/60 text-accent"]}
+    aria-pressed={panel.is_identifying}
+    disabled={isSwitching}
     title="Lights the server's blue identify light (UID), to find it in the rack, until switched off."
-    onclick={() => identify(!panel!.identify)}
+    onclick={() => identify(!panel!.is_identifying)}
   >
-    {#if switching}
+    {#if isSwitching}
       <LoaderCircle class="size-4 animate-spin" />
     {:else}
-      <Lightbulb class={["size-4", panel.identify && "fill-current"]} />
+      <Lightbulb class={["size-4", panel.is_identifying && "fill-current"]} />
     {/if} UID
   </button>
 {/if}

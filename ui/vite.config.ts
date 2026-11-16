@@ -6,11 +6,12 @@ import { defineConfig } from "vite";
 export default defineConfig({
   plugins: [svelte(), tailwindcss()],
   clearScreen: false,
-  // Tauri loads the UI from this port (devUrl), it can't follow Vite elsewhere: one of our own, not Vite's 5173 or
-  // Tauri's 1420 that every other project starts on.
+  // Tauri loads the UI from this port (devUrl) and cannot follow Vite to another one. So we use a port of our own
+  // instead of the 5173 of Vite or the 1420 of Tauri that every other project starts on.
   server: { port: 16420, strictPort: true },
   build: {
-    minify: !process.env.TAURI_ENV_DEBUG,
-    sourcemap: !!process.env.TAURI_ENV_DEBUG,
+    // NOTE: Tauri only sets this variable (to "true") for a debug build
+    minify: process.env.TAURI_ENV_DEBUG === undefined,
+    sourcemap: process.env.TAURI_ENV_DEBUG !== undefined,
   },
 });

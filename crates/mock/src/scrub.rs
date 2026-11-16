@@ -1,15 +1,15 @@
-//! Crawls hold more than we'd like to share: serial numbers, addresses, names, certificates. We swap those values for
-//! fakes of the same shape (digits stay digits, hex stays hex, IPv4 lands in 192.0.2.0/24), derived from the value
-//! itself so the same original gets the same fake in every file. Fields can't list everything, so IPv4 addresses inside
-//! any longer text (AMT's access logs, say) go too. AMT's crawls are XML, a BMC's Redfish JSON.
-
 use std::net::{IpAddr, Ipv4Addr};
 
 use md5::{Digest, Md5};
 use roxmltree::Document;
 use serde_json::Value;
 
-const SENSITIVE: &[&str] = &[
+// NOTE: A crawl holds more than we would like to share: serial numbers, addresses, names, certificates. We swap those
+// values for fakes of the same shape (digits stay digits, hex stays hex, IPv4 lands in 192.0.2.0/24), derived from the
+// value itself so that the same original gets the same fake in every file. The fields cannot list everything, so IPv4
+// addresses inside any longer text (the access logs of AMT, say) go too. The crawl of an AMT is XML, the Redfish of a
+// BMC is JSON.
+const SENSITIVE_XML: &[&str] = &[
     "SerialNumber",
     "MACAddress",
     "PermanentAddress",
@@ -39,8 +39,8 @@ const SENSITIVE: &[&str] = &[
     "PublicKey",
 ];
 
-/// Redfish's names for the same, and its secrets (which the X10 gives as `"null"`, or in clear).
-const JSON: &[&str] = &[
+/// The names Redfish has for the same, and its secrets (which the X10 gives as `"null"`, or in clear).
+const SENSITIVE_JSON: &[&str] = &[
     "SerialNumber",
     "BoardSerialNumber",
     "UUID",
@@ -66,68 +66,78 @@ const JSON: &[&str] = &[
 ];
 
 pub fn scrub(xml: &str) -> String {
-    let Ok(doc) = Document::parse(xml) else {
+    let Ok(document) = Document::parse(xml) else {
         return xml.to_owned();
     };
-    let texts = doc.descendants().filter(|node| node.is_text()).map(|node| {
-        let sensitive = node.parent().is_some_and(|parent| SENSITIVE.contains(&parent.tag_name().name()));
-        (node.range(), sensitive)
+
+    let texts = document.descendants().filter(|node| node.is_text()).map(|node| {
+        let is_sensitive = node.parent().is_some_and(|parent| SENSITIVE_XML.contains(&parent.tag_name().name()));
+        (node.range(), is_sensitive)
     });
     let texts: Vec<_> = texts.collect();
 
-    // Back to front, so the ranges still ahead of us stay valid.
+    // We go back to front, so that the ranges still ahead of us stay valid.
     let mut xml = xml.to_owned();
-    for (range, sensitive) in texts.into_iter().rev() {
+    for (range, is_sensitive) in texts.into_iter().rev() {
         let text = &xml[range.clone()];
-        let scrubbed = if sensitive { fake(text) } else { addresses(text) };
+        let scrubbed = if is_sensitive { fake(text) } else { addresses(text) };
         xml.replace_range(range, &scrubbed);
     }
+
     xml
 }
 
-/// Strings under the names above, alone or in a list, get a fake.
+/// Gives every string under a name of `SENSITIVE_JSON`, alone or in a list, a fake.
 pub fn json(value: &mut Value) {
-    fn walk(value: &mut Value, sensitive: bool) {
+    fn walk(value: &mut Value, is_sensitive: bool) {
         match value {
-            Value::Object(fields) => fields.iter_mut().for_each(|(name, value)| walk(value, JSON.contains(&&**name))),
-            Value::Array(values) => values.iter_mut().for_each(|value| walk(value, sensitive)),
-            Value::String(text) => *text = if sensitive { fake(text) } else { addresses(text) },
+            Value::Object(fields) => {
+                fields.iter_mut().for_each(|(name, value)| walk(value, SENSITIVE_JSON.contains(&&**name)))
+            }
+            Value::Array(values) => values.iter_mut().for_each(|value| walk(value, is_sensitive)),
+            Value::String(text) => *text = if is_sensitive { fake(text) } else { addresses(text) },
             _ => {}
         }
     }
+
     walk(value, false);
 }
 
-/// IPv4 addresses inside longer text. A field that is just an address (a subnet mask, say) is a setting, not a trace.
+/// Fakes the IPv4 addresses inside a longer text. We keep a field that is just an address (a subnet mask, say), because
+/// that is a setting and not a trace.
 fn addresses(text: &str) -> String {
     if text.parse::<Ipv4Addr>().is_ok() {
         return text.to_owned();
     }
-    let words = text.split(|c: char| !c.is_ascii_digit() && c != '.');
+
+    let words = text.split(|character: char| !character.is_ascii_digit() && character != '.');
     let found: Vec<_> = words.filter(|word| word.parse::<Ipv4Addr>().is_ok()).collect();
+
     found.into_iter().fold(text.to_owned(), |text, address| text.replace(address, &fake(address)))
 }
 
 pub(crate) fn fake(value: &str) -> String {
-    // No address is no trace of one, and says so only as it is.
+    // An unspecified address is no trace of one, and it only says "no address" as it is.
     if value.parse::<IpAddr>().is_ok_and(|address| address.is_unspecified()) {
         return value.to_owned();
     }
+
     let hash = Md5::digest(value);
     if value.parse::<Ipv4Addr>().is_ok() {
         return format!("192.0.2.{}", 1 + hash[0] % 254);
     }
+
     let mut bytes = hash.iter().cycle();
     value
         .chars()
-        .map(|c| {
-            let n = *bytes.next().unwrap();
-            match c {
-                '0'..='9' => char::from(b'0' + n % 10),
-                'a'..='f' => char::from(b'a' + n % 6),
-                'A'..='F' => char::from(b'A' + n % 6),
-                'g'..='z' => char::from(b'g' + n % 20),
-                'G'..='Z' => char::from(b'G' + n % 20),
+        .map(|character| {
+            let byte = *bytes.next().unwrap();
+            match character {
+                '0'..='9' => char::from(b'0' + byte % 10),
+                'a'..='f' => char::from(b'a' + byte % 6),
+                'A'..='F' => char::from(b'A' + byte % 6),
+                'g'..='z' => char::from(b'g' + byte % 20),
+                'G'..='Z' => char::from(b'G' + byte % 20),
                 other => other,
             }
         })

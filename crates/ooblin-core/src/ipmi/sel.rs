@@ -1,17 +1,17 @@
-//! A BMC's system event log (SEL), worded: IPMI 2.0 chapters 31 and 32, and 42 for what events mean.
-
 use std::collections::HashSet;
 
 use super::sdr::{Record, meaning};
 use super::{STORAGE, Session};
 use crate::{Error, Event, Result, Severity};
 
-/// The log, newest first, each sensor named by its record in `records` where it has one.
+/// The system event log (IPMI 2.0 chapters 31 and 32, and 42 for what events mean). It comes newest first, each sensor
+/// named by its record in `records` where it has one.
 pub(super) async fn events(session: &Session, records: &[Record]) -> Result<Vec<Event>> {
     let (mut events, mut seen, mut id) = (Vec::new(), HashSet::new(), 0u16);
+
     while id != 0xFFFF && seen.insert(id) {
         let [low, high] = id.to_le_bytes();
-        // Whole entries need no reservation.
+        // We read whole entries, which needs no reservation.
         let answer = match session.request(STORAGE, 0x43, &[0, 0, low, high, 0, 0xFF]).await {
             Err(Error::Refused(0xCB)) if id == 0 => break,
             answer => answer?,
@@ -21,54 +21,60 @@ pub(super) async fn events(session: &Session, records: &[Record]) -> Result<Vec<
         id = u16::from_le_bytes([answer[0], answer[1]]);
     }
     events.reverse();
+
     Ok(events)
 }
 
 fn event(entry: &[u8], records: &[Record]) -> Event {
-    let time = |at: usize| match u32::from_le_bytes(entry[at..at + 4].try_into().unwrap()) {
-        // Unspecified, or seconds since the BMC started rather than a date.
+    let time = |offset: usize| match u32::from_le_bytes(entry[offset..offset + 4].try_into().unwrap()) {
+        // The time is unspecified, or seconds since the BMC started instead of a date.
         u32::MAX | 0..=0x2000_0000 => 0,
         time => time,
     };
+
     let kind = entry[2];
     if kind != 0x02 {
-        // OEM: 0xC0 to 0xDF with a timestamp and the manufacturer, the rest only data.
-        let stamped = (0xC0..0xE0).contains(&kind);
+        // An OEM record of 0xC0 to 0xDF has a timestamp and the manufacturer, the rest only have data.
+        let is_stamped = (0xC0..0xE0).contains(&kind);
         return Event {
-            time: if stamped { time(3) } else { 0 },
+            occurred_at: if is_stamped { time(3) } else { 0 },
             source: "OEM".into(),
-            description: format!("OEM record {kind:02X}h, data {}", hex(&entry[if stamped { 7 } else { 3 }..])),
+            description: format!("OEM record {kind:02X}h, data {}", hex(&entry[if is_stamped { 7 } else { 3 }..])),
             severity: Severity::Info,
         };
     }
+
     let (sensor_type, number, direction, data) = (entry[10], entry[11], entry[12], &entry[13..16]);
-    let (event, deasserted, offset) = (direction & 0x7F, direction & 0x80 != 0, data[0] & 0x0F);
+    let (event_type, is_deasserted, offset) = (direction & 0x7F, direction & 0x80 != 0, data[0] & 0x0F);
     let record = records.iter().find(|record| record.number() == number && record.owner() == entry[7]);
     let source = record.map_or_else(|| sensor_type_name(sensor_type), Record::name);
+
     let Some((text, severity)) = state(sensor_type, direction, data[0]) else {
-        let oem = sensor_type >= 0xC0 || (0x70..0x80).contains(&event);
-        let description = format!("{} event, data {}", if oem { "OEM" } else { "Unknown" }, hex(&entry[12..]));
-        return Event { time: time(3), source, description, severity: Severity::Info };
+        let is_oem = sensor_type >= 0xC0 || (0x70..0x80).contains(&event_type);
+        let description = format!("{} event, data {}", if is_oem { "OEM" } else { "Unknown" }, hex(&entry[12..]));
+        return Event { occurred_at: time(3), source, description, severity: Severity::Info };
     };
+
     let mut description = text.to_string();
     // System firmware says what it was at in data 2.
-    if sensor_type == 0x0F && event == 0x6F && data[0] & 0xC0 == 0xC0 {
+    if sensor_type == 0x0F && event_type == 0x6F && data[0] & 0xC0 == 0xC0 {
         let details = if offset == 0 { FIRMWARE_ERRORS } else { FIRMWARE_PROGRESS };
         if let Some(detail) = details.get(usize::from(data[1])) {
             description = format!("{description}: {detail}");
         }
     }
-    if deasserted {
+    if is_deasserted {
         description += " deasserted";
     }
+
     // A threshold's event carries the reading (data 2) and the threshold crossed (data 3).
-    if event == 0x01
+    if event_type == 0x01
         && data[0] & 0xF0 == 0x50
         && let Some(record) = record
         && let (Some(reading), Some(threshold)) = (record.value(data[1]), record.value(data[2]))
     {
         // Odd offsets go high.
-        let comparison = match (offset & 1 != 0, deasserted) {
+        let comparison = match (offset & 1 != 0, is_deasserted) {
             (true, false) => "≥",
             (false, false) => "≤",
             (true, true) => "<",
@@ -77,13 +83,15 @@ fn event(entry: &[u8], records: &[Record]) -> Event {
         let unit = record.unit();
         description = format!("{description}, {} {comparison} {}", amount(reading, &unit), amount(threshold, &unit));
     }
-    Event { time: time(3), source, description, severity }
+
+    Event { occurred_at: time(3), source, description, severity }
 }
 
-/// What an event of a sensor of `sensor_type` says, by its event direction and type and its event data 1, and how bad
-/// it is.
+/// What an event of a sensor of `sensor_type` says and how bad it is, by its event direction and type (`direction`) and
+/// its event data 1 (`data`).
 pub(crate) fn state(sensor_type: u8, direction: u8, data: u8) -> Option<(&'static str, Severity)> {
     let (text, asserting, deasserting) = meaning(sensor_type, direction & 0x7F, data & 0x0F)?;
+
     Some((text, if direction & 0x80 != 0 { deasserting } else { asserting }))
 }
 
@@ -103,7 +111,7 @@ fn sensor_type_name(code: u8) -> String {
     }
 }
 
-/// ipmitool's names of the sensor types, by their IPMI code.
+// ipmitool's names of the sensor types, by their IPMI code.
 const SENSOR_TYPES: [&str; 45] = [
     "reserved",
     "Temperature",
@@ -152,7 +160,7 @@ const SENSOR_TYPES: [&str; 45] = [
     "FRU State",
 ];
 
-/// What a system firmware error is, by its code in data 2.
+// What a system firmware error is, by its code in data 2.
 const FIRMWARE_ERRORS: &[&str] = &[
     "Unspecified",
     "No system memory installed",
@@ -170,7 +178,7 @@ const FIRMWARE_ERRORS: &[&str] = &[
     "CPU speed mismatch failure",
 ];
 
-/// What system firmware hung at or got to, likewise.
+// What system firmware hung at or got to, likewise by its code in data 2.
 const FIRMWARE_PROGRESS: &[&str] = &[
     "Unspecified",
     "Memory initialization",

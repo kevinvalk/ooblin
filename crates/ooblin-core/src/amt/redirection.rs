@@ -1,17 +1,12 @@
-//! What the device lets us redirect, and opening a session where it does. Like Intel's console (`SetFeatures`): KVM has
-//! its own switch, IDER and SOL share the redirection service's, and all of them need its listener on 16995, which is
-//! on when any of them is.
-
 use instant_xml::ToXml;
 
 use super::Client;
 use super::wsman::{Instance, method};
-use crate::net::{Redirection, Session};
+use crate::net::{Redirection, RedirectionSession};
 use crate::{Consent, Error, RemoteAccess, Result};
 
 impl Consent {
-    /// `OptInRequired`'s value for it.
-    fn required(self) -> u32 {
+    fn opt_in_required(self) -> u32 {
         match self {
             Consent::None => 0,
             Consent::Kvm => 1,
@@ -20,94 +15,104 @@ impl Consent {
     }
 }
 
+// NOTE: We switch redirection the way Intel's console does (`SetFeatures`): KVM has its own switch, IDER and SOL share
+// the one of the redirection service, and all of them need its listener on 16995, which is on when any of them is.
 impl Client {
     pub async fn remote_access(&mut self) -> Result<RemoteAccess> {
         let kvm = self.kvm_access_point().await?;
         let service = self.get("AMT_RedirectionService").await?;
         let opt_in = self.get("IPS_OptInService").await?;
-        let listening = service.get("ListenerEnabled") == Some("true");
-        // From 32768 on, IDER is bit 0 and SOL bit 1.
-        let state = service.parse::<u16>("EnabledState").unwrap_or(32768);
+
+        let is_listening = service.get("ListenerEnabled") == Some("true");
+        let state = service.parse::<u16>("EnabledState").unwrap_or(32768); // From 32768 on, IDER is bit 0, SOL bit 1.
+
         Ok(RemoteAccess {
-            kvm: kvm.map(|kvm| listening && enabled(&kvm)),
-            sol: listening && state & 2 != 0,
-            ider: listening && state & 1 != 0,
+            is_kvm: kvm.map(|kvm| is_listening && is_enabled(&kvm)),
+            is_sol: is_listening && state & 2 != 0,
+            is_ider: is_listening && state & 1 != 0,
             consent: match opt_in.get("OptInRequired") {
                 Some("0") => Consent::None,
                 Some("1") => Consent::Kvm,
                 _ => Consent::All,
             },
-            consent_fixed: opt_in.get("CanModifyOptInPolicy") != Some("1"),
+            is_consent_fixed: opt_in.get("CanModifyOptInPolicy") != Some("1"),
         })
     }
 
-    /// Changes what differs from `access`, the listener following: on when anything is.
+    /// We only change what differs from `access`, and the listener follows: it is on when anything is.
     pub(super) async fn set_remote_access(&mut self, access: &RemoteAccess) -> Result<()> {
-        if let (Some(on), Some(kvm)) = (access.kvm, self.kvm_access_point().await?)
-            && enabled(&kvm) != on
+        if let (Some(is_on), Some(kvm)) = (access.is_kvm, self.kvm_access_point().await?)
+            && is_enabled(&kvm) != is_on
         {
-            self.invoke(&KvmStateChange { RequestedState: if on { 2 } else { 3 } }).await?;
+            self.invoke(&KvmStateChange { RequestedState: if is_on { 2 } else { 3 } }).await?;
         }
 
         let mut service = self.get("AMT_RedirectionService").await?;
-        let state = 32768 | u16::from(access.ider) | u16::from(access.sol) << 1;
+        let state = 32768 | u16::from(access.is_ider) | u16::from(access.is_sol) << 1;
         if service.parse("EnabledState") != Some(state) {
             self.invoke(&RedirectionStateChange { RequestedState: state }).await?;
             service.set("EnabledState", state);
         }
 
-        let listening = access.kvm == Some(true) || access.sol || access.ider;
-        if service.parse("ListenerEnabled") != Some(listening) {
-            service.set("ListenerEnabled", listening);
+        let is_listening = access.is_kvm == Some(true) || access.is_sol || access.is_ider;
+        if service.parse("ListenerEnabled") != Some(is_listening) {
+            service.set("ListenerEnabled", is_listening);
             self.put("AMT_RedirectionService", &service).await?;
         }
 
         let mut opt_in = self.get("IPS_OptInService").await?;
-        if !access.consent_fixed && opt_in.parse("OptInRequired") != Some(access.consent.required()) {
-            opt_in.set("OptInRequired", access.consent.required());
+        if !access.is_consent_fixed && opt_in.parse("OptInRequired") != Some(access.consent.opt_in_required()) {
+            opt_in.set("OptInRequired", access.consent.opt_in_required());
             self.put("IPS_OptInService", &opt_in).await?;
         }
+
         Ok(())
     }
 
-    /// Only what's on: what's off stays so until turned on, see `set_remote_access`.
-    pub(crate) async fn redirect(&mut self, session: Session) -> Result<Redirection> {
+    /// We only open a session for what is on: what is off stays off until the user turns it on, see
+    /// `set_remote_access`.
+    pub(crate) async fn redirect(&mut self, session: RedirectionSession) -> Result<Redirection> {
         let access = self.remote_access().await?;
-        let on = match session {
-            Session::Kvm => access.kvm == Some(true),
-            Session::Sol => access.sol,
-            Session::Ider => access.ider,
+        let is_on = match session {
+            RedirectionSession::Kvm => access.is_kvm == Some(true),
+            RedirectionSession::Sol => access.is_sol,
+            RedirectionSession::Ider => access.is_ider,
         };
-        if !on {
+        if !is_on {
             return Err(Error::Off);
         }
 
-        // Like MeshCommander: unless consent was given (3) or is in use (4).
-        let required = match access.consent {
+        let is_consent_required = match access.consent {
             Consent::None => false,
-            Consent::Kvm => session == Session::Kvm,
+            Consent::Kvm => session == RedirectionSession::Kvm,
             Consent::All => true,
         };
-        if required && !matches!(self.get("IPS_OptInService").await?.get("OptInState"), Some("3" | "4")) {
-            return Err(Error::Consent);
+        if is_consent_required {
+            // Like MeshCommander, we go on when consent was given (3) or is in use (4).
+            let opt_in = self.get("IPS_OptInService").await?;
+            if !matches!(opt_in.get("OptInState"), Some("3" | "4")) {
+                return Err(Error::Consent);
+            }
         }
+
         Redirection::open(&self.target, self.fingerprint(), session).await
     }
 
-    /// Has the device show a code on its screen, for someone there to read out, unless it's showing one already
-    /// (requested, 1, or displayed, 2). It stays for the display timeout, five minutes by default.
+    /// Has the device show a code on its screen for someone there to read out, unless it is showing one already
+    /// (requested, 1, or displayed, 2). The code stays for the display timeout, five minutes by default.
     pub async fn start_consent(&mut self) -> Result<()> {
-        if !matches!(self.get("IPS_OptInService").await?.get("OptInState"), Some("1" | "2")) {
+        let opt_in = self.get("IPS_OptInService").await?;
+        if !matches!(opt_in.get("OptInState"), Some("1" | "2")) {
             self.invoke(&StartOptIn).await?;
         }
+
         Ok(())
     }
 
-    /// Gives the code read out, after which the device takes redirection sessions until the last one ends.
+    /// Gives the device the code that was read out, after which it takes redirection sessions until the last one ends.
     pub async fn send_consent(&mut self, code: u32) -> Result<()> {
         match self.invoke(&SendOptInCode { OptInCode: code }).await {
-            // PT_STATUS_INVALID_CREDENTIALS
-            Err(Error::Method { code, .. }) if code == "2066" => Err(Error::WrongCode),
+            Err(Error::Method { code, .. }) if code == "2066" => Err(Error::WrongCode), // PT_STATUS_INVALID_CREDENTIALS
             sent => sent.map(drop),
         }
     }
@@ -117,8 +122,7 @@ impl Client {
         self.invoke(&CancelOptIn).await.map(drop)
     }
 
-    /// KVM's access point, which a device without KVM doesn't have: it answers with a fault, like for any class it
-    /// doesn't have.
+    /// `None` for a device without KVM, which answers with a fault as it does for any class it does not have.
     pub(crate) async fn kvm_access_point(&mut self) -> Result<Option<Instance>> {
         match self.get("CIM_KVMRedirectionSAP").await {
             Err(Error::Fault(_) | Error::Unsupported | Error::Http(_)) => Ok(None),
@@ -128,7 +132,7 @@ impl Client {
 }
 
 /// KVM is on when its access point is enabled (2) or enabled but idle (6).
-fn enabled(kvm: &Instance) -> bool {
+fn is_enabled(kvm: &Instance) -> bool {
     matches!(kvm.get("EnabledState"), Some("2" | "6"))
 }
 
@@ -154,7 +158,7 @@ struct RedirectionStateChange {
 
 method!(RedirectionStateChange, REDIRECTION_SERVICE, "RequestStateChange");
 
-// From go-wsman-messages' `ips/optin`, Copyright Intel Corporation, Apache-2.0.
+// The inputs below are go-wsman-messages' (`ips/optin`), Copyright Intel Corporation, Apache-2.0.
 
 const OPT_IN_SERVICE: &str = "http://intel.com/wbem/wscim/1/ips-schema/1/IPS_OptInService";
 
@@ -194,7 +198,7 @@ mod tests {
         let request = wsman::invoke(&RedirectionStateChange { RequestedState: 32771 }, None, 0);
         assert_eq!(body_meaning(&request), meaning(expected));
 
-        // An instance as read goes back whole, with what we changed.
+        // We send an instance back whole as we read it, with what we changed.
         let expected = r#"<h:AMT_RedirectionService xmlns:h="http://intel.com/wbem/wscim/1/amt-schema/1/AMT_RedirectionService"><h:CreationClassName>AMT_RedirectionService</h:CreationClassName><h:ElementName>Intel(r) AMT Redirection Service</h:ElementName><h:EnabledState>32771</h:EnabledState><h:ListenerEnabled>true</h:ListenerEnabled><h:Name>Intel(r) AMT Redirection Service</h:Name><h:SystemCreationClassName>CIM_ComputerSystem</h:SystemCreationClassName><h:SystemName>Intel(r) AMT</h:SystemName></h:AMT_RedirectionService>"#;
         let mut service = Instance {
             class: "AMT_RedirectionService".into(),

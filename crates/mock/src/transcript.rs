@@ -1,6 +1,3 @@
-//! A session as recorded after its handshake, AMT's redirection or a BMC's KVM: who said what, in order. On disk each
-//! record is a direction byte (`>` we sent, `<` the device sent), a little-endian u32 length and the bytes.
-
 use std::io;
 use std::path::Path;
 
@@ -18,22 +15,27 @@ pub fn received(bytes: &[u8]) -> (Direction, Vec<u8>) {
     (Direction::Received, bytes.to_vec())
 }
 
+/// A session as recorded after its handshake, the redirection of an AMT or the KVM of a BMC: who said what, in order.
 #[derive(Debug, Default, PartialEq, Eq)]
 pub struct Transcript(pub Vec<(Direction, Vec<u8>)>);
 
+// NOTE: On disk each record is a direction byte (`>` we sent, `<` the device sent), a little-endian u32 length and the
+// bytes.
 impl Transcript {
     pub fn load(path: &Path) -> io::Result<Self> {
         let bytes = std::fs::read(path)?;
+
         let mut rest = bytes.as_slice();
         let mut records = Vec::new();
         while let [direction, a, b, c, d, tail @ ..] = rest {
-            let len = u32::from_le_bytes([*a, *b, *c, *d]) as usize;
+            let length = u32::from_le_bytes([*a, *b, *c, *d]) as usize;
             let direction = if *direction == b'>' { Direction::Sent } else { Direction::Received };
             let data =
-                tail.get(..len).ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "truncated transcript"))?;
+                tail.get(..length).ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "truncated transcript"))?;
             records.push((direction, data.to_vec()));
-            rest = &tail[len..];
+            rest = &tail[length..];
         }
+
         Ok(Self(records))
     }
 
@@ -44,6 +46,7 @@ impl Transcript {
             bytes.extend_from_slice(&u32::try_from(data.len()).unwrap().to_le_bytes());
             bytes.extend_from_slice(data);
         }
+
         std::fs::write(path, bytes)
     }
 }

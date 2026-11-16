@@ -1,6 +1,3 @@
-<!-- The device's serial console (Serial over LAN): what it writes, and what's typed here. 80 by 25, the size serial
-     consoles assume, as the device can't know ours. Like the screen it stays open while hidden, and comes back when it
-     goes away, the footer saying so meanwhile. Without consent it stops, until connected again. -->
 <script lang="ts">
   import "@xterm/xterm/css/xterm.css";
   import { invoke } from "@tauri-apps/api/core";
@@ -21,6 +18,7 @@
     status: (text: string) => void;
   } = $props();
 
+  // We use 80 by 25, the size serial consoles assume, as the device cannot know ours.
   const terminal = new Terminal({
     cols: 80,
     rows: 25,
@@ -28,24 +26,26 @@
     fontSize: 14,
     theme: { background: "#000000" },
   });
-  /** The open session's id, which what's typed goes to: typing for one since closed goes nowhere. */
+
+  /** The id of the open session, which what is typed goes to: typing for one since closed goes nowhere. */
   let id: number | undefined;
 
-  // What's typed goes out in the order it was typed. A console that's gone says so in its reads. Backspace is ^H, as
-  // MeshCommander sends it: what the BIOS takes, and shells do too.
+  // What is typed goes out in the order it was typed, and a console that is gone says so in its reads. Backspace is ^H
+  // as MeshCommander sends it, which is what the BIOS takes and shells do too.
   let typing: Promise<unknown> = Promise.resolve();
-  terminal.onData((data) => {
-    const to = id;
-    if (to === undefined) return;
-    data = data.replaceAll("\x7f", "\b");
-    typing = typing.then(() => invoke("sol_write", { host, id: to, data }).catch(() => {}));
+  terminal.onData((text) => {
+    const openId = id;
+    if (openId === undefined) return;
+
+    text = text.replaceAll("\x7f", "\b");
+    typing = typing.then(() => invoke("sol_write", { host, id: openId, text }).catch(() => {}));
   });
 
-  /** What the device writes, while it's open. */
-  async function read(opened: number, open: () => boolean) {
+  async function read(opened: number, isOpen: () => boolean) {
     id = opened;
     if (!hidden) terminal.focus();
-    while (open()) terminal.write(new Uint8Array(await invoke<ArrayBuffer>("sol_read", { host, id: opened })));
+
+    while (isOpen()) terminal.write(new Uint8Array(await invoke<ArrayBuffer>("sol_read", { host, id: opened })));
   }
 </script>
 

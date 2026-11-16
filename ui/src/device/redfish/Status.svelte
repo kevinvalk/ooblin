@@ -1,12 +1,10 @@
-<!-- The server and its BMC as Redfish says them, any flavor's that speaks it: the BMC's network port is the one we
-     speak to. The days its BIOS was released and its firmware built only where a vendor's own pages say them. -->
 <script lang="ts">
   import type { BmcStatus } from "../../bindings/core";
   import Network from "../Network.svelte";
 
   let { data }: { data?: BmcStatus } = $props();
 
-  /** A day as `2026-05-29`, in the reader's own words. */
+  /** A day as `2026-05-29`, in the words of the reader. */
   const day = (date?: string) => (date ? new Date(`${date}T12:00`).toLocaleDateString() : "");
 </script>
 
@@ -20,6 +18,7 @@
       </dd>
     </div>
     <div><dt>BIOS version</dt><dd>{data?.bios}</dd></div>
+    <!-- The days its BIOS was released and its firmware was built show only where the pages of a vendor say them. -->
     {#if !data || data.bios_released}
       <div><dt>BIOS released</dt><dd>{day(data?.bios_released)}</dd></div>
     {/if}
@@ -43,4 +42,5 @@
   </dl>
 </section>
 
+<!-- The network port of the BMC is the one we speak to. -->
 <Network ports={data?.ports} />

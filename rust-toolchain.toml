@@ -1,4 +1,4 @@
-# The Rust everyone builds with, here and in CI, bumped on purpose.
+# NOTE: We pin to the patch so everyone builds with the same Rust, CI included. We only bump it on purpose.
 [toolchain]
 channel = "1.98.1"
 profile = "minimal"

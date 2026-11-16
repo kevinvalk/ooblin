@@ -12,7 +12,7 @@
     <tbody>
       {#each data ?? Array(12) as event}
         <tr data-severity={event?.severity} title={event?.severity}>
-          <td>{event && new Date(event.time * 1000).toLocaleString()}</td>
+          <td>{event && new Date(event.occurred_at * 1000).toLocaleString()}</td>
           <td>{event?.source}</td>
           <td>{event?.description}</td>
         </tr>

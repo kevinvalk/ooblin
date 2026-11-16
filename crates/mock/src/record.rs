@@ -1,14 +1,3 @@
-//! Records a device into a fixture, unattended and without changing anything on it:
-//!
-//! - WS-Man: for every class we know of, a WS-Transfer Get and a WS-Enumeration Enumerate/Pull, all pages of it. Both are
-//!   read-only by spec. Classes the device lacks answer with a fault and we skip them, the replay answers those the same
-//!   way. Then the app's own reads that call methods (the clock, accounts, the logs), through a forwarding mock that
-//!   keeps each reply under the name its replay will look for.
-//! - Redirection: a short SOL, KVM and IDER session as the app's own client has them, through the same mock, saved as
-//!   transcripts. SOL presses Enter once to get a prompt, KVM fetches one full frame (a screenshot, mind what's on
-//!   screen), IDER puts an empty disc in for the device's next boot and takes it out at once, so no drive shows up on
-//!   a host that keeps running.
-
 use std::io::Write as _;
 use std::path::Path;
 use std::time::{Duration, Instant};
@@ -19,7 +8,7 @@ use ooblin_core::{Error, Target};
 use crate::scrub::scrub;
 use crate::{Amt, PASSWORD};
 
-/// Every class MeshCommander or go-wsman-messages knows of. A crawl is cheap, so we'd rather ask for one too many.
+/// Every class MeshCommander or go-wsman-messages knows of. A crawl is cheap, so we would rather ask for one too many.
 const CLASSES: &[&str] = &[
     "AMT_8021xCredentialContext",
     "AMT_8021XProfile",
@@ -286,12 +275,14 @@ const CLASSES: &[&str] = &[
     "IPS_WatchDogAction",
 ];
 
-/// Records `target` into `fixture`, telling how it goes on stderr.
+/// Records `target` into `fixture`, unattended and without changing anything on it, and tells how it goes on stderr.
 pub async fn record(target: &Target, fixture: &Path) -> anyhow::Result<()> {
     let mut device = Connection::new(target, None)?;
     crawl(&mut device, &fixture.join("wsman")).await?;
     eprintln!("Certificate {}", device.fingerprint().unwrap_or_default());
 
+    // The reads of the app that call methods (the clock, accounts, the logs) go through a forwarding mock, which keeps
+    // each reply under the name its replay will look for.
     eprint!("methods  recording…");
     let proxy = Amt::forward(device, target, fixture).await;
     let mut client = Client::new(&proxy.target(PASSWORD), None)?;
@@ -306,17 +297,21 @@ pub async fn record(target: &Target, fixture: &Path) -> anyhow::Result<()> {
         Some(error) => eprintln!("\rmethods  incomplete, {error}"),
     }
 
+    // A short SOL, KVM and IDER session as the client of the app has them, through the same mock, saved as transcripts.
     for name in ["sol", "kvm", "ider"] {
         eprint!("{name:>6}  recording…");
         let session = async {
             match name {
+                // We press Enter once to get a prompt.
                 "sol" => {
                     let sol = client.sol().await?;
                     sol.write(b"\r").await?;
                     listen(&sol, tokio::time::sleep(Duration::from_secs(3))).await
                 }
+                // WARNING: We fetch one full frame, which is a screenshot: mind what is on the screen!
                 "kvm" => {
                     let kvm = client.kvm().await?;
+
                     // AMT 19 first says only how large its screen is: a frame of a size alone.
                     let (started, mut frame) = (Instant::now(), kvm.frame().await);
                     while frame.as_ref().is_ok_and(|frame| frame.len() == 4) && started.elapsed().as_secs() < 10 {
@@ -325,6 +320,8 @@ pub async fn record(target: &Target, fixture: &Path) -> anyhow::Result<()> {
                     kvm.close().await;
                     frame.map(drop)
                 }
+                // We put an empty disc in for the next boot of the device and take it out at once, so that no drive
+                // shows up on a host that keeps running.
                 _ => {
                     let disc = tempfile::tempfile()?;
                     disc.set_len(2048)?;
@@ -332,12 +329,14 @@ pub async fn record(target: &Target, fixture: &Path) -> anyhow::Result<()> {
                 }
             }
         };
-        // A session the device refuses (not enabled, say) is skipped, the replay refuses it the same way.
+
+        // A session the device refuses (not enabled, say) is skipped, as the replay refuses it the same way.
         match session.await {
             Ok(()) => save(&proxy, fixture, name).await?,
             Err(error) => eprintln!("\r{name:>6}  skipped, {error}"),
         }
     }
+
     Ok(())
 }
 
@@ -347,13 +346,15 @@ pub async fn record_sol(target: &Target, fixture: &Path) -> anyhow::Result<()> {
     let proxy = Amt::forward(Connection::new(target, None)?, target, fixture).await;
     let sol = Client::new(&proxy.target(PASSWORD), None)?.sol().await?;
     eprint!("   sol  recording, press Enter to stop");
+
     // The terminal hands us the line once Enter is pressed.
     listen(&sol, tokio::io::AsyncReadExt::read_u8(&mut tokio::io::stdin())).await?;
+
     std::fs::create_dir_all(fixture)?;
     save(&proxy, fixture, "sol").await
 }
 
-/// Everything the device writes to its serial console until `done`.
+/// Reads everything the device writes to its serial console until `done`.
 async fn listen(sol: &Sol, done: impl Future) -> Result<(), Error> {
     tokio::pin!(done);
     loop {
@@ -363,6 +364,7 @@ async fn listen(sol: &Sol, done: impl Future) -> Result<(), Error> {
         }
     }
     sol.close().await;
+
     Ok(())
 }
 
@@ -371,26 +373,33 @@ async fn save(proxy: &Amt, fixture: &Path, name: &str) -> anyhow::Result<()> {
     let transcript = proxy.forwarded().await;
     transcript.save(&fixture.join(format!("{name}.transcript")))?;
     eprintln!("\r{name:>6}  {} bytes\x1b[K", transcript.0.iter().map(|(_, data)| data.len()).sum::<usize>());
+
     Ok(())
 }
 
-/// Crawls `device` into `dir`, scrubbed, and returns how many classes answered.
-pub async fn crawl(device: &mut Connection, dir: &Path) -> anyhow::Result<usize> {
-    std::fs::create_dir_all(dir)?;
-    let save =
-        |class: &str, action: &str, xml: &str| std::fs::write(dir.join(format!("{class}.{action}.xml")), scrub(xml));
+/// Crawls `device` into `directory`, scrubbed, and returns how many classes answered: for every class we know of a
+/// WS-Transfer Get and a WS-Enumeration Enumerate and Pull of all its pages, which are both read-only by specification.
+/// A class the device lacks answers with a fault and we skip it, as the replay answers it the same way.
+pub async fn crawl(device: &mut Connection, directory: &Path) -> anyhow::Result<usize> {
+    std::fs::create_dir_all(directory)?;
+    let save = |class: &str, action: &str, xml: &str| {
+        std::fs::write(directory.join(format!("{class}.{action}.xml")), scrub(xml))
+    };
 
     let mut answered = 0;
     for (i, class) in CLASSES.iter().enumerate() {
         eprint!("\r WS-Man  {}/{}  {class}\x1b[K", i + 1, CLASSES.len());
         let _ = std::io::stderr().flush();
+
         let get = fetch(device, wsman::get(class, 0)).await?;
         if let Some(xml) = &get {
             save(class, "Get", xml)?;
         }
+
         let enumerate = fetch(device, wsman::enumerate(class, 0)).await?;
         let mut context = enumerate.as_deref().map(wsman::parse_enumerate).transpose()?;
-        // Pages as `Class.Pull.xml`, `Class.Pull.2.xml` and so on, the replay serves them in turn.
+
+        // The pages go in `Class.Pull.xml`, `Class.Pull.2.xml` and so on, as the replay serves them in turn.
         let mut pages = 0;
         while let Some(current) = context {
             let xml = device.post(wsman::pull(class, &current, 0)).await?;
@@ -398,13 +407,15 @@ pub async fn crawl(device: &mut Connection, dir: &Path) -> anyhow::Result<usize>
             pages += 1;
             save(class, &if pages == 1 { "Pull".to_owned() } else { format!("Pull.{pages}") }, &xml)?;
         }
+
         answered += usize::from(get.is_some() || pages > 0);
     }
     eprintln!("\r WS-Man  {answered} of {} classes answered\x1b[K", CLASSES.len());
+
     Ok(answered)
 }
 
-/// A fault means the device doesn't have this, anything else (unreachable, wrong password) ends the crawl.
+/// A fault means the device does not have this, anything else (unreachable, wrong password) ends the crawl.
 async fn fetch(device: &mut Connection, envelope: String) -> Result<Option<String>, Error> {
     match device.post(envelope).await {
         Ok(xml) => Ok(Some(xml)),

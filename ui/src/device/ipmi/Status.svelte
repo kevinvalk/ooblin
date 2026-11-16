@@ -1,4 +1,3 @@
-<!-- The server and its BMC as IPMI tells them, and the BMC's own network port. -->
 <script lang="ts">
   import type { IpmiStatus } from "../../bindings/core";
   import Network from "../Network.svelte";

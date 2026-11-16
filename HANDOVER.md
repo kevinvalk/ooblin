@@ -164,7 +164,7 @@ capabilities and inventories; they should not become an implicit general-purpose
 There is one worthwhile boundary cleanup: `Change::AddCertificate` currently contains a local filesystem path
 and the core dispatcher reads it. Prefer moving the application command enum and its dispatch beside the Tauri
 `change` command, retaining the existing typed core setter inputs. Read the certificate in the app and call
-`Client::add_certificate(bytes, trusted_root)`. This follows egui's direct use of core setters.
+`Client::add_certificate(bytes, is_trusted_root)`. This follows egui's direct use of core setters.
 
 Do this as one focused boundary change, after the settings outcome tests exist. Do not keep duplicate
 application and library command enums with a conversion layer. If other real consumers need a domain-level

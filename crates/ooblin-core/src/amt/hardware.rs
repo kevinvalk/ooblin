@@ -9,26 +9,33 @@ impl Client {
         let features = self.enumerate("CIM_BIOSFeature").await?;
         let id = self.system_id().await?;
         let processors = self.enumerate("CIM_Processor").await?;
-        // CIM_Processor only has clock speeds, the rest is on the CIM_Chip tagged with its device ID, and that chip's
-        // socket on its location. Enumerating CIM_Chip includes its subclass, the memory modules, we leave those out.
+
+        // CIM_Processor only has clock speeds. The rest is on the CIM_Chip tagged with its device ID, and the socket of
+        // that chip is on its location. Enumerating CIM_Chip includes its subclass (the memory modules), so we leave
+        // those out.
         let chips: Vec<_> =
             self.enumerate("CIM_Chip").await?.into_iter().filter(|chip| chip.class == "CIM_Chip").collect();
         let locations = self.enumerate("CIM_PhysicalElementLocation").await?;
         let memory = self.enumerate("CIM_PhysicalMemory").await?;
-        // Disks have their size on CIM_MediaAccessDevice and their name on CIM_PhysicalPackage, in the same order.
+
+        // Disks have their size on CIM_MediaAccessDevice and their name on CIM_PhysicalPackage. We rely on both
+        // listing the disks in the same order.
         let disks = self.enumerate("CIM_MediaAccessDevice").await?;
         let packages = self.enumerate("CIM_PhysicalPackage").await?;
         let packages = packages.iter().filter(|package| package.class == "CIM_PhysicalPackage");
+
         let batteries = self.enumerate("CIM_Battery").await?;
 
         let processors = processors.iter().map(|processor| {
             let tag = processor.get("DeviceID");
             let chip = |name| chips.iter().find(|chip| chip.get("Tag") == tag).map(|chip| chip.text(name));
-            // The association's references end in the chip's tag and the location's position.
+
+            // The references of the association end in the chip's tag and the location's position.
             let socket = locations.iter().find_map(|location| {
                 let chip = location.get("Element")?.lines().last();
                 location.get("PhysicalLocation")?.lines().last().filter(|_| chip == tag)
             });
+
             Processor {
                 model: chip("Version").unwrap_or_default(),
                 manufacturer: chip("Manufacturer").unwrap_or_default(),
@@ -40,6 +47,7 @@ impl Client {
                 upgrade_method: named(UPGRADE_METHOD, processor.get("UpgradeMethod")),
             }
         });
+
         let memory = memory.iter().enumerate().map(|(i, module)| Module {
             slot: module.get("BankLabel").map_or(format!("Module {}", i + 1), str::to_owned),
             bytes: module.parse("Capacity"),
@@ -49,15 +57,16 @@ impl Client {
             manufacturer: module.text("Manufacturer"),
             part_number: module.text("PartNumber"),
             serial_number: module.text("SerialNumber"),
-            // AMT keeps tags unique with a ` (#2)`, the device's own page leaves that out.
+            // AMT keeps tags unique with a ` (#2)`, which we leave out as the device's own page does.
             asset_tag: module.text("Tag").split(" (#").next().unwrap_or_default().to_owned(),
         });
+
         let disks = disks.iter().zip(packages).map(|(disk, package)| Disk {
             model: package.text("Model"),
             serial_number: package.text("SerialNumber"),
-            // MaxMediaSize is in kilobytes.
             bytes: disk.parse::<u64>("MaxMediaSize").map(|kilobytes| kilobytes.saturating_mul(1000)),
         });
+
         let batteries = batteries.iter().map(|battery| Battery {
             name: battery.text("DeviceID"),
             charge_percent: battery.parse("EstimatedChargeRemaining"),
@@ -65,6 +74,7 @@ impl Client {
         });
 
         let features = features.iter().flat_map(|feature| feature.all("Characteristics"));
+
         Ok(Hardware {
             system: System {
                 model: chassis.text("Model"),
@@ -79,7 +89,7 @@ impl Client {
                 version: board.text("Version"),
                 serial_number: board.text("SerialNumber"),
                 asset_tag: board.text("Tag"),
-                replaceable: board.parse("CanBeFRUed").unwrap_or_default(),
+                is_replaceable: board.parse("CanBeFRUed").unwrap_or_default(),
             },
             bios: Bios {
                 vendor: bios.text("Manufacturer"),
@@ -94,16 +104,16 @@ impl Client {
         })
     }
 
-    /// The system GUID, which AMT gives as SMBIOS's bytes in hex.
+    /// The system GUID as a UUID. AMT gives it as the bytes of SMBIOS in hex, and anything else we pass on as it is.
     pub(super) async fn system_id(&mut self) -> Result<String> {
-        let package = self.enumerate("CIM_ComputerSystemPackage").await?;
-        let hex = package.first().map(|package| package.text("PlatformGUID")).unwrap_or_default();
+        let packages = self.enumerate("CIM_ComputerSystemPackage").await?;
+        let hex = packages.first().map(|package| package.text("PlatformGUID")).unwrap_or_default();
         let guid = u128::from_str_radix(&hex, 16).ok().filter(|_| hex.len() == 32);
         Ok(guid.map_or(hex, |guid| crate::uuid(guid.to_be_bytes()).to_lowercase()))
     }
 }
 
-// DMTF value maps, as MeshCommander shows them (Apache-2.0) and extended to what AMT 19 reports.
+// The DMTF value maps below are as MeshCommander shows them (Apache-2.0), and we extended them to what AMT 19 reports.
 
 const CPU_STATUS: &[&str] =
     &["Unknown", "Enabled", "Disabled by user", "Disabled by BIOS (POST error)", "Idle", "Other"];
@@ -198,7 +208,7 @@ const BIOS_FEATURES: &[&str] = &[
     "EDD spec",
 ];
 
-/// SMBIOS processor upgrade names (DSP0134 7.5.5).
+// The SMBIOS processor upgrade names (DSP0134 7.5.5).
 const UPGRADE_METHOD: &[&str] = &[
     "",
     "Other",
@@ -290,7 +300,7 @@ const UPGRADE_METHOD: &[&str] = &[
     "Socket BGA2833",
 ];
 
-/// SMBIOS processor family names (DSP0134 7.5.2), the Intel ones AMT can run on.
+/// The SMBIOS processor family names (DSP0134 7.5.2), of which we only have the Intel ones AMT can run on.
 fn family(code: Option<&str>) -> String {
     let name = match code.and_then(|code| code.parse::<u16>().ok()) {
         Some(0x0F) => "Celeron",
@@ -315,6 +325,7 @@ fn family(code: Option<&str>) -> String {
         Some(0x307) => "Core Ultra 9",
         _ => return code.unwrap_or_default().to_owned(),
     };
+
     name.to_owned()
 }
 

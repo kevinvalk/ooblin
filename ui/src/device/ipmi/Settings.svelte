@@ -1,4 +1,3 @@
-<!-- What can be set over IPMI: the BMC's network, the server's settings, its FRU, and the BMC's users to read. -->
 <script lang="ts">
   import type { IpmiChange, IpmiSettings } from "../../bindings/core";
   import type { Connection } from "../../connection";
@@ -17,7 +16,7 @@
     connection: Connection;
     save: (done: string, change: IpmiChange) => Promise<boolean>;
     busy: boolean;
-    ask: (question: string, answers: string[], safe?: boolean) => Promise<string>;
+    ask: (question: string, answers: string[], isSafe?: boolean) => Promise<string>;
   } = $props();
 </script>
 
@@ -42,7 +41,7 @@
     {#each data?.users ?? [undefined] as user (user?.id)}
       <div title={user && `User ${user.id}`}>
         <dt>{user?.name}</dt>
-        <dd>{user && user.privilege + (user.enabled === false ? ", disabled" : "")}</dd>
+        <dd>{user && user.privilege + (user.is_enabled === false ? ", disabled" : "")}</dd>
       </div>
     {/each}
   </dl>

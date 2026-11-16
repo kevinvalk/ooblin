@@ -1,21 +1,19 @@
-//! A BMC's sensors: their records in its SDR repository and what they read now. IPMI 2.0 chapters 33, 35 and 43.
-
 use std::collections::HashSet;
 
 use super::{SENSOR, STORAGE, Session};
 use crate::{Error, Result, Sensor, SensorKind, Severity};
+// We keep the severities to one letter so that the tables of states below stay readable.
 use Severity::{Critical as C, Info as I, Warning as W};
 
-/// The BMC's own address: the only owner we read sensors of, without bridging.
-const BMC: u8 = 0x20;
+const BMC_ADDRESS: u8 = 0x20; // The only owner whose sensors we read, as we do not bridge to others
 
-/// A sensor's SDR record, what reading it and naming its events need.
+// NOTE: A sensor's record in the BMC's SDR repository and what it reads now are IPMI 2.0 chapters 33, 35 and 43.
 #[derive(Debug, Clone)]
 pub(super) struct Record(Vec<u8>);
 
 impl Record {
-    fn byte(&self, at: usize) -> u8 {
-        self.0.get(at).copied().unwrap_or(0)
+    fn byte(&self, offset: usize) -> u8 {
+        self.0.get(offset).copied().unwrap_or(0)
     }
 
     pub(super) fn owner(&self) -> u8 {
@@ -27,48 +25,53 @@ impl Record {
     }
 
     pub(super) fn name(&self) -> String {
-        let at = match self.byte(3) {
+        let offset = match self.byte(3) {
             0x01 => 47,
             0x02 => 31,
             _ => 16,
         };
-        let length = usize::from(self.byte(at) & 0x1F);
-        let name = self.0.iter().skip(at + 1).take(length).map(|&byte| char::from(byte)).collect::<String>();
+        let length = usize::from(self.byte(offset) & 0x1F);
+        let name = self.0.iter().skip(offset + 1).take(length).map(|&byte| char::from(byte)).collect::<String>();
+
         name.trim_matches(['\0', ' ']).to_string()
     }
 
-    /// Whether it reads a number: only a full record of a threshold sensor does.
-    fn analog(&self) -> bool {
+    /// Only a full record of a threshold sensor reads a number.
+    fn is_analog(&self) -> bool {
         self.byte(3) == 0x01 && self.byte(13) == 0x01 && self.byte(20) >> 6 != 3
     }
 
     pub(super) fn unit(&self) -> String {
-        let name = |code: u8| UNITS.get(usize::from(code)).copied().unwrap_or("invalid");
-        let (units, modifier) = (self.byte(20), name(self.byte(22)));
-        let unit = format!("{}{}", if units & 1 != 0 { "% " } else { "" }, name(self.byte(21)));
+        let unit_name = |code: u8| UNITS.get(usize::from(code)).copied().unwrap_or("invalid");
+        let (units, modifier) = (self.byte(20), unit_name(self.byte(22)));
+        let unit = format!("{}{}", if units & 1 != 0 { "% " } else { "" }, unit_name(self.byte(21)));
         let unit = match units >> 1 & 0x03 {
             1 => format!("{unit}/{modifier}"),
             2 => format!("{unit}*{modifier}"),
             _ => unit,
         };
+
         unit.trim_end().to_string()
     }
 
-    /// Converts a raw reading or threshold: y = L((M x + B 10^Bexp) 10^Rexp), rounded to three decimals.
+    /// Converts a raw reading or threshold as y = L((M x + B 10^Bexp) 10^Rexp), rounded to three decimals.
     pub(super) fn value(&self, raw: u8) -> Option<f64> {
-        if !self.analog() {
+        if !self.is_analog() {
             return None;
         }
+
         let x = f64::from(match self.byte(20) >> 6 {
             0 => i16::from(raw),
             // One's complement: -0 is 0xFF.
             1 => i16::from(raw.wrapping_add(raw >> 7) as i8),
             _ => i16::from(raw as i8),
         });
+
         let ten_bits = |low: u8, high: u8| f64::from((i16::from(high >> 6) << 8 | i16::from(low)) << 6 >> 6);
         let (m, b) = (ten_bits(self.byte(24), self.byte(25)), ten_bits(self.byte(26), self.byte(27)));
         let exponents = self.byte(29);
         let (r, b_exponent) = (i32::from(exponents as i8 >> 4), i32::from((exponents << 4) as i8 >> 4));
+
         let y = (m * x + b * 10f64.powi(b_exponent)) * 10f64.powi(r);
         let y = match self.byte(23) & 0x7F {
             0x01 => y.ln(),
@@ -82,83 +85,94 @@ impl Record {
             0x09 => y * y * y,
             0x0A => y.sqrt(),
             0x0B => y.cbrt(),
-            // Linear, or non-linear whose factors we don't ask for (like ipmitool).
+            // Linear, or non-linear, whose factors we do not ask for (like ipmitool).
             _ => y,
         };
+
         Some((y * 1000.0).round() / 1000.0).filter(|y| y.is_finite())
     }
 }
 
-/// Walks the SDR repository, keeping the sensors' records.
 pub(super) async fn records(session: &Session) -> Result<Vec<Record>> {
     let mut reservation = reserve(session).await?;
     let (mut records, mut seen, mut id) = (Vec::new(), HashSet::new(), 0);
+
     while id != 0xFFFF && seen.insert(id) {
         let (next, mut record) = match read(session, &mut reservation, id, 0, 5).await {
             // An empty repository has no first record either.
             Err(Error::Refused(0xCB)) if id == 0 => break,
-            read => read?,
+            header => header?,
         };
         let length = 5 + usize::from(*record.get(4).ok_or_else(short)?);
-        // What X10s answer at once; FreeIPMI starts here too and shrinks by 4 when it's too much.
-        let mut chunk = 16;
+
+        // We start at 16 bytes, which X10s answer at once. FreeIPMI starts there too and shrinks by 4 when that is too
+        // much.
+        let mut chunk_length = 16;
         while record.len() < length {
-            let count = chunk.min(length - record.len()) as u8;
+            let count = chunk_length.min(length - record.len()) as u8;
             // Get SDR's offset is a byte, so no record goes on past it.
             let offset = u8::try_from(record.len()).map_err(|_| Error::Protocol("an SDR record too long".into()))?;
             match read(session, &mut reservation, id, offset, count).await {
                 Ok((_, bytes)) => record.extend(bytes),
-                Err(Error::Refused(0xCA)) if chunk > 4 => chunk -= 4,
+                Err(Error::Refused(0xCA)) if chunk_length > 4 => chunk_length -= 4,
                 Err(error) => return Err(error),
             }
         }
-        // A full, compact or event-only sensor record, up to its name: one cut shorter would read as zeros.
+
+        // We keep a full, compact or event-only sensor record that reaches its name, as one cut shorter would read as
+        // zeros.
         if matches!((record[3], record.len()), (0x01, 48..) | (0x02, 32..) | (0x03, 17..)) {
             records.extend(shared(record));
         }
         id = next;
     }
+
     Ok(records)
 }
 
-/// A compact or event-only record may stand for several sensors alike, numbered on from its own: a record each, named
-/// apart by the number or letter the record says to add (IPMI 2.0 43.2 and 43.3).
+/// A compact or event-only record may stand for several sensors alike, numbered on from its own. We make a record of
+/// each, named apart by the number or letter the record says to add (IPMI 2.0 43.2 and 43.3).
 fn shared(record: Vec<u8>) -> Vec<Record> {
-    let (sharing, name) = match record[3] {
+    let (sharing_offset, name_offset) = match record[3] {
         0x02 => (23, 31),
         0x03 => (12, 16),
         _ => return vec![Record(record)],
     };
-    let (count, letters, first) = (record[sharing] & 0x0F, record[sharing] & 0xC0 == 0x40, record[sharing + 1] & 0x7F);
-    let letter = |at: u8| char::from(b'A' + at % 26);
+    let sharing = record[sharing_offset];
+    let (count, is_lettered, first) = (sharing & 0x0F, sharing & 0xC0 == 0x40, record[sharing_offset + 1] & 0x7F);
+    let letter = |instance: u8| char::from(b'A' + instance % 26);
+
     let sensors = (0..count.max(1)).map(|sensor| {
         let suffix = match first + sensor {
             _ if count < 2 => String::new(),
-            instance if !letters => instance.to_string(),
+            instance if !is_lettered => instance.to_string(),
             instance @ 0..26 => letter(instance).to_string(),
             instance => format!("{}{}", letter(instance / 26 - 1), letter(instance)),
         };
-        let length = usize::from(record[name] & 0x1F);
-        let end = (name + 1 + length).min(record.len());
+        let length = usize::from(record[name_offset] & 0x1F);
+        let end = (name_offset + 1 + length).min(record.len());
 
         let mut record = record.clone();
         record[7] = record[7].wrapping_add(sensor);
         record.splice(end..end, suffix.bytes());
-        record[name] = record[name] & 0xE0 | (length + suffix.len()).min(0x1F) as u8;
+        record[name_offset] = record[name_offset] & 0xE0 | (length + suffix.len()).min(0x1F) as u8;
         Record(record)
     });
+
     sensors.collect()
 }
 
 async fn reserve(session: &Session) -> Result<[u8; 2]> {
     let answer = session.request(STORAGE, 0x22, &[]).await?;
+
     answer.get(..2).and_then(|id| id.try_into().ok()).ok_or_else(short)
 }
 
-/// Reads part of record `id`: the next record's ID and the bytes, reserving the repository again when someone else
-/// did meanwhile.
+/// Reads part of record `id`, which gives the next record's ID and the bytes. We reserve the repository again when
+/// someone else did meanwhile.
 async fn read(session: &Session, reservation: &mut [u8; 2], id: u16, offset: u8, count: u8) -> Result<(u16, Vec<u8>)> {
     let [low, high] = id.to_le_bytes();
+
     for _ in 0..4 {
         match session.request(STORAGE, 0x23, &[reservation[0], reservation[1], low, high, offset, count]).await {
             Err(Error::Refused(0xC5)) => *reservation = reserve(session).await?,
@@ -169,6 +183,7 @@ async fn read(session: &Session, reservation: &mut [u8; 2], id: u16, offset: u8,
             Err(error) => return Err(error),
         }
     }
+
     Err(Error::Refused(0xC5))
 }
 
@@ -176,11 +191,12 @@ fn short() -> Error {
     Error::Protocol("a short SDR answer".into())
 }
 
-/// Reads every sensor the BMC owns; a sensor it can't read reads `None` rather than failing the rest.
+/// Reads every sensor the BMC owns. A sensor it cannot read reads `None` instead of failing the rest.
 pub(super) async fn sensors(session: &Session, records: &[Record]) -> Result<Vec<Sensor>> {
     let mut sensors = Vec::new();
+
     for record in records.iter().filter(|record| record.byte(3) != 0x03) {
-        let (sensor_type, event) = (record.byte(12), record.byte(13));
+        let (sensor_type, event_type) = (record.byte(12), record.byte(13));
         let kind = match (sensor_type, record.byte(21)) {
             (0x01, _) | (_, 1..=3) => SensorKind::Temperature,
             (0x04, _) | (_, 18) => SensorKind::Fan,
@@ -189,16 +205,17 @@ pub(super) async fn sensors(session: &Session, records: &[Record]) -> Result<Vec
             (_, 6) => SensorKind::Power,
             _ => SensorKind::Other,
         };
-        let unit = if record.analog() { record.unit() } else { String::new() };
+        let unit = if record.is_analog() { record.unit() } else { String::new() };
         let (name, state) = (record.name(), String::new());
         let mut sensor = Sensor { name, kind, reading: None, unit, state, severity: I, low: None, high: None };
-        if record.owner() == BMC && record.byte(6) & 0x03 == 0 {
+
+        if record.owner() == BMC_ADDRESS && record.byte(6) & 0x03 == 0 {
             let reading = ask(session, 0x2D, record.number()).await?;
-            // Scanning enabled and the reading available.
+            // We only take a reading where scanning is enabled and the reading is available.
             if reading.get(1).is_some_and(|flags| flags & 0x60 == 0x40) {
-                let at = |index: usize| reading.get(index).copied().unwrap_or(0);
-                let states = u16::from_le_bytes([at(2), at(3) & 0x7F]);
-                if event == 0x01 {
+                let byte = |index: usize| reading.get(index).copied().unwrap_or(0);
+                let states = u16::from_le_bytes([byte(2), byte(3) & 0x7F]);
+                if event_type == 0x01 {
                     sensor.reading = record.value(reading[0]);
                     // Non-recoverable or critical, else non-critical, low or high.
                     sensor.severity = match states {
@@ -209,7 +226,7 @@ pub(super) async fn sensors(session: &Session, records: &[Record]) -> Result<Vec
                 } else {
                     let (states, severities): (Vec<_>, Vec<_>) = (0..15)
                         .filter(|offset| states >> offset & 1 != 0)
-                        .map(|offset| match meaning(sensor_type, event, offset) {
+                        .map(|offset| match meaning(sensor_type, event_type, offset) {
                             Some((text, severity, _)) => (text.to_string(), severity),
                             None => (format!("State {offset}"), I),
                         })
@@ -219,21 +236,24 @@ pub(super) async fn sensors(session: &Session, records: &[Record]) -> Result<Vec
                     sensor.severity = severities.into_iter().max().unwrap_or(I);
                 }
             }
-            // Only where the record says the critical thresholds read.
-            if record.analog() && record.byte(18) & 0x12 != 0 {
+
+            // We only ask for the critical thresholds where the record says they can be read.
+            if record.is_analog() && record.byte(18) & 0x12 != 0 {
                 let thresholds = ask(session, 0x27, record.number()).await?;
-                let threshold = |mask: u8, at: usize| {
-                    thresholds.get(at).filter(|_| thresholds[0] & mask != 0).and_then(|&raw| record.value(raw))
+                let threshold = |mask: u8, index: usize| {
+                    thresholds.get(index).filter(|_| thresholds[0] & mask != 0).and_then(|&raw| record.value(raw))
                 };
                 (sensor.low, sensor.high) = (threshold(0x02, 2), threshold(0x10, 5));
             }
         }
+
         sensors.push(sensor);
     }
+
     Ok(sensors)
 }
 
-/// Asks about sensor `number`, a refusal (absent, say) answering nothing.
+/// Asks about sensor `number`. A refusal (of an absent sensor, say) answers nothing instead of failing.
 async fn ask(session: &Session, command: u8, number: u8) -> Result<Vec<u8>> {
     match session.request(SENSOR, command, &[number]).await {
         Err(Error::Refused(_)) => Ok(Vec::new()),
@@ -241,18 +261,19 @@ async fn ask(session: &Session, command: u8, number: u8) -> Result<Vec<u8>> {
     }
 }
 
-/// What state `offset` of event/reading type `event` means for a sensor of type `sensor`, and how bad asserting and
-/// deasserting it are.
-pub(super) fn meaning(sensor: u8, event: u8, offset: u8) -> Option<(&'static str, Severity, Severity)> {
-    let (table, key) = if event == 0x6F { (SPECIFIC, sensor) } else { (GENERIC, event) };
+/// What state `offset` of event/reading type `event_type` means for a sensor of type `sensor_type`, and how bad
+/// asserting and deasserting it are.
+pub(super) fn meaning(sensor_type: u8, event_type: u8, offset: u8) -> Option<(&'static str, Severity, Severity)> {
+    let (table, key) = if event_type == 0x6F { (SPECIFIC, sensor_type) } else { (GENERIC, event_type) };
     let states = table.iter().find(|(code, _)| *code == key)?.1;
+
     states.get(usize::from(offset)).copied().filter(|(text, ..)| !text.is_empty())
 }
 
 type States = &'static [(&'static str, Severity, Severity)];
 
-/// The states of the generic event/reading types by offset, worded as ipmitool does, with how bad asserting and
-/// deasserting each is as FreeIPMI rates them. Type 0x01 is a threshold sensor's.
+// The states of the generic event/reading types by offset. We word them as ipmitool does, with how bad asserting and
+// deasserting each is as FreeIPMI rates them. Type 0x01 is a threshold sensor's.
 const GENERIC: &[(u8, States)] = &[
     (
         0x01,
@@ -322,7 +343,7 @@ const GENERIC: &[(u8, States)] = &[
     (0x0C, &[("D0 Power State", I, I), ("D1 Power State", I, I), ("D2 Power State", I, I), ("D3 Power State", I, I)]),
 ];
 
-/// The states of event/reading type 0x6F by sensor type and offset, likewise.
+// The states of event/reading type 0x6F by sensor type and offset, worded and rated likewise.
 const SPECIFIC: &[(u8, States)] = &[
     (
         0x05,
@@ -612,7 +633,7 @@ const SPECIFIC: &[(u8, States)] = &[
     ),
 ];
 
-/// The units by their IPMI code, as ipmitool names them but the everyday ones, which go by their signs.
+// The units by their IPMI code. We name them as ipmitool does, but for the everyday ones, which go by their signs.
 const UNITS: [&str; 93] = [
     "",
     "°C",
@@ -711,7 +732,7 @@ const UNITS: [&str; 93] = [
 
 #[cfg(test)]
 mod tests {
-    //! Readings as a sensor's record converts them; `tests/ipmi.rs` reads the X10's through the mock.
+    // We only test how a sensor's record converts readings here, `tests/ipmi.rs` reads the X10's through the mock.
 
     use super::*;
 
@@ -751,7 +772,7 @@ mod tests {
         assert_eq!(sensors(&event_only), ["00 PSZ", "01 PSAA"]);
     }
 
-    /// What a server that's well logs every day, and a state the specification skips.
+    /// What a server that is well logs every day, and a state the specification skips.
     #[test]
     fn words_a_sensors_own_states() {
         let state = |sensor, offset| meaning(sensor, 0x6F, offset).map(|(text, asserting, _)| (text, asserting));

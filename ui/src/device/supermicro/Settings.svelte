@@ -1,5 +1,3 @@
-<!-- How a BMC is set up, in `Form`s. What it serves changes together, as the BMC's own port page does it: IPMI and
-     HTTPS, which we speak, only there. The footer says how it went. -->
 <script lang="ts">
   import type { BmcChange, BmcSettings } from "../../bindings/core";
   import type { Connection } from "../../connection";
@@ -19,13 +17,13 @@
     connection: Connection;
     save: (done: string, change: BmcChange) => Promise<boolean>;
     busy: boolean;
-    ask: (question: string, answers: string[], safe?: boolean) => Promise<string>;
+    ask: (question: string, answers: string[], isSafe?: boolean) => Promise<string>;
   } = $props();
   const id = $props.id();
 
-  /** Redfish's names, in words where they aren't, and those we speak, which change only in the BMC's own pages. */
+  /** The names Redfish has for the services, in words where they are not. */
   const SERVICES: Record<string, string> = { KVMIP: "KVM", VirtualMedia: "Virtual media" };
-  const OURS = ["IPMI", "HTTPS"];
+  const OURS = ["IPMI", "HTTPS"]; // We speak these, so they change only in the pages of the BMC itself
   const MODES: Record<string, string> = { FullSpeed: "Full speed", HeavyIO: "Heavy IO", PUE2: "Power efficient" };
 
   /** The services as the form has them, turning the KVM off asking first. */
@@ -34,18 +32,20 @@
       .filter((service) => !OURS.includes(service.name))
       .map((service) => ({
         name: service.name,
-        enabled: fields.has(`${service.name}-on`),
+        is_enabled: fields.has(`${service.name}-on`),
         port: Number(fields.get(`${service.name}-port`)) || service.port,
       }));
+
     const kvm = services.find((service) => service.name === "KVMIP");
     const question = "The KVM stops working, here too, and virtual media turns off with it.";
-    if (kvm && !kvm.enabled && data?.services.find((service) => service.name === "KVMIP")?.enabled) {
-      if (!(await ask(question, ["Turn off"]))) return false;
+    if (kvm && !kvm.is_enabled && data?.services.find((service) => service.name === "KVMIP")?.is_enabled) {
+      if ((await ask(question, ["Turn off"])) === "") return false;
     }
+
     return save("Services saved.", { Services: services });
   }
 
-  /** A mode's choices, in words. */
+  /** The choices of a mode, in words. */
   const modes = (modes?: string[]) => Object.fromEntries((modes ?? []).map((mode) => [mode, MODES[mode] ?? mode]));
 </script>
 
@@ -92,12 +92,12 @@
       {busy}
       save={(fields, done) =>
         save(done, {
-          Ntp: { enabled: fields.has("ntp"), primary: text(fields, "primary"), secondary: text(fields, "secondary") },
+          Ntp: { is_enabled: fields.has("ntp"), primary: text(fields, "primary"), secondary: text(fields, "secondary") },
         })}
     >
       <div title="The BMC sets its clock from these, its event log's times with it.">
         <label for="{id}-ntp">From NTP</label>
-        <input id="{id}-ntp" name="ntp" type="checkbox" defaultChecked={data?.ntp.enabled} />
+        <input id="{id}-ntp" name="ntp" type="checkbox" defaultChecked={data?.ntp.is_enabled} />
       </div>
       {#each [["primary", "Server"], ["secondary", "Second server"]] as const as [name, label] (name)}
         <div>
@@ -119,12 +119,12 @@
       {busy}
       save={(fields, done) =>
         save(done, {
-          Syslog: { enabled: fields.has("syslog"), server: text(fields, "server"), port: Number(fields.get("port")) },
+          Syslog: { is_enabled: fields.has("syslog"), server: text(fields, "server"), port: Number(fields.get("port")) },
         })}
     >
       <div title="The BMC sends what it logs to this server too.">
         <label for="{id}-syslog">Send the log</label>
-        <input id="{id}-syslog" name="syslog" type="checkbox" defaultChecked={data?.syslog.enabled} />
+        <input id="{id}-syslog" name="syslog" type="checkbox" defaultChecked={data?.syslog.is_enabled} />
       </div>
       <div>
         <label for="{id}-server">Server</label>
@@ -142,14 +142,15 @@
         <input id="{id}-port" name="port" type="number" class="field w-24" min="0" max="65535" defaultValue={data?.syslog.port} />
       </div>
     </Form>
+    <!-- What the BMC serves changes together, as its own port page does it. -->
     <div class="@3xl:col-span-2">
       <Form title="Services" {busy} save={services}>
         {#each data?.services ?? [undefined] as service (service?.name)}
-          {@const ours = !!service && OURS.includes(service.name)}
-          <div title={ours ? "We speak to the BMC over this: change it in the BMC's own pages." : undefined}>
+          {@const isOurs = service !== undefined && OURS.includes(service.name)}
+          <div title={isOurs ? "We speak to the BMC over this: change it in the BMC's own pages." : undefined}>
             <label for="{id}-{service?.name}-on">{service && (SERVICES[service.name] ?? service.name)}</label>
             <span class="flex items-center gap-4">
-              <input id="{id}-{service?.name}-on" name="{service?.name}-on" type="checkbox" defaultChecked={service?.enabled} disabled={ours} />
+              <input id="{id}-{service?.name}-on" name="{service?.name}-on" type="checkbox" defaultChecked={service?.is_enabled} disabled={isOurs} />
               {#if !service || service.port !== null}
                 <input
                   name="{service?.name}-port"
@@ -160,7 +161,7 @@
                   required
                   aria-label="Port"
                   defaultValue={service?.port}
-                  disabled={ours}
+                  disabled={isOurs}
                 />
               {/if}
             </span>

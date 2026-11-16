@@ -1,6 +1,3 @@
-//! A stand-in Supermicro BMC on one port, TLS 1.2 only as the X10's: Redfish under `/redfish/` (see `redfish`), its web
-//! session and the KVM's WebSocket everywhere else (see `ikvm`); IPMI on UDP (see `ipmi`).
-
 use std::convert::Infallible;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
@@ -27,24 +24,23 @@ pub struct Bmc {
     pub(crate) redfish: redfish::State,
     pub(crate) ikvm: ikvm::State,
     pub(crate) ipmi: Mutex<ipmi::Replay>,
-    /// A fixture without an `ipmi.txt` is of a BMC with IPMI off, which answers none unless we're recording it.
-    pub(crate) ipmi_off: bool,
-    /// The BMC we ask what the replay can't answer, when recording its IPMI.
+    /// A fixture without an `ipmi.txt` is of a BMC with IPMI off, which answers none unless we are recording it.
+    pub(crate) is_ipmi_off: bool,
+    /// The BMC we ask what the replay cannot answer, when we are recording its IPMI.
     pub(crate) ipmi_device: OnceLock<ooblin_core::ipmi::Session>,
-    /// Where it answers IPMI, on 127.0.0.1: `serve_ipmi` answers on more.
+    /// Where it answers IPMI on 127.0.0.1, `serve_ipmi` answers on more.
     pub ipmi_port: u16,
 }
 
 impl Bmc {
-    /// Serves `fixture` on `address`.
     pub async fn start(address: impl ToSocketAddrs, fixture: &Path) -> Arc<Self> {
         Self::serve(address, fixture, redfish::State::default()).await
     }
 
-    /// Like `start`, with the Redfish half in `redfish`'s state: forwarding to a device, say.
+    /// Like `start`, but with the Redfish half in the state `redfish`: one that forwards to a device, say.
     pub(crate) async fn serve(address: impl ToSocketAddrs, fixture: &Path, redfish: redfish::State) -> Arc<Self> {
         let listener = TcpListener::bind(address).await.unwrap();
-        let ipmi = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let ipmi_socket = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
         let recording = std::fs::read_to_string(fixture.join("ipmi.txt"));
         let bmc = Arc::new(Self {
             port: listener.local_addr().unwrap().port(),
@@ -52,12 +48,15 @@ impl Bmc {
             fixture: fixture.to_owned(),
             redfish,
             ikvm: ikvm::State::default(),
-            ipmi_off: recording.is_err(),
+            is_ipmi_off: recording.is_err(),
             ipmi: Mutex::new(ipmi::Replay::read(&recording.unwrap_or_default())),
             ipmi_device: OnceLock::new(),
-            ipmi_port: ipmi.local_addr().unwrap().port(),
+            ipmi_port: ipmi_socket.local_addr().unwrap().port(),
         });
-        bmc.answer_ipmi(ipmi);
+        bmc.answer_ipmi(ipmi_socket);
+
+        // NOTE: Redfish (under `/redfish/`), the web session and the WebSocket of the KVM (everywhere else) share this
+        // one port, over TLS 1.2 only as on the X10.
         let (certificate, key) = identity();
         let tls = ServerConfig::builder_with_protocol_versions(&[&TLS12]);
         let tls = tls.with_no_client_auth().with_single_cert(vec![certificate], key).unwrap();
@@ -74,10 +73,10 @@ impl Bmc {
                 });
             }
         });
+
         bmc
     }
 
-    /// Us at our web port and our IPMI port, as `USER` with `password`.
     pub fn target(&self, password: &str) -> Target {
         Target { ipmi_port: self.ipmi_port, ..Target::new(format!("127.0.0.1:{}", self.port), USER, password) }
     }

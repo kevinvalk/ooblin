@@ -1,12 +1,12 @@
-<!-- What Redfish says of the server, any flavor's that speaks it: less than AMT, so one System section, and Disks
-     only where it lists any. -->
 <script lang="ts">
   import type { Hardware } from "../../bindings/core";
 
-  /** While loading, every list shows one of its thing. Several are told apart by number, from 0 like the OS does. */
+  // While loading every list shows one of its thing. Several are told apart by number, from 0 like the OS does.
   let { data }: { data?: Hardware } = $props();
 </script>
 
+<!-- Redfish says less of the server than AMT does, so there is one System section and Disks only where it lists
+     any. -->
 <section>
   <h2>System</h2>
   <dl class="card">
@@ -56,7 +56,7 @@
   </div>
 </section>
 
-{#if !data || data.disks.length}
+{#if !data || data.disks.length > 0}
   <section>
     <h2>Disks</h2>
     <div class="cards">

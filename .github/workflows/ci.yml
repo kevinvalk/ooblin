@@ -1,32 +1,30 @@
-# The checks of AGENTS.md on every pull request, push to main and `v*` tag, on each platform we ship for, against the
-# mock devices. And whether the TypeScript bindings `cargo test` writes are the ones committed.
-# What passes them on main or a tag is built as `cargo tauri build` builds it, for every platform, into a GitHub
-# release: on main the rolling prerelease "Unstable" (tag `unstable`, made anew at the pushed commit with its assets),
-# on a `v*` tag that tag's release.
-# Checks and builds may only read: what they run (crates' build scripts, npm packages) never holds a token that writes.
-# The last job, which runs none of it, makes the release of what they built, so one that fails leaves the release
-# before.
+# yaml-language-server: $schema=https://json.schemastore.org/github-workflow.json
+
 name: CI
 
-# A pull request's branch is checked as the pull request, not once more as a push. And every night, against many more
-# garbled devices than a push waits for (see crates/ooblin-core/tests/garbled.rs).
 on:
   push:
-    branches: [main]
+    branches: [main] # We only push on main, as a branch of a pull request is already checked as the pull request
     tags: ["v*"]
   pull_request:
   schedule:
-    - cron: "17 3 * * *"
+    - cron: "17 3 * * *" # Every night we try many more garbled devices than a push wants to wait for
 
-# A newer push makes the run in flight moot, a tag's always finishes. The night's run is none of a push's.
+# A newer push makes the run in flight pointless so we cancel it, but a tag ALWAYS finishes as that is a real release.
+# The event is part of the group as we do not want a push to cancel the run of the night.
 concurrency:
   group: ci-${{ github.event_name }}-${{ github.ref }}
   cancel-in-progress: ${{ github.ref_type != 'tag' }}
 
+# SECURITY: Everything we lint, test and build runs code of others (build scripts of crates, npm packages), so those
+# jobs can only read. Only the last job can write, and it runs none of that code.
 permissions: {}
 
+env:
+  VERSION_TAURI_CLI: 2.12.4
+
 jobs:
-  check:
+  lint-and-test:
     strategy:
       fail-fast: false
       matrix:
@@ -53,29 +51,30 @@ jobs:
       - run: cargo clippy --workspace --all-targets --all-features -- -D warnings
       - run: cargo test --workspace
         env:
-          GARBLED: ${{ github.event_name == 'schedule' && 200 || 8 }}
-      - name: Check the bindings are committed as cargo test wrote them
-        run: git diff --exit-code ui/src/bindings
+          GARBLED: ${{ github.event_name == 'schedule' && 200 || 8 }} # 200 rounds at night, 8 on a push
+      # The tests write the TypeScript bindings of the UI, so a difference means somebody forgot to commit them.
+      - run: git diff --exit-code ui/src/bindings
 
-  build:
-    needs: check
-    if: github.event_name == 'push'
+  # On main this becomes the rolling "Unstable" prerelease and on a `v*` tag the release of that tag.
+  build-and-bundle:
+    needs: lint-and-test
+    if: github.event_name == 'push' # So not for a pull request and not at night
     strategy:
       fail-fast: false
       matrix:
         include:
-          # One universal app rather than one per architecture: a single download that runs on every Mac, for one
-          # runner building both. Unsigned, so ad-hoc signed (`-`): Apple silicon runs no code without a signature,
-          # and users allow the app once in Privacy & Security.
+          # We build one universal app instead of one per architecture, that way there is a single download that runs
+          # on every Mac. We have no certificate yet so we sign ad-hoc (`-`), as Apple silicon runs NO code without a
+          # signature. Users have to allow the app once in Privacy & Security.
           - os: macos-latest
             targets: aarch64-apple-darwin x86_64-apple-darwin
             args: --target universal-apple-darwin --config '{"bundle":{"macOS":{"signingIdentity":"-"}}}'
           - os: windows-latest
-          # The oldest Ubuntu there is a runner of: the app runs on a glibc as new as the one it was built on, so on
-          # Ubuntu 22.04 and Debian 12 too.
+          # NOTE: The app only runs on a glibc at least as new as the one it was built with. So we build on the oldest
+          # Ubuntu that still has a runner, that way it also runs on Ubuntu 22.04 and Debian 12.
           - os: ubuntu-22.04
-          # Linux on arm64 has no x64 emulation to fall back on, so it gets its own build. Windows on arm64 does, and
-          # runs the x64 app, so we leave windows-11-arm until someone asks.
+          # Linux on arm64 cannot run an x64 app so it needs its own build. Windows on arm64 can, so we skip
+          # windows-11-arm until someone asks for it.
           - os: ubuntu-22.04-arm
     runs-on: ${{ matrix.os }}
     permissions:
@@ -85,8 +84,8 @@ jobs:
         shell: bash
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-      # Tauri names the bundles after the crate's version, so v0.2.0 must not ship ooblin_0.1.0.
-      - name: Check the tag is the app's version
+      # Tauri names the bundles after the version of the crate, so we do not want v0.2.0 to ship an ooblin_0.1.0!
+      - name: Fail if the tag is not the version of the app
         if: github.ref_type == 'tag'
         run: |
           version=$(sed -n 's/^version = "\(.*\)"/\1/p' crates/ooblin/Cargo.toml | head -1)
@@ -105,13 +104,15 @@ jobs:
         if: matrix.targets
         run: rustup target add ${{ matrix.targets }}
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
-        # Its key names the system but not its version, and what one Ubuntu built doesn't build on another.
+        # NOTE: The key of the cache names the system but NOT its version, and what one Ubuntu built does not build
+        # on another (we had "can't find crate for `tauri`" going from 24.04 to 22.04).
         with:
           key: ${{ matrix.os }}
       - run: npm ci --prefix ui
-      # One version of the Tauri CLI, as its own lock file built it, which the cache above keeps.
-      - run: cargo install tauri-cli --version 2.12.4 --locked
-      # No certificates yet, so unsigned. Signing goes here: Apple's APPLE_* secrets in env, Windows' in a --config.
+      # The cache above keeps the installed binary, so we only really build the Tauri CLI once per version.
+      - run: cargo install tauri-cli --version "$VERSION_TAURI_CLI" --locked
+      # TODO: We have no certificates yet so everything is unsigned. Signing goes here: the APPLE_* secrets of Apple in
+      # env and those of Windows in a --config.
       - run: cargo tauri build ${{ matrix.args }}
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
@@ -126,7 +127,7 @@ jobs:
             target/release/bundle/nsis/*.exe
 
   release:
-    needs: build
+    needs: build-and-bundle
     runs-on: ubuntu-24.04
     permissions:
       contents: write
@@ -138,13 +139,15 @@ jobs:
         with:
           path: bundles
           merge-multiple: true
-      # Deleting the release takes its assets and tag along, a cancelled run's draft too. Creating it makes the tag
-      # anew, at this commit: the API does, as a token without the `workflows` permission can't push one.
-      - name: Delete the Unstable before
+      # Deleting the release also deletes its assets and its tag (and the draft of a cancelled run). Creating it below
+      # makes the tag again at this commit. We let the API do that as our token cannot push a tag without the
+      # `workflows` permission.
+      - name: Delete the previous Unstable
         if: github.ref_type != 'tag'
         run: if gh release view unstable > /dev/null 2>&1; then gh release delete unstable --cleanup-tag --yes; fi
-      # With files `gh` creates a draft, uploads them and only then publishes: nobody downloads a release half there.
-      - name: Release what was built
+      # NOTE: With files `gh` creates a draft, uploads them and only then publishes. So nobody downloads half a
+      # release, and a failed run leaves the previous release as it was.
+      - name: Release the bundles
         run: |
           mapfile -t files < <(find bundles -type f)
           if [ "$GITHUB_REF_TYPE" = tag ]; then

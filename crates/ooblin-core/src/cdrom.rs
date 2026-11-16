@@ -1,8 +1,3 @@
-//! A CD-ROM drive whose disc is an image file here: its SCSI (MMC) commands answered, whichever way they come, AMT's
-//! IDER (`amt::ider`) or a BMC's virtual USB drive (`supermicro::media`). We answer as MeshCommander's
-//! `amt-ider-ws-0.0.1.js` and Intel's ui-toolkit (both Apache-2.0) do, AMT being known to boot that way, and INQUIRY as
-//! the BMC's own viewer does (`isohandler.js`).
-
 use std::io::SeekFrom;
 
 use tokio::fs::File;
@@ -10,16 +5,17 @@ use tokio::io::{AsyncReadExt, AsyncSeekExt};
 
 use crate::{Error, Result};
 
+/// A CD-ROM drive whose disc is an image file here. It answers SCSI (MMC) commands whichever way they come: AMT's IDER
+/// (`amt::ider`) or a BMC's virtual USB drive (`supermicro::media`).
 pub struct Cdrom {
     image: File,
-    /// Its size in 2048-byte blocks.
-    blocks: u64,
+    blocks: u64, // Its size in 2048-byte blocks
     /// Why its last command failed (sense key, additional sense code and qualifier), for REQUEST SENSE.
     sense: [u8; 3],
 }
 
-/// What a command gets: data, of which as much as it takes; blocks of the disc to read; nothing but success; or a
-/// failure, with its sense.
+/// What a command gets: data, of which the host takes as much as it wants, blocks of the disc to read, nothing but
+/// success, or a failure with its sense.
 pub enum Answer {
     Data(Vec<u8>),
     Read { lba: u64, blocks: u64 },
@@ -31,34 +27,44 @@ impl Cdrom {
     pub async fn new(image: std::fs::File) -> Result<Self> {
         let image = File::from_std(image);
         let blocks = image.metadata().await?.len() / 2048;
-        // READ CAPACITY can't say no blocks: its answer is the last one.
+
+        // READ CAPACITY cannot say that a disc has no blocks, as its answer is the last one.
         if blocks == 0 {
             return Err(Error::Invalid("That file is too small to be a disc image.".into()));
         }
+
         Ok(Self { image, blocks, sense: [0; 3] })
     }
 
-    /// What `cdb` gets, a field it's too short for read as zeros.
+    /// What the command `cdb` gets. A field that `cdb` is too short for reads as zeros.
+    ///
+    /// NOTE: We answer as MeshCommander's `amt-ider-ws-0.0.1.js` and Intel's ui-toolkit (both Apache-2.0) do, because
+    /// AMT is known to boot that way, and INQUIRY as the BMC's own viewer does (`isohandler.js`).
     pub fn answer(&mut self, cdb: &[u8]) -> Answer {
-        let cdb: [u8; 12] = std::array::from_fn(|at| cdb.get(at).copied().unwrap_or(0));
-        let u16_at = |at: usize| u16::from_be_bytes([cdb[at], cdb[at + 1]]);
+        let cdb: [u8; 12] = std::array::from_fn(|index| cdb.get(index).copied().unwrap_or(0));
+        let u16_at = |offset: usize| u16::from_be_bytes([cdb[offset], cdb[offset + 1]]);
+        let u32_at = |offset: usize| {
+            u64::from(u32::from_be_bytes([cdb[offset], cdb[offset + 1], cdb[offset + 2], cdb[offset + 3]]))
+        };
+
         // Unlike the references we stop at the allocation length, as SCSI wants: more is an overrun to the host.
-        let allocation = match cdb[0] {
+        let allocation_length = match cdb[0] {
             0x03 | 0x12 | 0x1A => cdb[4].into(),
             0x23 | 0x43 | 0x46 | 0x4A | 0x5A => u16_at(7).into(),
             _ => usize::MAX,
         };
-        let data = |data: &[u8]| match &data[..data.len().min(allocation)] {
+        let data = |data: &[u8]| match &data[..data.len().min(allocation_length)] {
             [] => Answer::Done,
             data => Answer::Data(data.to_vec()),
         };
-        // REQUEST SENSE: why the last command failed, in fixed format, which it then forgets.
+
+        // REQUEST SENSE: why the last command failed, in fixed format, which the drive then forgets.
         if cdb[0] == 0x03 {
             let [key, asc, ascq] = std::mem::take(&mut self.sense);
             return data(&[0x70, 0, key, 0, 0, 0, 0, 10, 0, 0, 0, 0, asc, ascq, 0, 0, 0, 0]);
         }
         self.sense = [0; 3];
-        let u32_at = |at: usize| u64::from(u32::from_be_bytes([cdb[at], cdb[at + 1], cdb[at + 2], cdb[at + 3]]));
+
         match cdb[0] {
             // READ (6), READ (10) and READ (12).
             0x08 | 0x28 | 0xA8 => {
@@ -98,7 +104,7 @@ impl Cdrom {
                     (1, _) => data(&[0, 0x0A, 1, 1, 0, 0x14, 1, 0, 0, 0, 0, 0]),
                     (0, true) => data(&TOC_MSF),
                     (0, false) => data(&TOC),
-                    // Both references leave other formats unanswered, we say we don't have them.
+                    // Both references leave other formats unanswered, we say that we do not have them.
                     _ => self.fail(5, 0x24, 0),
                 }
             }
@@ -123,22 +129,23 @@ impl Cdrom {
         }
     }
 
-    /// The command failed, which REQUEST SENSE then says.
+    /// Remembers why the command failed, which REQUEST SENSE then says.
     pub fn fail(&mut self, key: u8, asc: u8, ascq: u8) -> Answer {
         self.sense = [key, asc, ascq];
         Answer::Failed(self.sense)
     }
 
-    /// Fills `buf` from the disc, from byte `at` on.
-    pub async fn read(&mut self, at: u64, buf: &mut [u8]) -> Result<()> {
-        self.image.seek(SeekFrom::Start(at)).await?;
-        self.image.read_exact(buf).await?;
+    /// Fills `buffer` from the disc, from byte `offset` on.
+    pub async fn read(&mut self, offset: u64, buffer: &mut [u8]) -> Result<()> {
+        self.image.seek(SeekFrom::Start(offset)).await?;
+        self.image.read_exact(buffer).await?;
+
         Ok(())
     }
 }
 
 /// GET CONFIGURATION: a CD-ROM's features from `first` on, or only that one.
-fn configuration(all: bool, first: u16) -> Vec<u8> {
+fn configuration(is_all: bool, first: u16) -> Vec<u8> {
     let features: [(u16, &[u8]); 8] = [
         (0x000, &[0, 0, 3, 4, 0, 8, 1, 0]),                // profiles: CD-ROM, current
         (0x001, &[0, 1, 3, 4, 0, 0, 0, 2]),                // core
@@ -149,17 +156,18 @@ fn configuration(all: bool, first: u16) -> Vec<u8> {
         (0x100, &[1, 0, 3, 0]),                            // power management
         (0x105, &[1, 5, 3, 0]),                            // timeout
     ];
+
     let mut data = vec![0, 0, 0, 8]; // the current profile, CD-ROM
     for (code, feature) in features {
-        if code == first || (all && first < code) {
+        if code == first || (is_all && first < code) {
             data.extend(feature);
         }
     }
+
     [&(data.len() as u32).to_be_bytes()[..], &data].concat()
 }
 
-// Replies the references send as they are, from MeshCommander's `amt-ider-ws-0.0.1.js`.
-
+// NOTE: These are replies that the references send as they are, from MeshCommander's `amt-ider-ws-0.0.1.js`.
 const TOC: [u8; 20] = [0, 0x12, 1, 1, 0, 0x14, 1, 0, 0, 0, 0, 0, 0, 0x14, 0xAA, 0, 0, 0, 0, 0];
 const TOC_MSF: [u8; 20] = [0, 0x12, 1, 1, 0, 0x14, 1, 0, 0, 0, 2, 0, 0, 0x14, 0xAA, 0, 0, 0, 0x34, 0x13];
 const CD_ERROR_RECOVERY: [u8; 16] = [0, 0x0E, 1, 0x80, 0, 0, 0, 0, 1, 6, 0, 0xFF, 0, 0, 0, 0];

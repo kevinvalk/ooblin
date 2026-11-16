@@ -31,7 +31,8 @@
     }
 }
 
-/* A stretch of a disk image the device just read, fading back to the gray of one it didn't, see Device's footer. */
+/* A stretch of a disk image the device just read, fading back to the gray of one it did not read, see the footer of
+   Device. */
 @keyframes read {
     from {
         background-color: var(--color-accent);
@@ -50,7 +51,7 @@
 @layer base {
     :root {
         color-scheme: light dark;
-        /* The window stays put when scrolled past its edge, sideways too, it's not a page. */
+        /* The window stays put when scrolled past its edge, sideways too, as it is not a page. */
         overscroll-behavior: none;
     }
 
@@ -107,7 +108,7 @@
             @apply grid grid-cols-[11rem_1fr] items-baseline gap-4 px-4 py-2.5;
         }
 
-        /* A row's label, not the labels of the choices in it. One that's a name (a certificate's) may be long. */
+        /* The label of a row, not the labels of the choices in it. One that is a name (a certificate's) may be long. */
         & > div > :is(dt, label) {
             @apply wrap-anywhere text-muted;
         }
@@ -125,12 +126,12 @@
         }
     }
 
-    /* Several cards of a thing side by side, where there's room. */
+    /* Several cards of a thing side by side, where there is room. */
     .cards {
         @apply grid gap-x-4 gap-y-6 @3xl:grid-cols-2;
     }
 
-    /* What the device left out reads as a dash, what's still loading (in an `aria-busy` page) as a gray bar. */
+    /* What the device left out reads as a dash, what is still loading (in an `aria-busy` page) as a gray bar. */
     :is(dt, dd, td, h3):empty::after {
         @apply text-muted content-['—'];
     }
@@ -157,7 +158,7 @@
         @apply inline-flex h-8 items-center justify-center gap-2 rounded-lg px-3.5 font-medium whitespace-nowrap;
     }
 
-    /* What can't be used now looks it, a button or a tab that says why when clicked (`aria-disabled`) alike. */
+    /* What cannot be used now looks it, a button or a tab that says why when clicked (`aria-disabled`) alike. */
     :is(.btn, .btn-icon, [role="tab"]):is(:disabled, [aria-disabled="true"]) {
         @apply opacity-50;
     }

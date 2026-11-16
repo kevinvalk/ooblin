@@ -12,6 +12,7 @@ impl Client {
             let component = software.iter().find(|component| component.get("InstanceID") == Some(id))?;
             component.get("VersionString").map(str::to_owned)
         };
+
         Ok(Info {
             flavor: Flavor::Amt,
             name: name(&settings),
@@ -23,7 +24,9 @@ impl Client {
                 _ => "",
             }
             .to_owned(),
-            fingerprint: self.fingerprint().expect("a successful call has pinned a certificate"),
+            fingerprint: self
+                .fingerprint()
+                .expect("No pinned certificate after a successful call, did we skip the TLS handshake?!"),
             remote_access: self.remote_access().await?,
         })
     }

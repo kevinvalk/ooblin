@@ -1,7 +1,7 @@
-//! The AST2100 video the BMC sends (RFB encoding 87): JPEG-like blocks and colour-coded ones, no I/O. We decode as the
-//! BMC's own viewer does, bit for bit, except that we clamp samples and colours where it wraps them.
-
 use crate::Error;
+
+// NOTE: This is the AST2100 video the BMC sends (RFB encoding 87): JPEG-like blocks and colour-coded ones. We decode as
+// the BMC's own viewer does, bit for bit, except that we clamp samples and colours where it wraps them.
 
 /// The screen as the frames so far painted it.
 pub(crate) struct Decoder {
@@ -16,8 +16,8 @@ impl Decoder {
         Self { width, height, image: [0, 0, 0, 255].repeat(usize::from(width) * usize::from(height)) }
     }
 
-    /// Paints `payload` and says what it painted, as `[x, y, w, h]`, and why it stopped short, if it did: what a
-    /// corrupt payload painted before stays.
+    /// Paints `payload` and says what it painted, as `[x, y, width, height]`, and why it stopped short, if it did.
+    /// What a corrupt payload painted before it stopped stays.
     pub(crate) fn decode(&mut self, payload: &[u8]) -> (Vec<[u16; 4]>, Option<Error>) {
         let mut painted = Vec::new();
         let error = self.frame(payload, &mut painted).err();
@@ -31,44 +31,55 @@ impl Decoder {
 
     fn frame(&mut self, payload: &[u8], painted: &mut Vec<[u16; 4]>) -> Result<(), Error> {
         let &[luma, chroma, m0, m1, ref stream @ ..] = payload else { return Err(corrupt("a header cut short")) };
-        let subsampled = match u16::from_be_bytes([m0, m1]) {
+        let is_subsampled = match u16::from_be_bytes([m0, m1]) {
             0x01A6 => true,
             0x01BC => false,
             mode => return Err(corrupt(format!("mode {mode:04X}"))),
         };
+
         // Normal and low quality, each for luma and chroma.
-        let quant = [[LUMA.quant(luma)?, CHROMA.quant(chroma)?], [LUMA.quant(0)?, CHROMA.quant(0)?]];
+        let quantisations = [
+            [LUMA.quantisation(luma)?, CHROMA.quantisation(chroma)?],
+            [LUMA.quantisation(0)?, CHROMA.quantisation(0)?],
+        ];
+
         // The units of an MCU by component: Y (four of them in 4:2:0), Cb, Cr.
-        let (mcu, components) = if subsampled { (16, &[0, 0, 0, 0, 1, 2][..]) } else { (8, &[0, 1, 2][..]) };
+        let (mcu, components) = if is_subsampled { (16, &[0, 0, 0, 0, 1, 2][..]) } else { (8, &[0, 1, 2][..]) };
         let (columns, rows) = (self.width.div_ceil(mcu), self.height.div_ceil(mcu));
+
         let mut bits = Bits { bytes: stream, ..Bits::default() };
         let (mut x, mut y) = (0, 0);
         let mut dc = [0; 3];
         let mut palette = [0x00_80_80, 0xFF_80_80, 0x80_80_80, 0xC0_80_80];
         let mut tile = [[0; 64]; 6];
-        // As many blocks as the viewer decodes before it gives up on a frame end.
+
+        // We decode as many blocks as the viewer does before it gives up on a frame end.
         for _ in 0..=(usize::from(self.width) * usize::from(self.height) / 64).max(4096) {
             let code = bits.peek(4);
             match code {
                 9 => return Ok(()),
                 1..=3 | 0xA | 0xB => return Err(corrupt(format!("block code {code:X}"))),
-                5..=7 | 0xD..=0xF if subsampled => return Err(corrupt("a colour-coded block in 4:2:0")),
+                5..=7 | 0xD..=0xF if is_subsampled => return Err(corrupt("a colour-coded block in 4:2:0")),
                 _ => {}
             }
+
             if code & 8 == 0 {
                 bits.skip(4);
             } else {
-                let at = bits.take(20);
-                (x, y) = ((at >> 8 & 0xFF) as u16, (at & 0xFF) as u16);
+                let position = bits.take(20);
+                (x, y) = ((position >> 8 & 0xFF) as u16, (position & 0xFF) as u16);
             }
+
             if x >= columns || y >= rows {
                 return Err(corrupt(format!("a block at ({x}, {y}), outside the screen")));
             }
+
             if matches!(code & 7, 0 | 4) {
-                let quant = &quant[usize::from(code & 4 != 0)];
+                let quantisations = &quantisations[usize::from(code & 4 != 0)];
                 for (unit, &component) in tile.iter_mut().zip(components) {
                     let kind = if component == 0 { &LUMA } else { &CHROMA };
-                    *unit = idct(&kind.unit(&mut bits, &mut dc[component])?, &quant[component.min(1)]);
+                    let coefficients = kind.unit(&mut bits, &mut dc[component])?;
+                    *unit = idct(&coefficients, &quantisations[component.min(1)]);
                 }
             } else {
                 // 1, 2 or 4 colours from the palette, each maybe replaced first, then 0, 1 or 2 bits a pixel.
@@ -84,54 +95,61 @@ impl Decoder {
                         bits.skip(27);
                     }
                 }
+
                 let colours: [u32; 64] =
                     std::array::from_fn(|_| palette[chosen[if depth == 0 { 0 } else { bits.take(depth) as usize }]]);
                 for (unit, shift) in tile.iter_mut().zip([16, 8, 0]) {
                     *unit = colours.map(|colour| (colour >> shift) as u8);
                 }
             }
+
             if bits.read > 8 * stream.len() {
                 return Err(corrupt("a frame cut short"));
             }
-            let [left, top, w, h] = self.paint(x, y, mcu, &tile[..components.len()]);
+
+            let [left, top, width, height] = self.paint(x, y, mcu, &tile[..components.len()]);
             match painted.last_mut() {
-                // Per MCU row, first to last painted block.
+                // We say what we painted per MCU row, from its first to its last painted block.
                 Some(row) if row[1] == top => {
-                    let right = (row[0] + row[2]).max(left + w);
+                    let right = (row[0] + row[2]).max(left + width);
                     row[0] = row[0].min(left);
                     row[2] = right - row[0];
                 }
-                _ => painted.push([left, top, w, h]),
+                _ => painted.push([left, top, width, height]),
             }
+
             x += 1;
             if x == columns {
                 x = 0;
                 y = (y + 1) % rows;
             }
         }
+
         Err(corrupt("a frame without an end"))
     }
 
     /// Paints the units of an MCU, Y (four of them in 4:2:0), Cb and Cr, at (x, y), clipped to the screen.
     fn paint(&mut self, x: u16, y: u16, mcu: u16, tile: &[[u8; 64]]) -> [u16; 4] {
         let (left, top) = (x * mcu, y * mcu);
-        let (w, h) = (mcu.min(self.width - left), mcu.min(self.height - top));
+        let (width, height) = (mcu.min(self.width - left), mcu.min(self.height - top));
         let (cb, cr) = (&tile[tile.len() - 2], &tile[tile.len() - 1]);
         let shift = usize::from(mcu / 16);
-        for j in 0..usize::from(h) {
+
+        for j in 0..usize::from(height) {
             let row = 4 * ((usize::from(top) + j) * usize::from(self.width) + usize::from(left));
-            for i in 0..usize::from(w) {
+            for i in 0..usize::from(width) {
                 let c = (j >> shift) * 8 + (i >> shift);
                 let rgb = rgb(tile[j / 8 * 2 + i / 8][j % 8 * 8 + i % 8], cb[c], cr[c]);
                 self.image[row + 4 * i..][..3].copy_from_slice(&rgb);
             }
         }
-        [left, top, w, h]
+
+        [left, top, width, height]
     }
 }
 
-fn corrupt(what: impl std::fmt::Display) -> Error {
-    Error::Protocol(format!("AST2100 video with {what}"))
+fn corrupt(problem: impl std::fmt::Display) -> Error {
+    Error::Protocol(format!("AST2100 video with {problem}"))
 }
 
 /// The bitstream: little-endian u32 words read from their most significant bit, zeros past the end.
@@ -149,12 +167,13 @@ impl Bits<'_> {
         while self.filled <= 32 {
             let mut word = [0; 4];
             let rest = self.bytes.get(self.next..).unwrap_or_default();
-            let len = rest.len().min(4);
-            word[..len].copy_from_slice(&rest[..len]);
+            let length = rest.len().min(4);
+            word[..length].copy_from_slice(&rest[..length]);
             self.window |= u64::from(u32::from_le_bytes(word)) << (32 - self.filled);
             self.filled += 32;
             self.next += 4;
         }
+
         (self.window >> (64 - n)) as u32
     }
 
@@ -183,19 +202,21 @@ impl Bits<'_> {
 struct Kind {
     dc: Huffman,
     ac: Huffman,
-    quant: [u8; 64],
+    quantisation: [u8; 64],
     steps: [u32; 12],
 }
 
 impl Kind {
     /// One 8 × 8 unit's coefficients in natural order: DC against the component's predictor, AC run-length coded.
     fn unit(&self, bits: &mut Bits, dc: &mut i32) -> Result<[i32; 64], Error> {
-        let mut coef = [0; 64];
+        let mut coefficients = [0; 64];
+
         let size = self.dc.decode(bits)?;
         if size > 0 {
             *dc += bits.signed(size);
         }
-        coef[0] = *dc;
+        coefficients[0] = *dc;
+
         let mut k = 1;
         while k < 64 {
             let symbol = self.ac.decode(bits)?;
@@ -205,19 +226,21 @@ impl Kind {
                 0 => k += 16,
                 _ => {
                     k += run;
-                    let &at = ZIGZAG.get(k).ok_or_else(|| corrupt("a coefficient past the 64th"))?;
-                    coef[at] = bits.signed(size);
+                    let &index = ZIGZAG.get(k).ok_or_else(|| corrupt("a coefficient past the 64th"))?;
+                    coefficients[index] = bits.signed(size);
                     k += 1;
                 }
             }
         }
-        Ok(coef)
+
+        Ok(coefficients)
     }
 
     /// The quantisation table for a quality, prescaled for the AAN IDCT in f64 (left to right, as the viewer does).
-    fn quant(&self, quality: u8) -> Result<[f64; 64], Error> {
+    fn quantisation(&self, quality: u8) -> Result<[f64; 64], Error> {
         let &n = self.steps.get(usize::from(quality)).ok_or_else(|| corrupt(format!("quality {quality}")))?;
-        let q = |i: usize| f64::from((u32::from(self.quant[i]) * n / 32).clamp(1, 255));
+        let q = |i: usize| f64::from((u32::from(self.quantisation[i]) * n / 32).clamp(1, 255));
+
         Ok(std::array::from_fn(|i| q(i) * AAN[i / 8] * AAN[i % 8] * 65536.0))
     }
 }
@@ -232,60 +255,70 @@ impl Huffman {
     fn decode(&self, bits: &mut Bits) -> Result<u8, Error> {
         let next = bits.peek(16);
         let (mut first, mut index) = (0, 0);
-        for (len, count) in (1..).zip(self.counts.map(u32::from)) {
-            let code = next >> (16 - len);
-            // Canonical: a code below `first` would have matched a shorter length.
+        for (length, count) in (1..).zip(self.counts.map(u32::from)) {
+            let code = next >> (16 - length);
+
+            // The table is canonical, so a code below `first` would have matched a shorter length.
             if code - first < count {
-                bits.skip(len);
+                bits.skip(length);
                 return Ok(self.values[(index + code - first) as usize]);
             }
+
             index += count;
             first = (first + count) << 1;
         }
+
         Err(corrupt("an invalid Huffman code"))
     }
 }
 
 /// The viewer's integer AAN inverse DCT: libjpeg's jidctfst with 8 fractional bits, no descale between the passes, and
 /// its 32-bit wraps where it wraps.
-fn idct(coef: &[i32; 64], quant: &[f64; 64]) -> [u8; 64] {
+fn idct(coefficients: &[i32; 64], quantisation: &[f64; 64]) -> [u8; 64] {
     let mut work = [[0; 8]; 8];
     for c in 0..8 {
         let column = aan(std::array::from_fn(|r| {
             let i = r * 8 + c;
-            i64::from(((f64::from(coef[i]) * quant[i]).trunc() as i64 as i32) >> 16)
+            i64::from(((f64::from(coefficients[i]) * quantisation[i]).trunc() as i64 as i32) >> 16)
         }));
         for (row, v) in work.iter_mut().zip(column) {
             row[c] = v;
         }
     }
-    let mut out = [0; 64];
-    for (row, out) in work.into_iter().zip(out.as_chunks_mut().0) {
-        *out = aan(row).map(|v| ((v as i32 >> 3) + 128).clamp(0, 255) as u8);
+
+    let mut samples = [0; 64];
+    for (row, samples) in work.into_iter().zip(samples.as_chunks_mut().0) {
+        *samples = aan(row).map(|v| ((v as i32 >> 3) + 128).clamp(0, 255) as u8);
     }
-    out
+
+    samples
 }
 
 /// One pass over 8 values: an even and an odd half, then their butterflies.
 fn aan(x: [i64; 8]) -> [i64; 8] {
     let mul = |v: i64, k: i64| i64::from((v * k) as i32 >> 8);
+
     let (t10, t11) = (x[0] + x[4], x[0] - x[4]);
     let t13 = x[2] + x[6];
     let t12 = mul(x[2] - x[6], 362) - t13;
     let (t0, t3, t1, t2) = (t10 + t13, t10 - t13, t11 + t12, t11 - t12);
+
     let (z13, z10, z11, z12) = (x[5] + x[3], x[5] - x[3], x[1] + x[7], x[1] - x[7]);
     let t7 = z11 + z13;
     let z5 = mul(z10 + z12, 473);
     let t6 = mul(z10, -669) + z5 - t7;
     let t5 = mul(z11 - z13, 362) - t6;
     let t4 = mul(z12, 277) - z5 + t5;
+
     [t0 + t7, t1 + t6, t2 + t5, t3 - t4, t3 + t4, t2 - t5, t1 - t6, t0 - t7]
 }
 
-/// BT.601 studio swing to RGB in the viewer's 16.16 fixed point (shifts floor). It wraps sums above 447 to 0, we clamp.
+/// BT.601 studio swing to RGB in the viewer's 16.16 fixed point (shifts floor). The viewer wraps sums above 447 to 0,
+/// where we clamp.
 fn rgb(y: u8, cb: u8, cr: u8) -> [u8; 3] {
     let f = |k: i32, v: u8, offset: i32| (k * (i32::from(v) - offset) + 32768) >> 16;
     let y = f(76284, y, 16);
+
     [y + f(104704, cr, 128), y + f(-25601, cb, 128) + f(-53249, cr, 128), y + f(132097, cb, 128)]
         .map(|v| v.clamp(0, 255) as u8)
 }
@@ -318,7 +351,7 @@ const LUMA: Kind = Kind {
             0xE3, 0xE4, 0xE5, 0xE6, 0xE7, 0xE8, 0xE9, 0xEA, 0xF1, 0xF2, 0xF3, 0xF4, 0xF5, 0xF6, 0xF7, 0xF8, 0xF9, 0xFA,
         ],
     },
-    quant: [
+    quantisation: [
         16, 11, 10, 16, 24, 40, 51, 61, 12, 12, 14, 19, 26, 58, 60, 55, 14, 13, 16, 24, 40, 57, 69, 56, 14, 17, 22, 29,
         51, 87, 80, 62, 18, 22, 37, 56, 68, 109, 103, 77, 24, 35, 55, 64, 81, 104, 113, 92, 49, 64, 78, 87, 103, 121,
         120, 101, 72, 92, 95, 98, 112, 100, 103, 99,
@@ -345,7 +378,7 @@ const CHROMA: Kind = Kind {
             0xE2, 0xE3, 0xE4, 0xE5, 0xE6, 0xE7, 0xE8, 0xE9, 0xEA, 0xF2, 0xF3, 0xF4, 0xF5, 0xF6, 0xF7, 0xF8, 0xF9, 0xFA,
         ],
     },
-    quant: [
+    quantisation: [
         17, 18, 24, 47, 99, 99, 99, 99, 18, 21, 26, 66, 99, 99, 99, 99, 24, 26, 56, 99, 99, 99, 99, 99, 47, 66, 99, 99,
         99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99,
         99, 99, 99, 99, 99, 99, 99, 99,
@@ -381,9 +414,9 @@ mod tests {
 
     /// The pixel's RGB; its alpha has to be opaque.
     fn rgb_at(decoder: &Decoder, x: usize, y: usize) -> [u8; 3] {
-        let at = 4 * (y * usize::from(decoder.width) + x);
-        assert_eq!(decoder.image[at + 3], 255);
-        decoder.image[at..at + 3].try_into().unwrap()
+        let offset = 4 * (y * usize::from(decoder.width) + x);
+        assert_eq!(decoder.image[offset + 3], 255);
+        decoder.image[offset..offset + 3].try_into().unwrap()
     }
 
     const FOUR_FOUR_FOUR: [u8; 4] = [7, 7, 0x01, 0xBC];
@@ -433,12 +466,12 @@ mod tests {
             (&CHROMA, 11, [1, 1, 1, 2, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6]),
         ];
         for (kind, quality, rows) in cases {
-            let table = kind.quant(quality).unwrap();
+            let table = kind.quantisation(quality).unwrap();
             for (i, q) in (0..8).chain(56..64).zip(rows) {
                 assert_eq!(table[i], f64::from(q) * AAN[i / 8] * AAN[i % 8] * 65536.0, "quality {quality} [{i}]");
             }
         }
-        assert!(LUMA.quant(12).is_err());
+        assert!(LUMA.quantisation(12).is_err());
     }
 
     #[test]
@@ -446,26 +479,26 @@ mod tests {
         // The viewer truncates prescaled coefficients, which costs up to ~5 levels at the highest frequencies (the
         // golden frame pins those); DC and the 4 × 4 lowest stay within 2.
         let mut random = random(0x2545_F491_4F6C_DD1D);
-        let quant = LUMA.quant(4).unwrap();
-        let basis = |k: usize, at: usize| {
+        let quantisation = LUMA.quantisation(4).unwrap();
+        let basis = |k: usize, position: usize| {
             let scale = if k == 0 { std::f64::consts::FRAC_1_SQRT_2 } else { 1.0 };
-            scale * ((2 * at + 1) as f64 * k as f64 * std::f64::consts::PI / 16.0).cos()
+            scale * ((2 * position + 1) as f64 * k as f64 * std::f64::consts::PI / 16.0).cos()
         };
         for _ in 0..1000 {
-            let mut coef = [0; 64];
-            coef[0] = random(201) as i32 - 100;
+            let mut coefficients = [0; 64];
+            coefficients[0] = random(201) as i32 - 100;
             for _ in 0..6 {
-                coef[(random(4) * 8 + random(4)) as usize] = random(21) as i32 - 10;
+                coefficients[(random(4) * 8 + random(4)) as usize] = random(21) as i32 - 10;
             }
-            for (i, ours) in idct(&coef, &quant).into_iter().enumerate() {
+            for (i, sample) in idct(&coefficients, &quantisation).into_iter().enumerate() {
                 let exact: f64 = (0..64)
                     .map(|k| {
-                        let q = quant[k] / (AAN[k / 8] * AAN[k % 8] * 65536.0);
-                        f64::from(coef[k]) * q * basis(k / 8, i / 8) * basis(k % 8, i % 8) / 4.0
+                        let q = quantisation[k] / (AAN[k / 8] * AAN[k % 8] * 65536.0);
+                        f64::from(coefficients[k]) * q * basis(k / 8, i / 8) * basis(k % 8, i % 8) / 4.0
                     })
                     .sum();
                 let exact = (exact + 128.0).clamp(0.0, 255.0);
-                assert!((f64::from(ours) - exact).abs() < 2.0, "{coef:?} [{i}]: {ours} against {exact}");
+                assert!((f64::from(sample) - exact).abs() < 2.0, "{coefficients:?} [{i}]: {sample} against {exact}");
             }
         }
     }
@@ -558,13 +591,16 @@ mod tests {
     fn decodes_the_x10s_first_frame() {
         // The BMC's side opens with two 0x39 session messages of 265 bytes, then the first frame, 1024 × 768.
         let mock::Transcript(records) = mock::Transcript::load(&mock::fixture("x10").join("kvm.transcript")).unwrap();
-        let bmc: Vec<u8> =
-            records.into_iter().filter(|(d, _)| *d == mock::Direction::Received).flat_map(|(_, bytes)| bytes).collect();
-        let fbu = &bmc[2 * 265..];
-        assert_eq!(fbu[..16], [0, 0, 0, 1, 0, 0, 0, 0, 4, 0, 3, 0, 0, 0, 0, 87]);
-        let len = u32::from_be_bytes(fbu[20..24].try_into().unwrap()) as usize;
+        let bmc: Vec<u8> = records
+            .into_iter()
+            .filter(|(direction, _)| *direction == mock::Direction::Received)
+            .flat_map(|(_, bytes)| bytes)
+            .collect();
+        let update = &bmc[2 * 265..];
+        assert_eq!(update[..16], [0, 0, 0, 1, 0, 0, 0, 0, 4, 0, 3, 0, 0, 0, 0, 87]);
+        let length = u32::from_be_bytes(update[20..24].try_into().unwrap()) as usize;
         let mut decoder = Decoder::new(1024, 768);
-        let (painted, error) = decoder.decode(&fbu[24..][..len]);
+        let (painted, error) = decoder.decode(&update[24..][..length]);
         assert!(error.is_none(), "{error:?}");
         assert_eq!(painted, (0..48).map(|row| [0, row * 16, 1024, 16]).collect::<Vec<_>>());
         // The BMC's own viewer, ast2100.js, paints the same.

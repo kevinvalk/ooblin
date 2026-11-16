@@ -1,6 +1,3 @@
-<!-- A BMC's FRU (its field-replaceable unit information, which the OS reads as the chassis', board's and product's) to
-     change, an area at a time, any BMC flavor's: what the FRU has no area for it can't hold. The BMC rewrites an area
-     where it has room (an area may grow into what no other holds) and checks what it wrote. -->
 <script lang="ts">
   import type { Fru } from "../../bindings/core";
   import Form, { choices, text } from "../Form.svelte";
@@ -12,7 +9,7 @@
   }: { fru?: Fru | null; save: (done: string, change: { Fru: Fru }) => Promise<boolean>; busy: boolean } = $props();
   const id = $props.id();
 
-  /** Each area's text fields by name, in the order the FRU holds them. */
+  /** The text fields of each area by name, in the order the FRU holds them. */
   const AREAS = {
     chassis: { title: "Chassis", fields: { part_number: "Part number", serial_number: "Serial number" } },
     board: {
@@ -32,7 +29,7 @@
     },
   } as const;
 
-  /** SMBIOS's chassis types, by number. */
+  /** The chassis types of SMBIOS, by number. */
   const TYPES = [
     "Unspecified", "Other", "Unknown", "Desktop", "Low profile desktop", "Pizza box", "Mini tower", "Tower", "Portable",
     "Laptop", "Notebook", "Hand held", "Docking station", "All in one", "Sub notebook", "Space-saving", "Lunch box",
@@ -42,6 +39,9 @@
   ];
 </script>
 
+<!-- NOTE: The FRU (the field-replaceable unit information, which the OS reads as that of the chassis, board and
+     product) changes an area at a time, and cannot hold what it has no area for. The BMC rewrites an area where it has
+     room (an area may grow into what no other area holds) and checks what it wrote. -->
 <div class="grid gap-6">
   {#each Object.entries(AREAS) as [area, { title, fields }] (area)}
     {@const values = fru?.[area as keyof typeof AREAS] as Record<string, string | number> | null | undefined}

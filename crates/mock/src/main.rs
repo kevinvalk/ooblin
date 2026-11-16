@@ -1,5 +1,3 @@
-//! A stand-in Intel AMT, Supermicro or IPMI-only BMC for development, see the README.
-
 use clap::Parser;
 use mock::{Amt, Bmc, PASSWORD, USER};
 use ooblin_core::{Client, Flavor, Target};
@@ -28,18 +26,20 @@ enum Command {
 async fn main() -> anyhow::Result<()> {
     match Command::parse() {
         Command::Run { fixture } => {
-            let dir = mock::fixture(&fixture);
-            let flavor = mock::flavor(&dir);
+            let directory = mock::fixture(&fixture);
+            let flavor = mock::flavor(&directory);
             let (address, bmc) = match flavor {
                 Flavor::Amt => {
-                    Amt::start("127.0.0.1:16993", "127.0.0.1:16995", &dir).await;
+                    Amt::start("127.0.0.1:16993", "127.0.0.1:16995", &directory).await;
                     ("127.0.0.1", None)
                 }
                 Flavor::Supermicro | Flavor::Ipmi | Flavor::Redfish => {
-                    ("127.0.0.1:16443", Some(Bmc::start("127.0.0.1:16443", &dir).await))
+                    ("127.0.0.1:16443", Some(Bmc::start("127.0.0.1:16443", &directory).await))
                 }
             };
-            // Below 1024, which Linux keeps for root and macOS too unless it's on every address. A BMC answers IPMI there.
+
+            // NOTE: Port 623 is below 1024, which Linux keeps for root, and macOS too unless we bind it on every
+            // address. A BMC answers IPMI there as well.
             let udp = match &bmc {
                 Some(bmc) => bmc.serve_ipmi("0.0.0.0:623").await,
                 None => mock::answer_pings("0.0.0.0:623").await.map(drop),
@@ -47,9 +47,11 @@ async fn main() -> anyhow::Result<()> {
             if let Err(error) = udp {
                 eprintln!("Not answering on UDP 623: {error}");
             }
-            println!("Serving {} on {address} as {USER} with password {PASSWORD}", dir.display());
+
+            println!("Serving {} on {address} as {USER} with password {PASSWORD}", directory.display());
             let Some(bmc) = bmc else { return std::future::pending().await };
-            // What the BMC is asked, as it is: the KVM's keys and pointer among it.
+
+            // We print what the BMC is asked as it is, the keys and the pointer of the KVM among it.
             loop {
                 tokio::time::sleep(std::time::Duration::from_millis(100)).await;
                 for request in bmc.asked() {
@@ -59,20 +61,22 @@ async fn main() -> anyhow::Result<()> {
         }
         Command::Record { fixture, host, user, sol } => {
             let password = rpassword::prompt_password(format!("Password for {user}@{host}: "))?;
-            let (dir, target) = (mock::fixture(&fixture), Target::new(&host, user, password));
-            eprintln!("Recording {host} into {}", dir.display());
+            let (directory, target) = (mock::fixture(&fixture), Target::new(&host, user, password));
+            eprintln!("Recording {host} into {}", directory.display());
+
             if sol {
-                return mock::record_sol(&target, &dir).await;
+                return mock::record_sol(&target, &directory).await;
             }
+
             match Client::login(&target, None, None).await?.1.flavor {
-                Flavor::Amt => mock::record(&target, &dir).await,
+                Flavor::Amt => mock::record(&target, &directory).await,
                 Flavor::Supermicro => {
-                    mock::redfish::record(&target, &dir, Flavor::Supermicro).await?;
-                    mock::ipmi::record(&target, &dir).await?;
-                    mock::ikvm::record(&target, &dir).await
+                    mock::redfish::record(&target, &directory, Flavor::Supermicro).await?;
+                    mock::ipmi::record(&target, &directory).await?;
+                    mock::ikvm::record(&target, &directory).await
                 }
-                Flavor::Ipmi => mock::ipmi::record(&target, &dir).await,
-                Flavor::Redfish => mock::redfish::record(&target, &dir, Flavor::Redfish).await,
+                Flavor::Ipmi => mock::ipmi::record(&target, &directory).await,
+                Flavor::Redfish => mock::redfish::record(&target, &directory, Flavor::Redfish).await,
             }
         }
     }

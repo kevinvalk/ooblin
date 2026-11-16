@@ -1,9 +1,3 @@
-//! Connections and saved devices against the mock AMT, where work overlaps: logins at once, a login cancelled or
-//! overtaken while it awaits the device, a screen opening while the device is connected again, closing what's since
-//! replaced. `join!` starts its futures in order, so each overlap is set up before anything comes back from the mock,
-//! and the outcome holds whichever answer comes first. Then a Supermicro BMC against its mock, through the same
-//! connections. Saved devices go to a temporary directory, passwords never to the credential store.
-
 use std::sync::Arc;
 
 use mock::{Amt, Bmc, PASSWORD};
@@ -20,36 +14,39 @@ async fn mock() -> Arc<Amt> {
     Amt::start("127.0.0.1:0", "127.0.0.1:0", &mock::fixture("ms-02")).await
 }
 
-/// The mock answers at both names, which are two devices to us.
+// The mock answers at both names, which are two devices to us.
 fn target(amt: &Amt, host: &str) -> Target {
     Target { host: host.into(), ..amt.target(PASSWORD) }
 }
 
-fn connections(dir: &tempfile::TempDir) -> Connections {
-    Connections::new(dir.path().join("hosts.json"), "ooblin.test".into())
+// The saved devices go to a temporary directory and passwords never to the credential store, as no test remembers one.
+fn connections(directory: &tempfile::TempDir) -> Connections {
+    Connections::new(directory.path().join("hosts.json"), "ooblin.test".into())
 }
 
 fn saved(connections: &Connections) -> Vec<String> {
     connections.hosts().unwrap().devices().into_iter().map(|device| device.host).collect()
 }
 
+// NOTE: `join!` starts its futures in order, so each overlap in these tests is set up before anything comes back from
+// the mock, and the outcome holds whichever answer comes first.
 #[tokio::test]
 async fn logins_at_once_are_both_saved() {
-    let (amt, dir) = (mock().await, tempfile::tempdir().unwrap());
-    let connections = connections(&dir);
-    let (a, b) = tokio::join!(
+    let (amt, directory) = (mock().await, tempfile::tempdir().unwrap());
+    let connections = connections(&directory);
+    let (first, second) = tokio::join!(
         connections.connect(target(&amt, "127.0.0.1"), None, false),
         connections.connect(target(&amt, "localhost"), None, false),
     );
-    a.unwrap();
-    b.unwrap();
+    first.unwrap();
+    second.unwrap();
     assert_eq!(saved(&connections), ["127.0.0.1", "localhost"]);
 }
 
 #[tokio::test]
 async fn a_rename_during_a_login_sticks() {
-    let (amt, dir) = (mock().await, tempfile::tempdir().unwrap());
-    let connections = connections(&dir);
+    let (amt, directory) = (mock().await, tempfile::tempdir().unwrap());
+    let connections = connections(&directory);
     connections.connect(target(&amt, "127.0.0.1"), None, false).await.unwrap();
     let (login, renamed) = tokio::join!(connections.connect(target(&amt, "localhost"), None, false), async {
         connections.edit(|hosts| hosts.renamed("127.0.0.1", "renamed"))
@@ -62,8 +59,8 @@ async fn a_rename_during_a_login_sticks() {
 
 #[tokio::test]
 async fn a_device_forgotten_during_its_login_stays_forgotten() {
-    let (amt, dir) = (mock().await, tempfile::tempdir().unwrap());
-    let connections = connections(&dir);
+    let (amt, directory) = (mock().await, tempfile::tempdir().unwrap());
+    let connections = connections(&directory);
     let (connected, forgot) =
         tokio::join!(connections.connect(target(&amt, "127.0.0.1"), None, false), connections.forget("127.0.0.1"));
     forgot.unwrap();
@@ -74,8 +71,8 @@ async fn a_device_forgotten_during_its_login_stays_forgotten() {
 
 #[tokio::test]
 async fn an_overtaken_login_leaves_the_newer_one_standing() {
-    let (amt, dir) = (mock().await, tempfile::tempdir().unwrap());
-    let connections = connections(&dir);
+    let (amt, directory) = (mock().await, tempfile::tempdir().unwrap());
+    let connections = connections(&directory);
     let (first, second) = tokio::join!(
         connections.connect(target(&amt, "127.0.0.1"), None, false),
         connections.connect(target(&amt, "127.0.0.1"), None, false),
@@ -85,17 +82,18 @@ async fn an_overtaken_login_leaves_the_newer_one_standing() {
     assert_eq!(connections.get("127.0.0.1").unwrap().id, 2);
 }
 
-/// Saved devices we can't read stay as they are, and so do those we can't write: neither is an empty list to save over.
+/// Saved devices we cannot read stay as they are, and so do those we cannot write. Neither is an empty list to save
+/// over!
 #[tokio::test]
 async fn saved_devices_we_cant_read_or_write_fail_the_login() {
-    let (amt, dir) = (mock().await, tempfile::tempdir().unwrap());
-    std::fs::write(dir.path().join("hosts.json"), "{").unwrap();
-    assert!(connections(&dir).connect(target(&amt, "127.0.0.1"), None, false).await.is_err());
-    assert_eq!(std::fs::read_to_string(dir.path().join("hosts.json")).unwrap(), "{");
-    assert!(connections(&dir).hosts().err().unwrap().to_string().contains("hosts.json"));
+    let (amt, directory) = (mock().await, tempfile::tempdir().unwrap());
+    std::fs::write(directory.path().join("hosts.json"), "{").unwrap();
+    assert!(connections(&directory).connect(target(&amt, "127.0.0.1"), None, false).await.is_err());
+    assert_eq!(std::fs::read_to_string(directory.path().join("hosts.json")).unwrap(), "{");
+    assert!(connections(&directory).hosts().err().unwrap().to_string().contains("hosts.json"));
 
-    // A file where their folder should be.
-    let unwritable = Connections::new(dir.path().join("hosts.json/hosts.json"), "ooblin.test".into());
+    // We cannot write them here, as a file sits where their folder should be.
+    let unwritable = Connections::new(directory.path().join("hosts.json/hosts.json"), "ooblin.test".into());
     assert!(unwritable.connect(target(&amt, "127.0.0.1"), None, false).await.is_err());
     assert!(unwritable.get("127.0.0.1").is_err());
 }
@@ -103,29 +101,29 @@ async fn saved_devices_we_cant_read_or_write_fail_the_login() {
 /// A certificate other than the pinned one changes nothing we saved, until the user trusts it as `trust` does.
 #[tokio::test]
 async fn a_changed_certificate_is_refused_until_trusted() {
-    let (amt, dir) = (mock().await, tempfile::tempdir().unwrap());
-    let connections = connections(&dir);
+    let (amt, directory) = (mock().await, tempfile::tempdir().unwrap());
+    let connections = connections(&directory);
     connections.connect(target(&amt, "127.0.0.1"), None, false).await.unwrap();
     let pin = connections.hosts().unwrap().pin("127.0.0.1").unwrap();
     connections.close("127.0.0.1").await;
     connections.edit(|hosts| hosts.trust("127.0.0.1", "AB".into())).unwrap();
-    let saved = std::fs::read(dir.path().join("hosts.json")).unwrap();
+    let saved = std::fs::read(directory.path().join("hosts.json")).unwrap();
 
     let refused = connections.connect(target(&amt, "127.0.0.1"), None, false).await;
     let Err(CommandError::PinMismatch { expected, actual, .. }) = refused else { panic!("the certificate passed") };
     assert_eq!((expected.as_str(), &actual), ("AB", &pin));
     assert!(connections.get("127.0.0.1").is_err());
-    assert_eq!(std::fs::read(dir.path().join("hosts.json")).unwrap(), saved);
+    assert_eq!(std::fs::read(directory.path().join("hosts.json")).unwrap(), saved);
 
     connections.edit(|hosts| hosts.trust("127.0.0.1", actual)).unwrap();
     connections.connect(target(&amt, "127.0.0.1"), None, false).await.unwrap();
 }
 
-/// Quitting closes what's open on every device, and a login still underway comes to nothing.
+/// Quitting closes what is open on every device, and a login still underway comes to nothing.
 #[tokio::test]
 async fn quitting_closes_every_connection() {
-    let (amt, dir) = (mock().await, tempfile::tempdir().unwrap());
-    let connections = connections(&dir);
+    let (amt, directory) = (mock().await, tempfile::tempdir().unwrap());
+    let connections = connections(&directory);
     connections.connect(target(&amt, "127.0.0.1"), None, false).await.unwrap();
     let open = async |client: &mut Client| client.kvm().await.map(Arc::new);
     let screen = connections.open("127.0.0.1", |connection| &connection.kvm, open).await.unwrap();
@@ -141,10 +139,12 @@ async fn quitting_closes_every_connection() {
 
 #[tokio::test]
 async fn a_screen_opening_across_a_reconnect_stays_out_of_both_connections() {
-    let (amt, dir) = (mock().await, tempfile::tempdir().unwrap());
-    let connections = connections(&dir);
+    let (amt, directory) = (mock().await, tempfile::tempdir().unwrap());
+    let connections = connections(&directory);
     connections.connect(target(&amt, "127.0.0.1"), None, false).await.unwrap();
-    // The old connection's client is busy, so its screen opens only once it's closed and the new connection is in.
+
+    // We keep the old connection's client busy, so its screen opens only once it is closed and the new connection is
+    // in.
     let old = connections.get("127.0.0.1").unwrap();
     let busy = old.client.lock().await;
     let (opened, (), ()) = tokio::join!(
@@ -155,6 +155,7 @@ async fn a_screen_opening_across_a_reconnect_stays_out_of_both_connections() {
             drop(busy);
         },
     );
+
     assert!(opened.is_err());
     assert!(old.kvm.0.lock().await.is_none());
     assert!(connections.get("127.0.0.1").unwrap().kvm.0.lock().await.is_none());
@@ -162,8 +163,8 @@ async fn a_screen_opening_across_a_reconnect_stays_out_of_both_connections() {
 
 #[tokio::test]
 async fn closing_a_screen_since_replaced_leaves_the_new_one_open() {
-    let (amt, dir) = (mock().await, tempfile::tempdir().unwrap());
-    let connections = connections(&dir);
+    let (amt, directory) = (mock().await, tempfile::tempdir().unwrap());
+    let connections = connections(&directory);
     connections.connect(target(&amt, "127.0.0.1"), None, false).await.unwrap();
     let open =
         || connections.open("127.0.0.1", |connection| &connection.kvm, async |client| client.kvm().await.map(Arc::new));
@@ -173,23 +174,27 @@ async fn closing_a_screen_since_replaced_leaves_the_new_one_open() {
     assert!(kvm.get(first).await.is_err());
     kvm.get(second).await.unwrap().frame().await.unwrap();
 
-    // Disconnecting closes it.
+    // Disconnecting closes the one still open.
     let connection = connections.get("127.0.0.1").unwrap();
     connections.close("127.0.0.1").await;
     assert!(connection.kvm.get(second).await.is_err());
 }
 
 /// A disk image replaced or taken out has stopped being served by then, so the drive is free for the next, and taking
-/// out one since replaced leaves the new one in. Ours aren't read: the mock's device sits idle once the drive is open.
-/// They're served on this test's runtime, which has one thread: what's stopped without waiting is still served.
+/// out one since replaced leaves the new one in. Ours are not read, because the mock's device sits idle once the drive
+/// is open.
+///
+/// NOTE: They are served on this test's runtime, which has one thread. So what is stopped without waiting is still
+/// served.
 #[tokio::test]
 async fn a_disk_image_replaced_stops_being_served() {
-    let (amt, dir) = (mock().await, tempfile::tempdir().unwrap());
-    let connections = connections(&dir);
+    let (amt, directory) = (mock().await, tempfile::tempdir().unwrap());
+    let connections = connections(&directory);
     connections.connect(target(&amt, "127.0.0.1"), None, false).await.unwrap();
     let image = tempfile::NamedTempFile::new().unwrap();
     std::fs::write(image.path(), [0; 4096]).unwrap();
-    // Served for as long as `serving` is kept.
+
+    // An image is served for as long as its `serving` is kept.
     let mount = async |serving: oneshot::Sender<()>| {
         let file = std::fs::File::open(image.path()).unwrap();
         let open = async |client: &mut ooblin_core::Client| {
@@ -203,6 +208,7 @@ async fn a_disk_image_replaced_stops_being_served() {
         };
         connections.open("127.0.0.1", |connection| &connection.image, open).await
     };
+
     let (serving, mut first_served) = oneshot::channel();
     let first = mount(serving).await.unwrap();
     let (serving, mut second_served) = oneshot::channel();
@@ -214,10 +220,10 @@ async fn a_disk_image_replaced_stops_being_served() {
     assert_eq!(second_served.try_recv(), Err(oneshot::error::TryRecvError::Empty));
     image.close(Some(second)).await;
     assert_eq!(second_served.try_recv(), Err(oneshot::error::TryRecvError::Closed));
-    assert!(!image.serving().await);
+    assert!(!image.is_serving().await);
 }
 
-/// A change to AMT's settings, as the `change` command makes it.
+// We make a change to AMT's settings the way the `change` command does.
 async fn change(connections: &Connections, host: &str, change: Change) -> Result<Changed<Settings>, CommandError> {
     let make = async |client: &mut Client, change| client.amt()?.change(change).await;
     connections.change(host, change, make, async |client| client.amt()?.settings().await).await
@@ -226,39 +232,39 @@ async fn change(connections: &Connections, host: &str, change: Change) -> Result
 /// The settings are read again after a change, whether it went through or not.
 #[tokio::test]
 async fn a_change_says_how_it_went_and_the_settings_after() {
-    let (amt, dir) = (mock().await, tempfile::tempdir().unwrap());
-    let connections = connections(&dir);
+    let (amt, directory) = (mock().await, tempfile::tempdir().unwrap());
+    let connections = connections(&directory);
     connections.connect(target(&amt, "127.0.0.1"), None, false).await.unwrap();
 
     let changed = change(&connections, "127.0.0.1", Change::Clock).await.unwrap();
     assert!(changed.error.is_none() && changed.settings.is_ok());
 
-    let missing = Change::AddCertificate { path: dir.path().join("missing.pem"), trusted_root: false };
+    let missing = Change::AddCertificate { path: directory.path().join("missing.pem"), is_trusted_root: false };
     let changed = change(&connections, "127.0.0.1", missing).await.unwrap();
     assert!(matches!(changed.error, Some(CommandError::Failed { .. })) && changed.settings.is_ok());
 }
 
-/// Devices saved before BMCs carry no flavor, they're AMT's.
+/// A device saved before we knew BMCs carries no flavor, so it is one of AMT's.
 #[test]
 fn an_old_hosts_json_reads_as_amt() {
-    let dir = tempfile::tempdir().unwrap();
+    let directory = tempfile::tempdir().unwrap();
     let saved = r#"{"127.0.0.1": {"pin": "AB", "name": "", "version": "19.0", "user": "admin", "remembered": false}}"#;
-    std::fs::write(dir.path().join("hosts.json"), saved).unwrap();
-    let hosts = Hosts::open(&dir.path().join("hosts.json"), "ooblin.test").unwrap();
+    std::fs::write(directory.path().join("hosts.json"), saved).unwrap();
+    let hosts = Hosts::open(&directory.path().join("hosts.json"), "ooblin.test").unwrap();
     assert_eq!(hosts.flavor("127.0.0.1"), Some(Flavor::Amt));
 }
 
-/// A device whose password we don't keep has no login of ours, and the credential store isn't asked for one.
+/// A device whose password we do not keep has no login of ours, and the credential store is not asked for one.
 #[test]
 fn a_device_not_remembered_has_no_login() {
-    let dir = tempfile::tempdir().unwrap();
+    let directory = tempfile::tempdir().unwrap();
     let saved = r#"{"127.0.0.1": {"pin": "AB", "user": "admin", "remembered": false}}"#;
-    std::fs::write(dir.path().join("hosts.json"), saved).unwrap();
-    let hosts = Hosts::open(&dir.path().join("hosts.json"), "ooblin.test").unwrap();
+    std::fs::write(directory.path().join("hosts.json"), saved).unwrap();
+    let hosts = Hosts::open(&directory.path().join("hosts.json"), "ooblin.test").unwrap();
     assert_eq!(hosts.target("127.0.0.1").err().unwrap().to_string(), "No saved password for 127.0.0.1.");
 }
 
-/// A BMC as typed, its port in the host, and connected to.
+// A BMC as the user types it, with its port in the host, which we are connected to.
 async fn bmc(connections: &Connections) -> (Arc<Bmc>, String) {
     let bmc = Bmc::start("127.0.0.1:0", &mock::fixture("x10")).await;
     let target = bmc.target(PASSWORD);
@@ -270,8 +276,8 @@ async fn bmc(connections: &Connections) -> (Arc<Bmc>, String) {
 /// Only an unsaved device is asked whether it speaks Redfish, before it gets a password.
 #[tokio::test]
 async fn a_bmc_is_found_once_and_saved_as_one() {
-    let dir = tempfile::tempdir().unwrap();
-    let connections = connections(&dir);
+    let directory = tempfile::tempdir().unwrap();
+    let connections = connections(&directory);
     let (bmc, host) = bmc(&connections).await;
     assert_eq!(connections.hosts().unwrap().flavor(&host), Some(Flavor::Supermicro));
     assert_eq!(bmc.asked()[0], "GET /redfish/v1/ (no login)");
@@ -284,8 +290,8 @@ async fn a_bmc_is_found_once_and_saved_as_one() {
 /// logged out before the next logs in.
 #[tokio::test]
 async fn a_bmc_screen_logs_out_before_the_next_logs_in() {
-    let dir = tempfile::tempdir().unwrap();
-    let connections = connections(&dir);
+    let directory = tempfile::tempdir().unwrap();
+    let connections = connections(&directory);
     let (bmc, host) = bmc(&connections).await;
     bmc.asked();
     let open =
@@ -296,17 +302,17 @@ async fn a_bmc_screen_logs_out_before_the_next_logs_in() {
     kvm.get(second).await.unwrap().frame().await.unwrap();
     kvm.close(Some(second)).await;
 
-    let web = |request: &String| !request.starts_with("ikvm ");
+    let is_web = |request: &String| !request.starts_with("ikvm ");
     let session = ["POST /cgi/login.cgi", "GET /cgi/url_redirect.cgi?url_name=man_ikvm_html5_bootstrap", "WS /"];
     let session = [&session[..], &["WS closed", "GET /cgi/logout.cgi"]].concat();
-    assert_eq!(bmc.asked().into_iter().filter(web).collect::<Vec<_>>(), [&session[..], &session].concat());
+    assert_eq!(bmc.asked().into_iter().filter(is_web).collect::<Vec<_>>(), [&session[..], &session].concat());
 }
 
 /// What only AMT does fails on a BMC without asking it, its serial console goes over IPMI.
 #[tokio::test]
 async fn a_bmc_doesnt_do_what_only_amt_does() {
-    let dir = tempfile::tempdir().unwrap();
-    let connections = connections(&dir);
+    let directory = tempfile::tempdir().unwrap();
+    let connections = connections(&directory);
     let (bmc, host) = bmc(&connections).await;
     bmc.asked();
     let changed = change(&connections, &host, Change::Clock).await.unwrap();
@@ -321,11 +327,12 @@ async fn a_bmc_doesnt_do_what_only_amt_does() {
     assert_eq!(bmc.asked()[0], "IPMI 06 48 [01, 01, c4, 00, 00, 00]");
 }
 
-/// A login to a device we're connected to closes what's open on the connection it replaces: a screen's web session.
+/// A login to a device we are connected to closes what is open on the connection it replaces, here a screen's web
+/// session.
 #[tokio::test]
 async fn a_connection_replaced_is_closed() {
-    let dir = tempfile::tempdir().unwrap();
-    let connections = connections(&dir);
+    let directory = tempfile::tempdir().unwrap();
+    let connections = connections(&directory);
     let (bmc, host) = bmc(&connections).await;
     connections
         .open(&host, |connection| &connection.kvm, async |client| client.kvm().await.map(Arc::new))
@@ -342,8 +349,8 @@ async fn a_connection_replaced_is_closed() {
 /// An IPMI login has no certificate, so the one pinned over TLS stays, until the device is forgotten.
 #[tokio::test]
 async fn an_ipmi_login_keeps_the_pin() {
-    let dir = tempfile::tempdir().unwrap();
-    let connections = connections(&dir);
+    let directory = tempfile::tempdir().unwrap();
+    let connections = connections(&directory);
     let (bmc, host) = bmc(&connections).await;
     let pin = connections.hosts().unwrap().pin(&host);
     assert!(pin.is_some());

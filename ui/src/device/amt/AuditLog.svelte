@@ -12,7 +12,7 @@
     <tbody>
       {#each data ?? Array(12) as record}
         <tr>
-          <td>{record && new Date(record.time * 1000).toLocaleString()}</td>
+          <td>{record && new Date(record.occurred_at * 1000).toLocaleString()}</td>
           <td>{record?.application}</td>
           <td>{record?.event}</td>
           <td>{record && [record.initiator, record.address].filter(Boolean).join(", ")}</td>

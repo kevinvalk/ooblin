@@ -1,13 +1,15 @@
 [alias]
-# The debug app for our verify loop (AGENTS.md) with the MCP bridge (the `verify` feature): its own identifier, so it
-# has its own devices and keychain entries, hidden so it never steals focus, and Tauri's API on `window.__TAURI__` and
-# no CSP, which the bridge needs. Every other build leaves both out.
+# The debug app for our verify loop (see AGENTS.md) with the MCP bridge (the `verify` feature). Notes:
+# - its own identifier so it has its own devices and keychain entries, NEVER those of the user
+# - a hidden window so it does not steal focus
+# - the API of Tauri on `window.__TAURI__` and no CSP as the bridge needs both, every other build leaves them out
 verify = [
   "tauri", "build", "--debug", "--no-bundle", "--features", "verify",
   "--config", '{"identifier":"nl.kevinvalk.ooblin.verify","app":{"withGlobalTauri":true,"windows":[{"width":1180,"height":860,"visible":false}],"security":{"csp":null}}}',
 ]
 
-# `cargo test` writes the types the UI sees to ui/src/bindings (ts-rs), a file per crate, numbers not bigints.
+# `cargo test` writes the types that the UI sees to ui/src/bindings (ts-rs). We want plain numbers instead of bigints
+# as none of our numbers come close to 2^53.
 [env]
 TS_RS_EXPORT_DIR = { value = "ui/src/bindings", relative = true }
 TS_RS_LARGE_INT = "number"

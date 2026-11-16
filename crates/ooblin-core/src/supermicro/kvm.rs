@@ -1,6 +1,3 @@
-//! The BMC's screen, keyboard and mouse over ATEN's iKVM: RFB with messages of its own, the screen in AST2100 video.
-//! We follow the BMC's own HTML5 viewer.
-
 use std::collections::HashMap;
 use std::time::Duration;
 
@@ -22,26 +19,24 @@ pub struct Kvm {
 
 struct Screen {
     receiver: Receiver,
-    /// The picture so far.
     decoder: Decoder,
-    /// When we ask again for an update that hasn't come, a second after we asked, and the next a second after the BMC
-    /// said it has no picture (the host's screen is off, say), as the viewer does. Whether it's for the whole screen.
+
+    /// When we ask again for an update that has not come: a second after we asked, or a second after the BMC said it
+    /// has no picture (the host's screen is off, say), as the viewer does.
     ask_at: Instant,
-    whole: bool,
-    /// Whether the BMC has no picture.
-    dark: bool,
-    /// Whether we logged a picture we couldn't decode, and a message we don't know, which once a session is enough.
-    corrupt: bool,
-    unknown: bool,
+    is_whole: bool,
+    is_dark: bool, // The BMC has no picture
+
+    /// We log a picture we could not decode and a message we do not know only once a session, which is enough.
+    has_logged_corrupt: bool,
+    has_logged_unknown: bool,
 }
 
-/// Keys and the mouse: the usage each held key went down as, whether our presses turned Caps Lock on, the mouse as we
-/// last sent it.
 struct Keyboard {
     sender: Sender,
-    held: HashMap<String, u32>,
-    caps: bool,
-    pointer: (u8, u16, u16),
+    held: HashMap<String, u32>, // The usage each held key went down as
+    is_caps_lock_on: bool,      // As far as our own presses turned it on
+    pointer: (u8, u16, u16),    // The mouse as we last sent it
 }
 
 const SECOND: Duration = Duration::from_secs(1);
@@ -50,18 +45,21 @@ impl Client {
     /// Opens the BMC's screen, in a web session of its own.
     pub async fn kvm(&mut self) -> Result<Kvm> {
         let Ikvm { web, receiver, sender, width, height } = Ikvm::open(&self.redfish.connection).await?;
-        // A placeholder the first update corrects (the X10's is 640 × 480), which we don't take beyond what fits.
+
+        // A placeholder the first update corrects (the X10's is 640 × 480), and we do not take one beyond what fits.
         let (width, height) = if fits(width, height) { (width, height) } else { (640, 480) };
+
         let screen = Screen {
             receiver,
             decoder: Decoder::new(width, height),
             ask_at: Instant::now(),
-            whole: true,
-            dark: false,
-            corrupt: false,
-            unknown: false,
+            is_whole: true,
+            is_dark: false,
+            has_logged_corrupt: false,
+            has_logged_unknown: false,
         };
-        let keyboard = Keyboard { sender, held: HashMap::new(), caps: false, pointer: (0, 0, 0) };
+        let keyboard = Keyboard { sender, held: HashMap::new(), is_caps_lock_on: false, pointer: (0, 0, 0) };
+
         Ok(Kvm { screen: Mutex::new(screen), keyboard: Mutex::new(keyboard), web })
     }
 }
@@ -72,93 +70,110 @@ impl Kvm {
     pub async fn frame(&self) -> Result<Vec<u8>> {
         let mut screen = self.screen.lock().await;
         let deadline = Instant::now() + SECOND;
+
         loop {
             // Reading a message's first byte gives up nothing when it times out, and the rest follows at once.
             let Ok(kind) = tokio::time::timeout_at(deadline.min(screen.ask_at), screen.receiver.read(1)).await else {
                 if Instant::now() >= deadline {
                     return Ok(screen.frame(&[]));
                 }
-                // Not before `ask_at`, so one request is on its way at a time, as the viewer keeps it.
+
+                // We do not ask before `ask_at`, so one request is on its way at a time, as the viewer keeps it.
                 self.ask(&mut screen).await?;
                 continue;
             };
+
+            // NOTE: ATEN's iKVM is RFB with messages of its own and the screen in AST2100 video. We handle each message
+            // as the BMC's own HTML5 viewer does.
             let receiver = &mut screen.receiver;
             match kind?[0] {
                 0 => {
                     // FramebufferUpdate: one rectangle, its position ignored as the picture addresses the whole screen.
                     let header = receiver.read(23).await?;
-                    let field = |at: usize| u32::from_be_bytes(header[at..at + 4].try_into().unwrap());
-                    let [width, height] = [7, 9].map(|at| u16::from_be_bytes([header[at], header[at + 1]]));
-                    let len = field(19) as usize;
-                    if len > 8 << 20 {
-                        return Err(Error::Protocol(format!("a {len}-byte screen update")));
+                    let field = |offset: usize| u32::from_be_bytes(header[offset..offset + 4].try_into().unwrap());
+                    let [width, height] = [7, 9].map(|offset| u16::from_be_bytes([header[offset], header[offset + 1]]));
+                    let length = field(19) as usize;
+                    if length > 8 << 20 {
+                        return Err(Error::Protocol(format!("a {length}-byte screen update")));
                     }
-                    let picture = receiver.read(len).await?;
-                    screen.whole = false;
+
+                    let picture = receiver.read(length).await?;
+                    screen.is_whole = false;
+
                     if picture.is_empty() {
-                        // No signal: black once, as the viewer clears its screen, and a second before we ask again.
+                        // No signal: we paint black once, as the viewer clears its screen, and ask again in a second.
                         screen.ask_at = Instant::now() + SECOND;
-                        if std::mem::replace(&mut screen.dark, true) {
+                        if std::mem::replace(&mut screen.is_dark, true) {
                             continue;
                         }
+
                         let Decoder { width, height, .. } = screen.decoder;
                         screen.decoder = Decoder::new(width, height);
                         return Ok(screen.frame(&[[0, 0, width, height]]));
                     }
+
+                    // The viewer decodes AST2100 (encoding 87) only, and so do we.
                     if field(11) != 87 {
                         self.ask(&mut screen).await?;
-                        continue; // not AST2100, which is all the viewer decodes
+                        continue;
                     }
+
                     let size = (screen.decoder.width, screen.decoder.height);
                     let (width, height) = if fits(width, height) { (width, height) } else { size };
-                    if (width, height) != size || screen.dark {
+                    if (width, height) != size || screen.is_dark {
                         screen.decoder = Decoder::new(width, height);
-                        (screen.whole, screen.dark) = (true, false);
+                        (screen.is_whole, screen.is_dark) = (true, false);
                         self.keyboard.lock().await.sender.sync_mouse().await?;
                     }
+
                     let (painted, error) = screen.decoder.decode(&picture);
                     if let Some(error) = error
-                        && !std::mem::replace(&mut screen.corrupt, true)
+                        && !std::mem::replace(&mut screen.has_logged_corrupt, true)
                     {
                         log::warn!("{error}, the rest of that update stays as it was");
                     }
-                    // The next one's on its way while this one is painted.
+
+                    // We ask now, so the next update is on its way while this one is painted.
                     self.ask(&mut screen).await?;
                     if !painted.is_empty() {
                         return Ok(screen.frame(&painted));
                     }
                 }
-                2 => {} // the Bell
+                2 => {} // The bell
                 4 => {
-                    // The cursor, which the picture shows anyway.
+                    // The cursor, which we skip because the picture shows it anyway.
                     let header = receiver.read(20).await?;
-                    let field = |at: usize| u32::from_be_bytes(header[at..at + 4].try_into().unwrap());
+                    let field = |offset: usize| u32::from_be_bytes(header[offset..offset + 4].try_into().unwrap());
                     if field(16) == 1 {
                         let pixels = u64::from(field(8)) * u64::from(field(12));
                         if pixels > 128 * 128 {
                             return Err(Error::Protocol(format!("a cursor of {pixels} pixels")));
                         }
+
                         receiver.read(4 + 2 * pixels as usize).await?;
                     }
                 }
-                0x16 => _ = receiver.read(1).await?, // a keep-alive
-                0x37 => _ = receiver.read(3).await?, // the mouse mode
+                0x16 => _ = receiver.read(1).await?, // A keep-alive
+                0x37 => _ = receiver.read(3).await?, // The mouse mode
                 0x39 => {
-                    // Someone joined or left, or the BMC ends our session, by a code in decimal digits.
+                    // Someone joined or left, or the BMC ends our session, by a code in four bytes that each hold one
+                    // decimal digit as its value.
+                    // TODO: We never saw a real X10 end a session, so check that these are not ASCII digits?!
                     let message = receiver.read(264).await?;
-                    let why = match message[4..8].iter().fold(0, |code, &digit| code * 10 + u32::from(digit)) {
+                    let reason = match message[4..8].iter().fold(0, |code, &digit| code * 10 + u32::from(digit)) {
                         3 => "its web session was logged out",
                         4 => "too many KVM sessions",
                         8 => "a BIOS update",
                         9 => "a firmware update",
                         _ => continue,
                     };
-                    return Err(Error::Ended(why));
+
+                    return Err(Error::Ended(reason));
                 }
                 kind => {
                     // As the viewer does, we drop what came with it and carry on.
                     let dropped = receiver.skip();
-                    if !std::mem::replace(&mut screen.unknown, true) {
+                    if !std::mem::replace(&mut screen.has_logged_unknown, true) {
                         let dropped = &dropped[..dropped.len().min(32)];
                         log::warn!("dropped an iKVM message we don't know: {kind:02x} {dropped:02x?}");
                     }
@@ -169,8 +184,9 @@ impl Kvm {
 
     /// Asks for the next update, and again a second later unless it came.
     async fn ask(&self, screen: &mut Screen) -> Result<()> {
-        self.keyboard.lock().await.sender.update(screen.whole, screen.decoder.width, screen.decoder.height).await?;
+        self.keyboard.lock().await.sender.update(screen.is_whole, screen.decoder.width, screen.decoder.height).await?;
         screen.ask_at = Instant::now() + SECOND;
+
         Ok(())
     }
 
@@ -180,18 +196,20 @@ impl Kvm {
                 self.keyboard.lock().await.input(input).await?;
                 continue;
             };
-            // At a person's pace so the host keeps up, the keyboard let go between characters: closing doesn't wait
-            // for the rest, which then goes nowhere.
-            for char in text.chars() {
-                self.keyboard.lock().await.input(Input::Text { text: char.into() }).await?;
+
+            // We type at a person's pace so the host keeps up, and let go of the keyboard between characters: that way
+            // closing does not wait for the rest, which then goes nowhere.
+            for character in text.chars() {
+                self.keyboard.lock().await.input(Input::Text { text: character.into() }).await?;
                 tokio::time::sleep(Duration::from_millis(10)).await;
             }
         }
+
         Ok(())
     }
 
-    /// Lets go of what's held and closes the WebSocket, then once a frame still on its way is in waits for the BMC to
-    /// close it too, then always logs out of the web session, which the BMC would otherwise keep until it times out.
+    /// We let go of what is held and close the WebSocket, then wait for the BMC to close it too once a frame still on
+    /// its way is in. We ALWAYS log out of the web session, as the BMC would otherwise keep it until it times out.
     pub async fn close(&self) {
         let goodbye = async {
             {
@@ -202,22 +220,25 @@ impl Kvm {
             self.screen.lock().await.receiver.closed().await;
         };
         let _ = tokio::time::timeout(GOODBYE, goodbye).await;
+
         self.web.logout().await;
     }
 }
 
 impl Screen {
-    /// The screen's size, then `rects` with their pixels, as `amt::Kvm::frame` says it.
-    fn frame(&self, rects: &[[u16; 4]]) -> Vec<u8> {
-        let width = self.decoder.width;
-        let mut frame = [width.to_le_bytes(), self.decoder.height.to_le_bytes()].concat();
-        for &[x, y, w, h] in rects {
-            frame.extend([x, y, w, h].iter().flat_map(|value| value.to_le_bytes()));
-            for row in y..y + h {
-                let at = 4 * (usize::from(row) * usize::from(width) + usize::from(x));
-                frame.extend_from_slice(&self.decoder.image()[at..at + 4 * usize::from(w)]);
+    /// The screen's size, then `rectangles` with their pixels, as `amt::Kvm::frame` says it.
+    fn frame(&self, rectangles: &[[u16; 4]]) -> Vec<u8> {
+        let screen_width = self.decoder.width;
+        let mut frame = [screen_width.to_le_bytes(), self.decoder.height.to_le_bytes()].concat();
+
+        for &[x, y, width, height] in rectangles {
+            frame.extend([x, y, width, height].iter().flat_map(|value| value.to_le_bytes()));
+            for row in y..y + height {
+                let offset = 4 * (usize::from(row) * usize::from(screen_width) + usize::from(x));
+                frame.extend_from_slice(&self.decoder.image()[offset..offset + 4 * usize::from(width)]);
             }
         }
+
         frame
     }
 }
@@ -225,16 +246,16 @@ impl Screen {
 impl Keyboard {
     async fn input(&mut self, input: Input) -> Result<()> {
         match input {
-            Input::Key { code, down: true } => {
+            Input::Key { code, is_down: true } => {
                 if let Some(usage) = usage(&code) {
                     // Caps Lock goes down as itself turning it on and as 0xFF39 turning it off, as the viewer sends it.
-                    self.caps ^= usage == CAPS_LOCK;
-                    let off = usage == CAPS_LOCK && !self.caps;
-                    self.sender.key(if off { 0xFF00 | usage } else { usage }, true).await?;
+                    self.is_caps_lock_on ^= usage == CAPS_LOCK;
+                    let is_turning_off = usage == CAPS_LOCK && !self.is_caps_lock_on;
+                    self.sender.key(if is_turning_off { 0xFF00 | usage } else { usage }, true).await?;
                     self.held.insert(code, usage);
                 }
             }
-            Input::Key { code, down: false } => {
+            Input::Key { code, is_down: false } => {
                 if let Some(usage) = self.held.remove(&code) {
                     self.sender.key(usage, false).await?;
                 }
@@ -250,12 +271,14 @@ impl Keyboard {
                 self.pointer = (buttons, x, y);
             }
             Input::Text { text } => {
-                // As typed on a US keyboard, Shift held for the shifted ones.
-                for at in text.chars().filter(|&char| char != '\0').filter_map(|char| US.find(char)) {
-                    let usage = 4 + (at % 53) as u32;
+                // We type as on a US keyboard, with Shift held for the shifted characters.
+                let indexes =
+                    text.chars().filter(|&character| character != '\0').filter_map(|character| US.find(character));
+                for index in indexes {
+                    let usage = 4 + (index % 53) as u32;
                     let keys = [(SHIFT, true), (usage, true), (usage, false), (SHIFT, false)];
-                    for &(usage, down) in if at < 53 { &keys[1..3] } else { &keys[..] } {
-                        self.sender.key(usage, down).await?;
+                    for &(usage, is_down) in if index < 53 { &keys[1..3] } else { &keys[..] } {
+                        self.sender.key(usage, is_down).await?;
                     }
                 }
             }
@@ -263,7 +286,8 @@ impl Keyboard {
                 for usage in std::mem::take(&mut self.held).into_values() {
                     self.sender.key(usage, false).await?;
                 }
-                // The mouse where it was, its buttons up.
+
+                // The mouse stays where it was, with its buttons up.
                 let (buttons, x, y) = self.pointer;
                 if buttons != 0 {
                     self.sender.pointer(0, x, y).await?;
@@ -271,6 +295,7 @@ impl Keyboard {
                 }
             }
         }
+
         Ok(())
     }
 }

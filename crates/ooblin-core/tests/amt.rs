@@ -1,5 +1,3 @@
-//! AMT against our mock, replaying Intel's samples and the devices we recorded.
-
 use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
@@ -11,7 +9,7 @@ use mock::{Amt, Bmc, Direction, PASSWORD, PONG, Transcript, hex, received, sent}
 use ooblin_core::amt::wsman::{Instance, parse_instance};
 use ooblin_core::amt::{
     Alarm, Availability, Change, Client, DnsUpdate, General, Ipv6Configuration, Ipv6Settings, Recovery, Redirection,
-    Session,
+    RedirectionSession,
 };
 use ooblin_core::{
     Configuration, Consent, Error, Flavor, Found, Input, Ipv4, PowerAction, PowerState, RemoteAccess, Target, discover,
@@ -31,7 +29,8 @@ fn client(amt: &Amt, password: &str, pin: Option<String>) -> Result<Client> {
     Ok(Client::new(&amt.target(password), pin)?)
 }
 
-/// What the mock was asked since the last call, by the input or instance in each request's body.
+/// Returns the input or instance in the body of each request the mock got since the last call, so calling it also
+/// forgets them.
 fn asked(amt: &Amt) -> Vec<Instance> {
     amt.asked().iter().filter_map(|request| parse_instance(request).ok()).collect()
 }
@@ -49,6 +48,7 @@ async fn pins_the_certificate_on_first_use_and_refuses_another() -> Result<()> {
         Err(Error::PinMismatch { expected, actual }) => assert_eq!((expected, actual), (old, pin)),
         other => bail!("expected a pin mismatch, got {other:?}"),
     }
+
     Ok(())
 }
 
@@ -63,6 +63,7 @@ async fn logs_in_with_digest_once_per_nonce() -> Result<()> {
     amt.expire_nonce();
     client.info().await?;
     assert_eq!(amt.challenges.load(Ordering::SeqCst), challenges + 1, "a stale nonce costs one more challenge");
+
     Ok(())
 }
 
@@ -74,7 +75,8 @@ async fn reads_and_changes_the_power() -> Result<()> {
     assert_eq!(power.state, PowerState::On);
     assert!(power.actions.contains(&PowerAction::Reset) && !power.actions.contains(&PowerAction::On));
 
-    // Each action's number, CIM's: a hard off is 8, the soft one 12. Being on, the sample offers all of them but on.
+    // These are CIM's numbers for each action: a hard off is 8 and the soft one 12. The sample is on, so it offers all
+    // of them but on.
     use PowerAction::*;
     let states = [
         (On, 2),
@@ -87,6 +89,7 @@ async fn reads_and_changes_the_power() -> Result<()> {
         (SoftOff, 12),
         (SoftReset, 14),
     ];
+
     asked(&amt);
     for (action, state) in states {
         assert_eq!(power.actions.contains(&action), action != On, "{action:?}");
@@ -105,14 +108,15 @@ async fn reads_and_changes_the_power() -> Result<()> {
     );
     assert_eq!((steps[1].get("BIOSSetup"), steps[3].get("PowerState")), (Some("true"), Some("10")));
 
-    // The BIOS's screen on SOL, booting as usual.
+    // We want the BIOS's screen on SOL while the device boots as usual.
     client.set_power(ResetToSerial).await?;
     let put = asked(&amt).into_iter().find(|input| input.class == "AMT_BootSettingData").context("no boot settings")?;
     assert_eq!((put.get("UseSOL"), put.get("BIOSSetup")), (Some("true"), Some("false")));
+
     Ok(())
 }
 
-/// Intel's sample of a device that won't show a consent code: a return value that isn't 0 is the error.
+/// Intel's sample is of a device that will not show a consent code, and a return value that is not 0 is the error.
 #[tokio::test]
 async fn a_refused_method_is_an_error() -> Result<()> {
     let amt = samples().await;
@@ -120,6 +124,7 @@ async fn a_refused_method_is_an_error() -> Result<()> {
         Err(Error::Method { method, code }) => assert_eq!((&*method, &*code), ("StartOptIn", "2")),
         other => bail!("expected a refusal, got {other:?}"),
     }
+
     Ok(())
 }
 
@@ -130,6 +135,7 @@ async fn a_method_of_a_class_the_device_lacks_is_a_fault() -> Result<()> {
     let amt = start(fixture.path()).await;
     let refused = client(&amt, PASSWORD, None)?.cancel_consent().await;
     assert!(matches!(refused, Err(Error::Fault(_))), "{refused:?}");
+
     Ok(())
 }
 
@@ -150,44 +156,50 @@ async fn a_read_lost_on_the_way_is_tried_again_a_change_is_not() -> Result<()> {
     amt.hang_up();
     assert!(matches!(client.set_power(PowerAction::Reset).await, Err(Error::Transport(_))));
     assert_eq!(asked(&amt).len(), 1);
+
     Ok(())
 }
 
-/// A WS-Man reply with `body` as its body.
 fn reply(body: &str) -> String {
     format!(r#"<Envelope xmlns="http://www.w3.org/2003/05/soap-envelope"><Header/><Body>{body}</Body></Envelope>"#)
 }
 
-/// A list or a reply the device never ends is an error, rather than ours to read forever.
+/// A list or a reply the device never ends is an error, as we would otherwise read forever.
 #[tokio::test]
 async fn refuses_what_has_no_end() -> Result<()> {
     let fixture = tempfile::tempdir()?;
     let wsman = fixture.path().join("wsman");
     std::fs::create_dir(&wsman)?;
+
     let page = reply("<PullResponse><EnumerationContext>more</EnumerationContext><Items/></PullResponse>");
     std::fs::write(wsman.join("CIM_Chip.Pull.xml"), &page)?;
-    for n in 2..=101 {
-        std::fs::write(wsman.join(format!("CIM_Chip.Pull.{n}.xml")), &page)?;
+    for page_number in 2..=101 {
+        std::fs::write(wsman.join(format!("CIM_Chip.Pull.{page_number}.xml")), &page)?;
     }
+
     let events = reply("<GetRecords_OUTPUT><RecordArray>AA==</RecordArray></GetRecords_OUTPUT>");
     std::fs::write(wsman.join("AMT_MessageLog.GetRecords.IterationIdentifier=,MaxReadRecords=390.xml"), events)?;
+
     let total = "<TotalRecordCount>4294967295</TotalRecordCount>";
     let records = reply(&format!("<ReadRecords_OUTPUT>{total}<EventRecords>AA==</EventRecords></ReadRecords_OUTPUT>"));
     for start in 1..=100 {
         std::fs::write(wsman.join(format!("AMT_AuditLog.ReadRecords.StartIndex={start}.xml")), &records)?;
     }
+
     std::fs::write(wsman.join("AMT_GeneralSettings.Get.xml"), reply(&"<a/>".repeat(3 << 20)))?;
 
     let amt = start(fixture.path()).await;
     let mut client = client(&amt, PASSWORD, None)?;
-    let endless = |error| matches!(error, Err(Error::Protocol(error)) if error == "a list that doesn't end");
-    assert!(endless(client.enumerate("CIM_Chip").await.map(drop)));
-    assert!(endless(client.event_log().await.map(drop)));
-    assert!(endless(client.audit_log().await.map(drop)));
+    let is_endless = |list| matches!(list, Err(Error::Protocol(error)) if error == "a list that doesn't end");
+    assert!(is_endless(client.enumerate("CIM_Chip").await.map(drop)));
+    assert!(is_endless(client.event_log().await.map(drop)));
+    assert!(is_endless(client.audit_log().await.map(drop)));
+
     match client.get("AMT_GeneralSettings").await {
         Err(Error::Protocol(error)) => assert_eq!(error, "a reply of more than 8388608 bytes"),
         other => bail!("expected a refusal, got {:?}", other.map(drop)),
     }
+
     Ok(())
 }
 
@@ -203,10 +215,12 @@ async fn reads_every_fixture() -> Result<()> {
                 Bmc::start("127.0.0.1:0", &fixture).await.target(PASSWORD)
             }
         };
+
         let (mut client, info) = ooblin_core::Client::login(&target, None, None).await.context(name.clone())?;
         assert_eq!(info.flavor, flavor, "{name}");
         client.power().await.context(name.clone())?;
         client.event_log().await.context(name.clone())?;
+
         // We read hardware over AMT and Redfish only.
         if flavor != Flavor::Ipmi {
             let hardware = client.hardware().await.context(name.clone())?;
@@ -215,6 +229,7 @@ async fn reads_every_fixture() -> Result<()> {
                 "{name}: no processor or memory"
             );
         }
+
         match &mut client {
             ooblin_core::Client::Amt(client) => {
                 client.settings().await.context(name.clone())?;
@@ -234,6 +249,7 @@ async fn reads_every_fixture() -> Result<()> {
             }
         }
     }
+
     Ok(())
 }
 
@@ -241,21 +257,25 @@ async fn reads_every_fixture() -> Result<()> {
 async fn reads_what_intels_samples_say() -> Result<()> {
     let amt = samples().await;
     let mut client = client(&amt, PASSWORD, None)?;
+
     let hardware = client.hardware().await?;
     assert_eq!(hardware.system.model, "NUC9V7QNX");
     assert_eq!(hardware.processors[0].model, "Intel(R) Core(TM) i7-9850H CPU @ 2.60GHz");
     let module = hardware.memory.iter().find(|module| module.slot == "BANK 2").context("no BANK 2")?;
     assert_eq!(module.part_number, "CT16G4SFD824A.M16FE");
-    let times: Vec<_> = client.audit_log().await?.into_iter().map(|record| record.time).collect();
+
+    let times: Vec<_> = client.audit_log().await?.into_iter().map(|record| record.occurred_at).collect();
     assert!(times.len() == 2 && times[0] > times[1], "newest first: {times:?}");
+
     Ok(())
 }
 
-/// As the MS-02's own web pages show it.
+/// We expect what the MS-02's own web pages show.
 #[tokio::test]
 async fn reads_what_the_ms_02_says() -> Result<()> {
     let amt = start(&mock::fixture("ms-02")).await;
     let mut client = client(&amt, PASSWORD, None)?;
+
     let hardware = client.hardware().await?;
     let processor = &hardware.processors[0];
     assert_eq!(
@@ -265,22 +285,25 @@ async fn reads_what_the_ms_02_says() -> Result<()> {
     assert_eq!((processor.mhz, processor.max_mhz), (Some(4600), Some(8500)));
     assert_eq!((hardware.memory[0].bytes, hardware.disks[0].bytes), (Some(32 << 30), Some(2_000_398_934_000)));
     assert!(hardware.batteries.is_empty());
+
+    // The PlatformGUID is 419CA440943AC455A192A4409CD22E55 and we swap its first three fields, as SMBIOS does.
     let status = client.status().await?;
-    // PlatformGUID 419CA440943AC455A192A4409CD22E55, its first three fields swapped as SMBIOS does.
     assert_eq!([&*status.system_id, &*hardware.system.id], ["40a49c41-3a94-55c4-a192-a4409cd22e55"; 2]);
     let port = &status.ports[0];
     assert_eq!(port.ipv4.subnet_mask, "255.255.192.0");
     assert!(port.ipv6.is_none(), "IPv6 is off");
+
     for times in [
-        client.event_log().await?.into_iter().map(|event| event.time).collect::<Vec<_>>(),
-        client.audit_log().await?.into_iter().map(|record| record.time).collect(),
+        client.event_log().await?.into_iter().map(|event| event.occurred_at).collect::<Vec<_>>(),
+        client.audit_log().await?.into_iter().map(|record| record.occurred_at).collect(),
     ] {
-        assert!(times.is_sorted_by(|a, b| a >= b), "newest first");
+        assert!(times.is_sorted_by(|newer, older| newer >= older), "newest first");
     }
+
     Ok(())
 }
 
-/// Each change is only what differs, an instance going back whole with it.
+/// Each change asks only for what differs, and where that is an instance it goes back whole.
 #[tokio::test]
 async fn changes_the_settings() -> Result<()> {
     let amt = start(&mock::fixture("ms-02")).await;
@@ -288,28 +311,28 @@ async fn changes_the_settings() -> Result<()> {
     let settings = client.settings().await?;
     amt.asked();
 
-    let access = RemoteAccess { sol: false, consent: Consent::All, ..settings.remote_access };
+    let access = RemoteAccess { is_sol: false, consent: Consent::All, ..settings.remote_access };
     client.change(Change::RemoteAccess(access)).await?;
     let changes = asked(&amt);
     assert_eq!(changes[0].get("RequestedState"), Some("32769"));
     assert_eq!((&*changes[1].class, changes[1].get("OptInRequired")), ("IPS_OptInService", Some("4294967295")));
     assert_eq!(changes.len(), 2, "KVM and the listener stay on");
 
-    let general = General { name: "renamed.example.com".into(), respond_to_ping: false, ..settings.general };
+    let general = General { name: "renamed.example.com".into(), is_respond_to_ping: false, ..settings.general };
     client.change(Change::General(general)).await?;
     let put = asked(&amt).pop().context("no Put")?;
     let name = (put.get("HostName"), put.get("DomainName"));
     assert_eq!((name, put.get("PingResponseEnabled")), ((Some("renamed"), Some("example.com")), Some("false")));
     assert_eq!(put.get("DigestRealm"), Some("Digest:FA88D31BAFC44865DC5345817456CFA3"), "kept");
 
-    let active: Vec<_> = settings.power_policies.iter().filter(|policy| policy.active).collect();
+    let active: Vec<_> = settings.power_policies.iter().filter(|policy| policy.is_active).collect();
     assert_eq!((&*active[0].id, &*active[0].description), ("SCHEME 1", "ON in S0, ME Wake in S3, S4-5 (AC only)"));
     client.change(Change::PowerPolicy("SCHEME 0".into())).await?;
     let request = amt.asked().pop().context("no request")?;
     assert!(request.contains(r#"Name="InstanceID">SCHEME 0<"#), "on the scheme: {request}");
 
-    // Network: what isn't an address never goes out, nor a manual configuration without one. A manual address names
-    // the port, the OS's and DHCP take the addresses out.
+    // What is not an address never goes out, nor does a manual configuration without one. A manual address names the
+    // port, while the OS's and DHCP take the addresses out of the request.
     let network = client.settings().await?.network;
     let typo = Ipv4 { address: "192.0.2.700".into(), ..network.ipv4 };
     let blank =
@@ -320,12 +343,14 @@ async fn changes_the_settings() -> Result<()> {
         assert!(matches!(client.change(change).await, Err(Error::Invalid(_))));
     }
     assert!(amt.asked().is_empty(), "sent");
+
     let ipv4 = Ipv4 { configuration: Configuration::Manual, address: "192.0.2.7".into(), ..settings.network.ipv4 };
     client.change(Change::Ipv4(ipv4)).await?;
     let request = amt.asked().pop().context("no Put")?;
     assert!(request.contains(r#"Name="InstanceID">Intel(r) AMT Ethernet Port Settings 0<"#), "{request}");
     let put = parse_instance(&request)?;
     assert_eq!((put.get("DHCPEnabled"), put.get("IPAddress")), (Some("false"), Some("192.0.2.7")));
+
     for (configuration, dhcp, shared) in [(Configuration::Os, "false", "true"), (Configuration::Dhcp, "true", "false")]
     {
         let ipv4 = Ipv4 { configuration, address: "192.0.2.7".into(), ..client.settings().await?.network.ipv4 };
@@ -334,12 +359,13 @@ async fn changes_the_settings() -> Result<()> {
         let port = [put.get("DHCPEnabled"), put.get("IpSyncEnabled"), put.get("SharedStaticIp"), put.get("IPAddress")];
         assert_eq!(port, [Some(dhcp), Some(shared), Some(shared), None], "{configuration:?}");
     }
-    let available = Availability { asleep: true, ..settings.network.available };
+
+    let available = Availability { is_asleep: true, ..settings.network.available };
     client.change(Change::Availability(available)).await?;
     let put = asked(&amt).pop().context("no Put")?;
     assert_eq!((put.all("LinkPolicy").collect::<Vec<_>>(), put.get("IPAddress")), (vec!["1", "14", "16"], None));
 
-    // IPv6 is off on the MS-02: turning it on links it again, with the port and its settings as keys.
+    // IPv6 is off on the MS-02, so turning it on links it again with the port and its settings as keys.
     assert_eq!(settings.network.ipv6.configuration, Ipv6Configuration::Off);
     let ipv6 = Ipv6Settings { configuration: Ipv6Configuration::Automatic, ..settings.network.ipv6 };
     client.change(Change::Ipv6(ipv6)).await?;
@@ -347,20 +373,22 @@ async fn changes_the_settings() -> Result<()> {
     assert!(request.contains(">Intel(r) AMT Ethernet Port 0<") && request.contains(">Intel(r) IPS IPv6 Settings 0<"));
     assert_eq!(parse_instance(&request)?.get("IsCurrent"), Some("1"), "{request}");
 
-    // Neither recovery nor erase on the MS-02: asked for, its boot service stays as it was, which is an error. And
-    // only AMT's own certificate, in use and staying.
-    assert_eq!((settings.recovery.one_click, settings.recovery.platform_erase), (None, None));
-    let recovery = Recovery { one_click: Some(true), platform_erase: None };
+    // The MS-02 has neither recovery nor erase: when we ask for one its boot service stays as it was, which is an
+    // error. It also has only AMT's own certificate, which is in use and stays.
+    assert_eq!((settings.recovery.is_one_click, settings.recovery.is_platform_erase), (None, None));
+    let recovery = Recovery { is_one_click: Some(true), is_platform_erase: None };
     assert!(matches!(client.change(Change::Recovery(recovery)).await, Err(Error::Protocol(_))));
     assert_eq!(asked(&amt)[0].get("RequestedState"), Some("32769"));
+
     let own = &settings.certificates[0];
-    assert!(own.read_only && own.in_use && own.name == "Intel® AMT self-signed certificate", "{own:?}");
-    assert!(settings.tls.iter().all(|tls| tls.enabled && !tls.mutual) && settings.tls[1].local);
+    assert!(own.is_read_only && own.is_in_use && own.name == "Intel® AMT self-signed certificate", "{own:?}");
+    assert!(settings.tls.iter().all(|tls| tls.is_enabled && !tls.is_mutual) && settings.tls[1].is_local);
+
     let file = tempfile::NamedTempFile::new()?;
     std::fs::write(&file, "-----BEGIN CERTIFICATE-----\nMIIB\n-----END CERTIFICATE-----\n")?;
-    client.change(Change::AddCertificate { path: file.path().into(), trusted_root: true }).await?;
+    client.change(Change::AddCertificate { path: file.path().into(), is_trusted_root: true }).await?;
     assert_eq!(asked(&amt).pop().context("no add")?.get("CertificateBlob"), Some("MIIB"));
-    let gone = Change::AddCertificate { path: file.path().with_extension("gone"), trusted_root: true };
+    let gone = Change::AddCertificate { path: file.path().with_extension("gone"), is_trusted_root: true };
     assert!(matches!(client.change(gone).await, Err(Error::Invalid(_))));
     client.change(Change::DeleteCertificate("Intel(r) AMT Certificate: Handle: 1".into())).await?;
     let request = amt.asked().pop().context("no Delete")?;
@@ -371,14 +399,14 @@ async fn changes_the_settings() -> Result<()> {
     let put = asked(&amt).pop().context("no Put")?;
     assert_eq!((put.get("DDNSUpdateEnabled"), put.get("DDNSUpdateByDHCPServerEnabled")), (Some("true"), Some("false")));
 
-    let alarm = Alarm { name: "Backups".into(), at: 1_800_000_000, every_minutes: 1440, forget: false };
+    let alarm = Alarm { name: "Backups".into(), next_at: 1_800_000_000, every_minutes: 1440, is_forget: false };
     client.change(Change::AddAlarm(alarm)).await?;
     let request = amt.asked().pop().context("no alarm")?;
     assert!(request.contains(">2027-01-15T08:00:00Z<") && request.contains(">P1DT0H0M<"), "{request}");
     client.change(Change::DeleteAlarm("Backups".into())).await?;
     assert!(amt.asked().pop().context("no Delete")?.contains(r#"Name="InstanceID">Backups<"#));
 
-    // The MS-02 was recorded headless, so with no screen active, and shows the first.
+    // We recorded the MS-02 headless, so no screen is active and it shows the first.
     let screens = client.screens().await?;
     assert!(screens.active.is_empty() && screens.shown == 0, "{screens:?}");
     client.show_screen(1).await?;
@@ -387,6 +415,7 @@ async fn changes_the_settings() -> Result<()> {
     client.change(Change::Clock).await?;
     let set = asked(&amt).pop().context("no time")?;
     assert_eq!((&*set.class, set.get("Ta0")), ("SetHighAccuracyTimeSynch_INPUT", Some("1792388976")));
+
     Ok(())
 }
 
@@ -396,10 +425,12 @@ async fn opens_redirection_sessions_with_digest() -> Result<()> {
     Transcript(vec![received(b"hello")]).save(&fixture.path().join("sol.transcript"))?;
     let amt = start(fixture.path()).await;
 
-    let mut sol = Redirection::open(&amt.target(PASSWORD), None, Session::Sol).await?;
+    let mut sol = Redirection::open(&amt.target(PASSWORD), None, RedirectionSession::Sol).await?;
     assert_eq!(sol.read_exact(5).await?, b"hello");
-    let refused = Redirection::open(&amt.target("wrong"), None, Session::Sol).await;
+
+    let refused = Redirection::open(&amt.target("wrong"), None, RedirectionSession::Sol).await;
     assert!(matches!(refused, Err(Error::Unauthorized)));
+
     Ok(())
 }
 
@@ -409,47 +440,91 @@ async fn reaches_an_ipv6_address_with_or_without_brackets() -> Result<()> {
         eprintln!("Skipped: this machine has no IPv6 loopback.");
         return Ok(());
     }
+
     let amt = Amt::start("[::1]:0", "[::1]:0", &mock::fixture("ms-02")).await;
 
     for host in ["::1", "[::1]"] {
         let target = Target { host: host.into(), ..amt.target(PASSWORD) };
         Client::new(&target, None)?.info().await.context(host)?;
-        Redirection::open(&target, None, Session::Sol).await.context(host)?;
+        Redirection::open(&target, None, RedirectionSession::Sol).await.context(host)?;
     }
+
     Ok(())
 }
 
-/// A frame's rectangles after its size: x, y, width, height and RGBA pixels (see `Kvm::frame`).
-fn rects(frame: &[u8]) -> Vec<(u16, u16, u16, u16, &[u8])> {
-    let u16 = |at: usize| u16::from_le_bytes([frame[at], frame[at + 1]]);
-    let mut rects = Vec::new();
-    let mut at = 4;
-    while at < frame.len() {
-        let (width, height) = (u16(at + 4), u16(at + 6));
-        let len = usize::from(width) * usize::from(height) * 4;
-        rects.push((u16(at), u16(at + 2), width, height, &frame[at + 8..at + 8 + len]));
-        at += 8 + len;
+/// Returns the rectangles that follow a frame's size as x, y, width, height and RGBA pixels (see `Kvm::frame`).
+fn rectangles(frame: &[u8]) -> Vec<(u16, u16, u16, u16, &[u8])> {
+    let u16 = |offset: usize| u16::from_le_bytes([frame[offset], frame[offset + 1]]);
+
+    let mut rectangles = Vec::new();
+    let mut offset = 4;
+    while offset < frame.len() {
+        let (width, height) = (u16(offset + 4), u16(offset + 6));
+        let length = usize::from(width) * usize::from(height) * 4;
+        rectangles.push((u16(offset), u16(offset + 2), width, height, &frame[offset + 8..offset + 8 + length]));
+        offset += 8 + length;
     }
-    rects
+
+    rectangles
 }
 
-/// As the MS-02 recorded it: AMT 19 first only says its size, then sends the screen in ZRLE tiles of 64 by 64.
+/// We replay what the MS-02 recorded: AMT 19 first only says its size and then sends the screen in ZRLE tiles of 64
+/// by 64.
 #[tokio::test]
 async fn shows_the_ms_02_screen() -> Result<()> {
     let amt = start(&mock::fixture("ms-02")).await;
     let kvm = client(&amt, PASSWORD, None)?.kvm().await?;
+
     let size = [0x20, 3, 0x58, 2]; // 800 by 600
     assert_eq!(kvm.frame().await?, size);
+
     let frame = kvm.frame().await?;
     assert_eq!(frame[..4], size);
-    let rects = rects(&frame);
-    assert_eq!(rects.iter().map(|&(_, _, w, h, _)| u32::from(w) * u32::from(h)).sum::<u32>(), 800 * 600);
+    let areas = rectangles(&frame).into_iter().map(|(_, _, width, height, _)| u32::from(width) * u32::from(height));
+    assert_eq!(areas.sum::<u32>(), 800 * 600);
+
     assert_eq!(kvm.frame().await?, size, "nothing changed, so after a second just the size");
+
     Ok(())
 }
 
-/// Every kind of ZRLE tile (RFC 6143 7.7.6), all on one zlib stream, on a 3 by 14 screen. And as AMT has it, a tile it
-/// didn't compress outside that stream, a zlib stored block, which the next tile's back-references must not see.
+const WHOLE_SCREEN: [u8; 10] = [3, 0, 0, 0, 0, 0, 0, 3, 0, 14]; // Our request for the whole of a 3 by 14 screen
+
+/// Returns a fixture whose `session` ("kvm", "sol" or "ider") goes as `transcript` has it, with all of them turned on
+/// as on the MS-02.
+fn redirecting(session: &str, transcript: Vec<(Direction, Vec<u8>)>) -> Result<tempfile::TempDir> {
+    let fixture = tempfile::tempdir()?;
+    Transcript(transcript).save(&fixture.path().join(format!("{session}.transcript")))?;
+
+    std::fs::create_dir(fixture.path().join("wsman"))?;
+    for file in ["CIM_KVMRedirectionSAP.Get.xml", "AMT_RedirectionService.Get.xml", "IPS_OptInService.Get.xml"] {
+        std::fs::copy(mock::fixture("ms-02").join("wsman").join(file), fixture.path().join("wsman").join(file))?;
+    }
+
+    Ok(fixture)
+}
+
+/// Returns a fixture whose KVM session opens on a 3 by 14 screen as AMT 19 does and goes on with `then` after our
+/// SetEncodings.
+fn kvm(then: Vec<(Direction, Vec<u8>)>) -> Result<tempfile::TempDir> {
+    let server_init = [0, 3, 0, 14, 16, 16, 0, 1, 0, 31, 0, 63, 0, 31, 11, 5, 0, 0, 0, 0, 0, 0, 0, 0];
+    let opened = [
+        sent(&[0x40, 0, 0, 0, 0, 0, 0, 0]),
+        received(&[&[0x41, 0, 0, 0, 0, 0, 0, 0][..], b"RFB 004.000\n"].concat()),
+        sent(b"RFB 003.008\n"),
+        received(&[1, 1]),
+        sent(&[1]),
+        received(&[0, 0, 0, 0]),
+        sent(&[1]),
+        received(&server_init),
+        sent(&[2, 0, 0, 3, 0, 0, 0, 16, 0, 0, 0, 0, 0xFF, 0xFF, 0xFF, 0x21]),
+    ];
+
+    redirecting("kvm", [opened.to_vec(), then].concat())
+}
+
+/// We send every kind of ZRLE tile (RFC 6143 7.7.6) on one zlib stream, on a 3 by 14 screen. AMT also sends a tile it
+/// did not compress outside that stream, as a zlib stored block, which the next tile's back-references must NOT see.
 #[tokio::test]
 async fn decodes_every_kind_of_zrle_tile() -> Result<()> {
     let [r, g, b] = [0xF800u16, 0x07E0, 0x001F].map(u16::to_le_bytes);
@@ -462,40 +537,43 @@ async fn decodes_every_kind_of_zrle_tile() -> Result<()> {
         ([&[0][..], &b, &b, &b, &g, &g, &g].concat(), [b, b, b, g, g, g]), // stored, see below
         ([&[0][..], &r, &g, &b, &b, &g, &r].concat(), [r, g, b, b, g, r]), // the raw one again
     ];
+
     let mut update = vec![0, 0, 0, tiles.len() as u8];
     let mut zlib = Compress::new(Compression::default(), true);
     for (i, (tile, _)) in tiles.iter().enumerate() {
-        let mut data = Vec::with_capacity(1024);
+        let mut encoded = Vec::with_capacity(1024);
         if i == 5 {
-            let len = (tile.len() as u16).to_le_bytes();
-            data = [&[0][..], &len, &len.map(|byte| !byte), tile].concat();
+            let length = (tile.len() as u16).to_le_bytes();
+            encoded = [&[0][..], &length, &length.map(|byte| !byte), tile].concat();
         } else {
-            zlib.compress_vec(tile, &mut data, FlushCompress::Sync)?;
+            zlib.compress_vec(tile, &mut encoded, FlushCompress::Sync)?;
         }
-        update.extend(
-            [&[0, 0, 0, 2 * i as u8, 0, 3, 0, 2, 0, 0, 0, 16][..], &(data.len() as u32).to_be_bytes(), &data].concat(),
-        );
+
+        let rectangle = [0, 0, 0, 2 * i as u8, 0, 3, 0, 2, 0, 0, 0, 16];
+        update.extend([&rectangle[..], &(encoded.len() as u32).to_be_bytes(), &encoded].concat());
     }
-    let fixture = kvm(vec![sent(&WHOLE), received(&update)])?;
+    let fixture = kvm(vec![sent(&WHOLE_SCREEN), received(&update)])?;
 
     let amt = start(fixture.path()).await;
     let frame = client(&amt, PASSWORD, None)?.kvm().await?.frame().await?;
-    let rects = rects(&frame);
-    assert_eq!((&frame[..4], rects.len()), (&[3, 0, 14, 0][..], tiles.len()));
+    let rectangles = rectangles(&frame);
+    assert_eq!((&frame[..4], rectangles.len()), (&[3, 0, 14, 0][..], tiles.len()));
+
     let rgba = |pixel: [u8; 2]| match pixel {
         pixel if pixel == r => [255, 0, 0, 255],
         pixel if pixel == g => [0, 255, 0, 255],
         _ => [0, 0, 255, 255],
     };
-    for (i, ((_, expected), (x, y, w, h, pixels))) in tiles.iter().zip(rects).enumerate() {
-        assert_eq!((x, y, w, h), (0, 2 * i as u16, 3, 2));
+    for (i, ((_, expected), (x, y, width, height, pixels))) in tiles.iter().zip(rectangles).enumerate() {
+        assert_eq!((x, y, width, height), (0, 2 * i as u16, 3, 2));
         assert_eq!(pixels, expected.map(rgba).concat(), "tile {i}");
     }
+
     Ok(())
 }
 
-/// A key and a mouse button held when the screen loses focus are let go of, the mouse where it was. The mock hangs up on
-/// any byte we get wrong, which the next frame would see.
+/// We let go of a key and a mouse button that are held when the screen loses focus, with the mouse where it was. The
+/// mock hangs up on any byte we get wrong, which the next frame would see.
 #[tokio::test]
 async fn lets_go_of_what_is_held() -> Result<()> {
     let fixture = kvm(vec![
@@ -503,25 +581,28 @@ async fn lets_go_of_what_is_held() -> Result<()> {
         sent(&[5, 1, 0, 2, 0, 9]), // the left button, at 2, 9
         sent(&[4, 0, 0, 0, 0, 0, 0, b'a']),
         sent(&[5, 0, 0, 2, 0, 9]),
-        sent(&WHOLE),
+        sent(&WHOLE_SCREEN),
         received(&[0, 0, 0, 0]), // an update of nothing
     ])?;
     let amt = start(fixture.path()).await;
     let kvm = client(&amt, PASSWORD, None)?.kvm().await?;
-    let held = [Input::Key { code: "KeyA".into(), down: true }, Input::Pointer { x: 2, y: 9, buttons: 1, scroll: 0 }];
+
+    let held =
+        [Input::Key { code: "KeyA".into(), is_down: true }, Input::Pointer { x: 2, y: 9, buttons: 1, scroll: 0 }];
     kvm.input(held.into()).await?;
     kvm.input(vec![Input::Release, Input::Release]).await?;
     assert_eq!(kvm.frame().await?, [3, 0, 14, 0]);
+
     Ok(())
 }
 
-/// A screen AMT can't keep at two bytes a pixel, 3840 by 2160: once it says its size we ask for one byte a pixel, as
-/// MeshCommander does, and for all of it anew.
+/// AMT cannot keep a screen of 3840 by 2160 at two bytes a pixel. So once it says its size we ask for one byte a pixel,
+/// as MeshCommander does, and for all of it anew.
 #[tokio::test]
 async fn asks_for_fewer_colors_on_a_large_screen() -> Result<()> {
     let size = [0x0F, 0, 0x08, 0x70];
     let fixture = kvm(vec![
-        sent(&WHOLE),
+        sent(&WHOLE_SCREEN),
         received(&[&[0, 0, 0, 1, 0, 0, 0, 0][..], &size, &[0xFF, 0xFF, 0xFF, 0x21]].concat()),
         sent(&[0, 0, 0, 0, 8, 8, 0, 1, 0, 7, 0, 7, 0, 3, 5, 2, 0, 0, 0, 0]),
         sent(&[&[3, 0, 0, 0, 0, 0][..], &size].concat()),
@@ -529,15 +610,17 @@ async fn asks_for_fewer_colors_on_a_large_screen() -> Result<()> {
     ])?;
     let amt = start(fixture.path()).await;
     let kvm = client(&amt, PASSWORD, None)?.kvm().await?;
+
     assert_eq!(kvm.frame().await?, [0, 0x0F, 0x70, 0x08]);
-    assert_eq!(rects(&kvm.frame().await?), [(0, 0, 2, 1, &[255, 0, 0, 255, 0, 0, 255, 255][..])]);
+    assert_eq!(rectangles(&kvm.frame().await?), [(0, 0, 2, 1, &[255, 0, 0, 255, 0, 0, 255, 255][..])]);
+
     Ok(())
 }
 
-/// Text being typed keeps neither the screen nor `close` waiting: both get the keyboard between two characters.
+/// Text being typed keeps neither the screen nor `close` waiting, as both get the keyboard between two characters.
 #[tokio::test]
 async fn shows_the_screen_while_typing() -> Result<()> {
-    let fixture = kvm(vec![sent(&WHOLE), received(&[0, 0, 0, 0])])?;
+    let fixture = kvm(vec![sent(&WHOLE_SCREEN), received(&[0, 0, 0, 0])])?;
     let amt = start(fixture.path()).await;
     let kvm = Arc::new(client(&amt, PASSWORD, None)?.kvm().await?);
 
@@ -551,15 +634,17 @@ async fn shows_the_screen_while_typing() -> Result<()> {
 
     kvm.close().await;
     assert!(typing.await?.is_err(), "the typing went on after the goodbye");
+
     Ok(())
 }
 
-/// An update of more rectangles than any screen has: 17 000 tiles of 64 by 64, each a stored block of one color.
+/// We send an update of more rectangles than any screen has: 17 000 tiles of 64 by 64, each a stored block of one
+/// color.
 #[tokio::test]
 async fn refuses_an_update_larger_than_any_screen() -> Result<()> {
     let tile = [&[0, 0, 0, 0, 0, 64, 0, 64, 0, 0, 0, 16, 0, 0, 0, 8][..], &[0, 3, 0, 0xFC, 0xFF, 1, 0, 0]].concat();
     let update = [&[0, 0, 0x42, 0x68][..], &tile.repeat(0x4268)].concat();
-    let fixture = kvm(vec![sent(&WHOLE), received(&update)])?;
+    let fixture = kvm(vec![sent(&WHOLE_SCREEN), received(&update)])?;
 
     let amt = start(fixture.path()).await;
     let kvm = client(&amt, PASSWORD, None)?.kvm().await?;
@@ -567,69 +652,40 @@ async fn refuses_an_update_larger_than_any_screen() -> Result<()> {
         Err(Error::Protocol(error)) => assert_eq!(error, "an update of more than 268435456 bytes"),
         other => bail!("expected a refusal, got {:?}", other.map(|frame| frame.len())),
     }
+
     Ok(())
 }
 
-/// A device that goes away in the middle of a message, a rectangle's pixels, a line of its console or a command for
-/// its drive: an error at once, where waiting for the rest would hang.
+/// A device that goes away in the middle of a message (a rectangle's pixels, a line of its console or a command for
+/// its drive) is an error at once, as waiting for the rest would hang.
 #[tokio::test]
 async fn a_device_hanging_up_mid_message_is_an_error() -> Result<()> {
-    let gone = |error: Error| matches!(error, Error::Transport(why) if why == "the device closed the connection");
-    let open = |session: &str| Transcript::load(&mock::fixture("ms-02").join(format!("{session}.transcript")));
+    let is_gone = |error: Error| matches!(error, Error::Transport(why) if why == "the device closed the connection");
+    let opened = |session: &str| Transcript::load(&mock::fixture("ms-02").join(format!("{session}.transcript")));
 
     let half = received(&[0, 0, 0, 1, 0, 0, 0, 0, 0, 3, 0, 14, 0, 0, 0, 0, 0xF8]);
-    let fixture = kvm(vec![sent(&WHOLE), half, received(&[])])?;
+    let fixture = kvm(vec![sent(&WHOLE_SCREEN), half, received(&[])])?;
     let amt = start(fixture.path()).await;
-    assert!(client(&amt, PASSWORD, None)?.kvm().await?.frame().await.is_err_and(gone));
+    assert!(client(&amt, PASSWORD, None)?.kvm().await?.frame().await.is_err_and(is_gone));
 
     let half = received(&[0x2A, 0, 0, 0, 1, 0, 0, 0, 5, 0, b'h']);
-    let fixture = redirecting("sol", [&open("sol")?.0[..3], &[half, received(&[])]].concat())?;
+    let fixture = redirecting("sol", [&opened("sol")?.0[..3], &[half, received(&[])]].concat())?;
     let amt = start(fixture.path()).await;
-    assert!(client(&amt, PASSWORD, None)?.sol().await?.read().await.is_err_and(gone));
+    assert!(client(&amt, PASSWORD, None)?.sol().await?.read().await.is_err_and(is_gone));
 
     let (on, half) =
         (sent(&[0x48, 0, 0, 0, 1, 0, 0, 0, 3, 0x09, 0, 0, 0]), received(&[0x50, 0, 0, 0, 2, 0, 0, 0, 0, 0]));
-    let fixture = redirecting("ider", [open("ider")?.0, vec![on, half, received(&[])]].concat())?;
+    let fixture = redirecting("ider", [opened("ider")?.0, vec![on, half, received(&[])]].concat())?;
     let amt = start(fixture.path()).await;
     let image = tempfile::tempfile()?;
     image.set_len(2048)?;
     let ider = client(&amt, PASSWORD, None)?.ider(image).await?;
-    assert!(ider.serve(|_| {}, std::future::pending()).await.is_err_and(gone));
+    assert!(ider.serve(|_| {}, std::future::pending()).await.is_err_and(is_gone));
+
     Ok(())
 }
 
-/// Our request for the whole of a 3 by 14 screen.
-const WHOLE: [u8; 10] = [3, 0, 0, 0, 0, 0, 0, 3, 0, 14];
-
-/// A KVM session on a 3 by 14 screen, opened as AMT 19 does, then `then` after our SetEncodings.
-fn kvm(then: Vec<(Direction, Vec<u8>)>) -> Result<tempfile::TempDir> {
-    let init = [0, 3, 0, 14, 16, 16, 0, 1, 0, 31, 0, 63, 0, 31, 11, 5, 0, 0, 0, 0, 0, 0, 0, 0];
-    let opened = [
-        sent(&[0x40, 0, 0, 0, 0, 0, 0, 0]),
-        received(&[&[0x41, 0, 0, 0, 0, 0, 0, 0][..], b"RFB 004.000\n"].concat()),
-        sent(b"RFB 003.008\n"),
-        received(&[1, 1]),
-        sent(&[1]),
-        received(&[0, 0, 0, 0]),
-        sent(&[1]),
-        received(&init),
-        sent(&[2, 0, 0, 3, 0, 0, 0, 16, 0, 0, 0, 0, 0xFF, 0xFF, 0xFF, 0x21]),
-    ];
-    redirecting("kvm", [opened.to_vec(), then].concat())
-}
-
-/// A device whose `session` ("kvm", "sol" or "ider") goes as `transcript` has it, all of them on as on the MS-02.
-fn redirecting(session: &str, transcript: Vec<(Direction, Vec<u8>)>) -> Result<tempfile::TempDir> {
-    let fixture = tempfile::tempdir()?;
-    Transcript(transcript).save(&fixture.path().join(format!("{session}.transcript")))?;
-    std::fs::create_dir(fixture.path().join("wsman"))?;
-    for file in ["CIM_KVMRedirectionSAP.Get.xml", "AMT_RedirectionService.Get.xml", "IPS_OptInService.Get.xml"] {
-        std::fs::copy(mock::fixture("ms-02").join("wsman").join(file), fixture.path().join("wsman").join(file))?;
-    }
-    Ok(fixture)
-}
-
-/// What's off stays off: a session needs it turned on in the settings first, and changes nothing.
+/// What is off stays off: a session needs it turned on in the settings first and changes nothing itself.
 #[tokio::test]
 async fn opens_only_what_is_on() -> Result<()> {
     let fixture = tempfile::tempdir()?;
@@ -643,11 +699,13 @@ async fn opens_only_what_is_on() -> Result<()> {
         anyhow::ensure!(xml.contains(on), "{file} has no {on}");
         std::fs::write(fixture.path().join("wsman").join(file), xml.replace(on, off))?;
     }
+
     let amt = start(fixture.path()).await;
     let mut client = client(&amt, PASSWORD, None)?;
     assert!(matches!(client.kvm().await, Err(Error::Off)));
-    assert!(client.remote_access().await?.sol, "SOL is on");
+    assert!(client.remote_access().await?.is_sol, "SOL is on");
     assert!(asked(&amt).is_empty(), "nothing changed");
+
     Ok(())
 }
 
@@ -661,6 +719,7 @@ async fn asks_for_consent() -> Result<()> {
         let xml = xml.replace("OptInRequired>0<", "OptInRequired>4294967295<");
         std::fs::write(fixture.path().join("wsman").join(file), xml)?;
     }
+
     let amt = start(fixture.path()).await;
     let mut client = client(&amt, PASSWORD, None)?;
     assert!(matches!(client.sol().await, Err(Error::Consent)));
@@ -674,20 +733,21 @@ async fn asks_for_consent() -> Result<()> {
         inputs,
         [("StartOptIn_INPUT", None), ("SendOptInCode_INPUT", Some("123456")), ("CancelOptIn_INPUT", None)]
     );
+
     Ok(())
 }
 
-/// A device booting from the image the way MeshCommander answers it: is the drive ready, how big is the disc, then
-/// a read larger than a message may carry, a command we don't know, a read past the end and why it failed, a read in
-/// READ (12), the empty floppy drive, a ping, a read in DMA, a read the drive's reset cuts short, and the end. The mock
-/// hangs up on any byte we get wrong.
+/// A device boots from the image and we answer it the way MeshCommander does. It asks whether the drive is ready and
+/// how big the disc is, then come a read larger than a message may carry, a command we do not know, a read past the end
+/// and why it failed, a read in READ (12), the empty floppy drive, a ping, a read in DMA, a read the drive's reset cuts
+/// short, and the end. The mock hangs up on any byte we get wrong.
 #[tokio::test]
 async fn serves_a_disk_image_over_ider() -> Result<()> {
     let image: Vec<u8> = (0..6 * 2048).map(|i| (i % 251) as u8).collect();
     let file = tempfile::NamedTempFile::new()?;
     std::fs::write(file.path(), &image)?;
 
-    // The device's messages carry its sequence, ours ours. A command is for the CD-ROM (0xB0), in PIO.
+    // The device's messages carry its sequence and ours carry ours. A command is for the CD-ROM (0xB0), in PIO.
     let message = |kind: u8, attributes: u8, sequence: u32, data: &[u8]| {
         [&[kind, 0, 0, attributes][..], &sequence.to_le_bytes(), data].concat()
     };
@@ -697,12 +757,14 @@ async fn serves_a_disk_image_over_ider() -> Result<()> {
         message(0x50, 0, sequence, &[&[0, 0, 0, 0, 0, 0, device, 0][..], &cdb].concat())
     };
     let command = |sequence, cdb: &[u8]| to(0xB0, sequence, cdb);
-    // The same with DMA asked for, in the features register.
+
+    // This is the same command with DMA asked for, in the features register.
     let dma = |sequence, cdb: &[u8]| {
         let mut command = command(sequence, cdb);
         command[9] = 1;
         command
     };
+
     let done = [0x85, 0, 3, 0, 0, 0, 0xB0, 0x50, 0, 0, 0, 0, 0, 0];
     let failed = |sequence, device, [sense, asc]: [u8; 2]| {
         message(
@@ -714,12 +776,13 @@ async fn serves_a_disk_image_over_ider() -> Result<()> {
     };
     let ok =
         |sequence| message(0x51, 2, sequence, &[&[0; 12][..], &[0xC5, 0, 3, 0, 0, 0, 0xB0, 0x50, 0, 0, 0]].concat());
-    let data = |sequence, data: &[u8], last: bool| {
-        let len = (data.len() as u16).to_le_bytes();
-        let header = [0, len[0], len[1], 0, 0xB5, 0, 2, 0, len[0], len[1], 0xB0, 0x58];
-        let end = if last { done } else { [0; 14] };
-        message(0x54, if last { 2 } else { 0 }, sequence, &[&header[..], &end, data].concat())
+    let data = |sequence, data: &[u8], is_last: bool| {
+        let length = (data.len() as u16).to_le_bytes();
+        let header = [0, length[0], length[1], 0, 0xB5, 0, 2, 0, length[0], length[1], 0xB0, 0x58];
+        let end = if is_last { done } else { [0; 14] };
+        message(0x54, if is_last { 2 } else { 0 }, sequence, &[&header[..], &end, data].concat())
     };
+
     let opened = Transcript::load(&mock::fixture("ms-02").join("ider.transcript"))?;
     let mut transcript = opened.0; // our open and the MS-02's answer, 8192 bytes at most a message
     transcript.extend([
@@ -751,7 +814,7 @@ async fn serves_a_disk_image_over_ider() -> Result<()> {
             12,
             &[&[0, 0, 8, 0, 0xB4, 0, 2, 0, 0, 0, 0xB0, 0x58][..], &done, &image[..2048]].concat(),
         )),
-        // Blocks 1 to 5 again, the drive reset before we sent any: the first message goes, the rest doesn't.
+        // Blocks 1 to 5 again, but the drive resets before we sent any: the first message goes and the rest does not.
         received(&[command(12, &[0x28, 0, 0, 0, 0, 1, 0, 0, 5]), message(0x46, 0, 13, &[1])].concat()),
         sent(&data(13, &image[2048..2048 + 8192], false)),
         sent(&message(0x47, 0, 14, &[])),
@@ -764,18 +827,19 @@ async fn serves_a_disk_image_over_ider() -> Result<()> {
     let mut reads = Vec::new();
     ider.serve(|served| reads.push(served), std::future::pending()).await?;
     assert_eq!(reads, [2048..6 * 2048, 0..2048, 0..2048, 2048..2048 + 8192]);
+
     Ok(())
 }
 
-/// A serial console: what the device writes comes in as it writes it, what we type goes out, and keeping the session
-/// alive in between goes unnoticed. The mock hangs up on any byte of the start we get wrong, and on a message that
-/// isn't numbered as the next.
+/// What the device writes on its serial console comes in as it writes it, what we type goes out, and keeping the
+/// session alive in between goes unnoticed. The mock hangs up on any byte of the start we get wrong, and on a message
+/// that is not numbered as the next.
 #[tokio::test]
 async fn reads_and_types_on_the_serial_console() -> Result<()> {
     let opened = Transcript::load(&mock::fixture("ms-02").join("sol.transcript"))?;
     let output = |sequence: u8, text: &[u8]| {
-        let len = (text.len() as u16).to_le_bytes();
-        received(&[&[0x2A, 0, 0, 0, sequence, 0, 0, 0, len[0], len[1]][..], text].concat())
+        let length = (text.len() as u16).to_le_bytes();
+        received(&[&[0x2A, 0, 0, 0, sequence, 0, 0, 0, length[0], length[1]][..], text].concat())
     };
     let mut transcript = opened.0[..3].to_vec(); // our start, the MS-02's answer, our control lines
     transcript.extend([output(1, b"hello"), sent(&[0x28, 0, 0, 0, 3, 0, 0, 0, 1, 0, b'\r']), output(2, b"login: ")]);
@@ -788,6 +852,7 @@ async fn reads_and_types_on_the_serial_console() -> Result<()> {
     sol.write(b"\r").await?;
     assert_eq!(sol.read().await?, b"login: ");
     assert_eq!(amt.asked().last().map(String::as_str), Some(r#"SOL "\r""#));
+
     Ok(())
 }
 
@@ -806,51 +871,57 @@ async fn keeps_a_busy_serial_console_alive() -> Result<()> {
     assert_eq!(sol.read().await?, b"one");
     tokio::time::sleep(std::time::Duration::from_millis(2100)).await;
     assert_eq!(sol.read().await?, b"two");
+
     Ok(())
 }
 
-/// As the MS-02 recorded it: the kernel saying so as a disk image is mounted.
+/// We replay what the MS-02 recorded, which is the kernel saying so as a disk image is mounted.
 #[tokio::test]
 async fn shows_the_ms_02_serial_console() -> Result<()> {
     let amt = start(&mock::fixture("ms-02")).await;
     let sol = client(&amt, PASSWORD, None)?.sol().await?;
+
     let mut text = Vec::new();
     while let read @ [_, ..] = &sol.read().await?[..] {
         text.extend_from_slice(read);
     }
+
     let text = String::from_utf8(text)?;
     assert!(text.contains("Intel    Virtual CD") && text.contains("USB disconnect"), "{text}");
+
     Ok(())
 }
 
 /// The MS-02 answers a presence ping with an acknowledgement and then its pong, which reads as AMT 19.0, configured.
-/// An address in a network and on its own is found once.
+/// An address that is in a network and also named on its own is found once.
 #[tokio::test]
 async fn finds_the_ms_02_by_its_presence_pong() -> Result<()> {
     let port = mock::answer_pings("127.0.0.1:0").await?;
+
     let mut found = Vec::new();
     discover("127.0.0.1, 127.0.0.0/30", port, |device| found.push(device)).await?;
-    let ms_02 = Found { host: "127.0.0.1".into(), flavor: Flavor::Amt, version: "19.0".into(), provisioned: true };
+    let ms_02 = Found { host: "127.0.0.1".into(), flavor: Flavor::Amt, version: "19.0".into(), is_provisioned: true };
     assert_eq!(found, [ms_02]);
 
     for networks in ["127.0.0.1/33", "localhost", "10.0.0.0/15", "10.0.0.0/16 10.1.0.0/16"] {
         assert!(matches!(discover(networks, port, |_| {}).await, Err(Error::Invalid(_))), "{networks}");
     }
+
     Ok(())
 }
 
-/// What a pong says, each from a device of its own: the MS-02's and the X10's as they sent them, then the MS-02's
-/// with the state of AMT not provisioned yet (byte 19) and with 11.8 as older AMT packs its version (byte 18), and the
-/// X10's of a device that says it has no IPMI, which is none we know.
+/// Each pong comes from a device of its own: the MS-02's and the X10's as they sent them, then the MS-02's with AMT not
+/// provisioned yet (byte 19) and with 11.8 as older AMT packs its version (byte 18), and the X10's of a device that
+/// says it has no IPMI, which is none we know.
 #[tokio::test]
 async fn reads_what_a_pong_says() -> Result<()> {
     let x10 = hex("0600ff06000011be40000010000011be000000008100000000000000");
-    let with = |pong: &[u8], at: usize, byte: u8| {
+    let with = |pong: &[u8], index: usize, byte: u8| {
         let mut pong = pong.to_vec();
-        pong[at] = byte;
+        pong[index] = byte;
         pong
     };
-    let amt = |version: &str, provisioned| Some((Flavor::Amt, version.to_owned(), provisioned));
+    let amt = |version: &str, is_provisioned| Some((Flavor::Amt, version.to_owned(), is_provisioned));
     let pongs = [
         (PONG.to_vec(), amt("19.0", true)),
         (x10.clone(), Some((Flavor::Ipmi, String::new(), true))),
@@ -858,6 +929,7 @@ async fn reads_what_a_pong_says() -> Result<()> {
         (with(&PONG, 18, 0xB8), amt("11.8", true)),
         (with(&x10, 20, 0), None),
     ];
+
     try_join_all(pongs.map(async |(pong, said)| {
         let device = UdpSocket::bind("127.0.0.1:0").await?;
         let port = device.local_addr()?.port();
@@ -867,15 +939,18 @@ async fn reads_what_a_pong_says() -> Result<()> {
                 let _ = device.send_to(&pong, from).await;
             }
         };
+
         let mut found = Vec::new();
         tokio::select! {
             () = answer => anyhow::bail!("the device stopped answering"),
             discovered = discover("127.0.0.1", port, |device| found.push(device)) => discovered?,
         }
-        let found = found.pop().map(|found| (found.flavor, found.version, found.provisioned));
+
+        let found = found.pop().map(|found| (found.flavor, found.version, found.is_provisioned));
         anyhow::ensure!(found == said, "{found:?}, not {said:?}");
         anyhow::Ok(())
     }))
     .await?;
+
     Ok(())
 }

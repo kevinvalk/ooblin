@@ -1,6 +1,3 @@
-//! Recording devices we scripted ourselves, through the mock and the real handshakes: what we record has to be exactly
-//! what the device said, minus what we scrub.
-
 use std::path::Path;
 
 use anyhow::Result;
@@ -8,8 +5,11 @@ use mock::{Amt, Bmc, Direction, PASSWORD, Transcript};
 use ooblin_core::amt::{Client, Connection};
 use ooblin_core::{Flavor, ipmi, supermicro};
 
-/// The MS-02's sessions, recorded again from the mock replaying them: all the device said, and what we said and then
-/// say on top (Enter on the serial console, asking for the screen again, the disc going in for the next boot).
+// NOTE: These tests record devices we scripted ourselves, through the mock and the real handshakes: what we record has
+// to be exactly what the device said, minus what we scrub.
+
+/// The sessions of the MS-02, recorded again from the mock replaying them: all the device said, and what we said and
+/// then say on top (Enter on the serial console, asking for the screen again, the disc going in for the next boot).
 #[tokio::test]
 async fn records_every_session_as_the_device_said_it() -> Result<()> {
     let device = mock::fixture("ms-02");
@@ -18,10 +18,11 @@ async fn records_every_session_as_the_device_said_it() -> Result<()> {
     let recorded = tempfile::tempdir()?;
     mock::record(&amt.target(PASSWORD), recorded.path()).await?;
     for name in ["sol", "kvm", "ider"] {
-        // However many reads or writes it took.
-        let said = |dir: &Path, by: Direction| -> Result<Vec<u8>> {
-            let transcript = Transcript::load(&dir.join(format!("{name}.transcript")))?;
-            Ok(transcript.0.into_iter().filter(|(direction, _)| *direction == by).flat_map(|(_, data)| data).collect())
+        // We compare the bytes, however many reads or writes it took.
+        let said = |directory: &Path, wanted: Direction| -> Result<Vec<u8>> {
+            let transcript = Transcript::load(&directory.join(format!("{name}.transcript")))?;
+            let records = transcript.0.into_iter().filter(|(direction, _)| *direction == wanted);
+            Ok(records.flat_map(|(_, data)| data).collect())
         };
         assert_eq!(said(recorded.path(), Direction::Received)?, said(&device, Direction::Received)?, "{name}");
         assert!(said(recorded.path(), Direction::Sent)?.starts_with(&said(&device, Direction::Sent)?), "{name}");
@@ -35,14 +36,15 @@ async fn records_every_session_as_the_device_said_it() -> Result<()> {
     assert!(!sol.read().await?.is_empty());
     assert_eq!(replay.asked().last().map(String::as_str), Some(r#"SOL "\r""#));
 
-    let kvm = client.kvm().await?;
     // AMT 19 first says only how large its screen is.
+    let kvm = client.kvm().await?;
     assert_eq!(kvm.frame().await?.len(), 4);
     assert!(kvm.frame().await?.len() > 4);
 
     let disc = tempfile::tempfile()?;
     disc.set_len(2048)?;
     client.ider(disc).await?;
+
     Ok(())
 }
 
@@ -56,6 +58,7 @@ async fn crawls_into_a_scrubbed_fixture_that_replays() -> Result<()> {
     let hardware = Client::new(&replay.target(PASSWORD), None)?.hardware().await?;
     assert_eq!(hardware.system.model, "NUC9V7QNX");
     assert_ne!(hardware.system.serial_number, "JRQN0243007J", "serial numbers are scrubbed");
+
     Ok(())
 }
 
@@ -65,6 +68,7 @@ async fn records_a_bmc_into_a_scrubbed_fixture_that_replays() -> Result<()> {
     let recorded = tempfile::tempdir()?;
     mock::redfish::record(&device.target(PASSWORD), recorded.path(), Flavor::Supermicro).await?;
     mock::ipmi::record(&device.target(PASSWORD), recorded.path()).await?;
+
     let replay = Bmc::start("127.0.0.1:0", recorded.path()).await;
     let client = |bmc: &Bmc| supermicro::Client::new(&bmc.target(PASSWORD), None);
     let (mut device, mut replay) = (client(&device)?, client(&replay)?);
@@ -74,18 +78,20 @@ async fn records_a_bmc_into_a_scrubbed_fixture_that_replays() -> Result<()> {
     assert_eq!(hardware.processors[0].model, original.processors[0].model);
     assert_ne!(hardware.memory[0].serial_number, original.memory[0].serial_number, "serial numbers are scrubbed");
 
-    // A fake of a fake is another fake.
+    // The fixture is scrubbed already, and a fake of a fake is another fake.
     let (status, original) = (replay.status().await?, device.status().await?);
     let (port, original_port) = (&status.ports[0], &original.ports[0]);
     assert_ne!(status.system_id, original.system_id);
     assert_ne!(port.mac, original_port.mac);
     assert_ne!(port.ipv4.address, original_port.ipv4.address);
     assert_ne!(port.ipv6.as_ref().map(|ipv6| &ipv6.addresses), original_port.ipv6.as_ref().map(|ipv6| &ipv6.addresses));
+
     Ok(())
 }
 
-/// A BMC over IPMI alone, recorded and replayed: what it reads the same but its addresses, user names, GUID and FRU
-/// serials, and found the same, whichever pings it answers. ipmi_sim's starts sessions at User and knows SHA-1 alone.
+/// A BMC over IPMI alone, recorded and replayed: it reads the same but for its addresses, user names, GUID and FRU
+/// serials, and it is found the same, whichever pings it answers. The one of ipmi_sim starts sessions at User and knows
+/// SHA-1 alone.
 #[tokio::test]
 async fn records_a_bmc_over_ipmi_into_a_scrubbed_fixture_that_replays() -> Result<()> {
     for fixture in ["ipmi-sim", "openbmc"] {
@@ -93,6 +99,7 @@ async fn records_a_bmc_over_ipmi_into_a_scrubbed_fixture_that_replays() -> Resul
         let recorded = tempfile::tempdir()?;
         mock::ipmi::record(&device.target(PASSWORD), recorded.path()).await?;
         let replay = Bmc::start("127.0.0.1:0", recorded.path()).await;
+
         let mut found = 0;
         ooblin_core::discover("127.0.0.1", replay.ipmi_port, |_| found += 1).await?;
         assert_eq!(found, 1, "{fixture}");
@@ -110,13 +117,16 @@ async fn records_a_bmc_over_ipmi_into_a_scrubbed_fixture_that_replays() -> Resul
         let (network, original_network) = (settings.network.unwrap(), original.network.unwrap());
         assert_eq!(network.subnet_mask, original_network.subnet_mask);
         assert_ne!(network.address, original_network.address);
+
         let (mac, original_mac) = (&replay.status().await?.ports[0].mac, &device.status().await?.ports[0].mac);
         assert!(original_mac.is_empty() || mac != original_mac, "{fixture}");
+
         let (fru, original) = (settings.fru.unwrap(), original.fru.unwrap());
-        assert_eq!(fru.board.as_ref().map(|b| &b.product), original.board.as_ref().map(|b| &b.product));
+        assert_eq!(fru.board.as_ref().map(|board| &board.product), original.board.as_ref().map(|board| &board.product));
         if let (Some(board), Some(original)) = (fru.board, original.board) {
             assert_ne!(board.serial_number, original.serial_number, "serial numbers are scrubbed");
         }
     }
+
     Ok(())
 }
