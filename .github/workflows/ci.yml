@@ -21,29 +21,40 @@ permissions: {}
 env:
   VERSION_TAURI_CLI: 2.12.4
 
+# NOTE: The steps the jobs share are written once, as YAML anchors (`&name`) in the first job that has them.
 jobs:
   lint-and-test:
-    strategy:
+    strategy: &every-system
       fail-fast: false
       matrix:
         os: [macos-latest, windows-latest, ubuntu-24.04]
     runs-on: ${{ matrix.os }}
-    permissions:
+    permissions: &read
       contents: read
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-      - name: Install Tauri's Linux libraries
+      - &checkout
+        uses: actions/checkout@v7.0.1
+      - &linux-libraries
+        name: Install Tauri's Linux libraries
         if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y libwebkit2gtk-4.1-dev libxdo-dev librsvg2-dev
-      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
+      - &node
+        uses: actions/setup-node@v7.1.0
         with:
           node-version-file: .node-version
           cache: npm
           cache-dependency-path: ui/package-lock.json
-      - name: Install the Rust of rust-toolchain.toml
+      - &rust
+        name: Install the Rust of rust-toolchain.toml
         run: rustup toolchain install
-      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
-      - run: npm ci --prefix ui
+      # NOTE: The key of the cache names the system but NOT its version, and what one Ubuntu built does not build on
+      # another (we had "can't find crate for `tauri`" going from 24.04 to 22.04).
+      - &rust-cache
+        uses: Swatinem/rust-cache@v2.9.3
+        with:
+          key: ${{ matrix.os }}
+      - &ui-packages
+        run: npm ci --prefix ui
       - run: npm run build --prefix ui
       - run: cargo fmt --all --check
       - run: cargo clippy --workspace --all-targets --all-features -- -D warnings
@@ -54,18 +65,13 @@ jobs:
   # The same garbled devices as `lint-and-test`, many more of them (crates/ooblin-core/tests/garbled.rs). A failure
   # fails the run, but nothing waits for it: the 8 rounds above gate building and releasing, these look further.
   garble-and-read:
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [macos-latest, windows-latest, ubuntu-24.04]
+    strategy: *every-system
     runs-on: ${{ matrix.os }}
-    permissions:
-      contents: read
+    permissions: *read
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-      - name: Install the Rust of rust-toolchain.toml
-        run: rustup toolchain install
-      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
+      - *checkout
+      - *rust
+      - *rust-cache
       - run: cargo test -p ooblin-core --test garbled
         env:
           GARBLED: 200
@@ -92,13 +98,12 @@ jobs:
           # windows-11-arm until someone asks for it.
           - os: ubuntu-22.04-arm
     runs-on: ${{ matrix.os }}
-    permissions:
-      contents: read
+    permissions: *read
     defaults:
       run:
         shell: bash
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/checkout@v7.0.1
         with:
           fetch-depth: 0 # The version of Unstable counts the commits since the last tag
       # IMPORTANT: The tag is the version, Cargo.toml says 0.0.0. Unstable is the last release plus the commits since,
@@ -116,37 +121,24 @@ jobs:
           fi
           perl -pi -e "s/^version = \"[^\"]*\"/version = \"$version\"/" crates/ooblin/Cargo.toml
           echo "VERSION=$version" >> "$GITHUB_ENV"
-      - name: Install Tauri's Linux libraries
-        if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y libwebkit2gtk-4.1-dev libxdo-dev librsvg2-dev
-      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
-        with:
-          node-version-file: .node-version
-          cache: npm
-          cache-dependency-path: ui/package-lock.json
-      - name: Install the Rust of rust-toolchain.toml
-        run: rustup toolchain install
+      - *linux-libraries
+      - *node
+      - *rust
       - name: Add the Mac architectures
         if: matrix.targets
         run: rustup target add ${{ matrix.targets }}
-      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
-        # NOTE: The key of the cache names the system but NOT its version, and what one Ubuntu built does not build
-        # on another (we had "can't find crate for `tauri`" going from 24.04 to 22.04).
-        with:
-          key: ${{ matrix.os }}
-      - run: npm ci --prefix ui
-      # The cache above keeps the installed binary, so we only really build the Tauri CLI once per version.
-      - run: cargo install tauri-cli --version "$VERSION_TAURI_CLI" --locked
+      - *rust-cache
+      - *ui-packages
       # TODO: We have no certificates yet so everything is unsigned. Signing goes here: the APPLE_* secrets of Apple in
       # env and those of Windows in a --config. The updater signs in the release job.
-      - run: cargo tauri build ${{ matrix.args }}
+      - run: npx --yes "@tauri-apps/cli@$VERSION_TAURI_CLI" build ${{ matrix.args }}
       # The updater replaces the app with the one in a tarball. We pack it ourselves, as Tauri only does when it has the
       # updater's key, which this job never gets.
       - name: Pack the app for the updater
         if: runner.os == 'macOS' && github.ref_type == 'tag'
         working-directory: target/universal-apple-darwin/release/bundle/macos
         run: COPYFILE_DISABLE=1 tar -czf "Ooblin_${VERSION}_universal.app.tar.gz" Ooblin.app
-      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+      - uses: actions/upload-artifact@v7.0.2
         with:
           name: bundles-${{ matrix.os }}
           if-no-files-found: error
@@ -168,7 +160,7 @@ jobs:
       GH_REPO: ${{ github.repository }}
       GH_TOKEN: ${{ github.token }}
     steps:
-      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+      - uses: actions/download-artifact@v8.0.2
         with:
           path: bundles
           merge-multiple: true
@@ -176,9 +168,9 @@ jobs:
         if: github.ref_type == 'tag'
         run: npm install --global --ignore-scripts "@tauri-apps/cli@$VERSION_TAURI_CLI"
       # SECURITY: Only this step sees the updater's key, so none of the code we build ever does. An app takes an update
-      # only with this key's signature, and we put a signature next to each bundle that can update itself: the app of
-      # macOS, both installers of Windows, and on Linux the AppImage, deb and rpm. `latest.json` is what the app asks
-      # for (see `plugins.updater` in tauri.conf.json), by `{os}-{arch}-{bundle}` as the updater plugin looks them up.
+      # only with this key's signature, and we sign each bundle that can update itself. `latest.json` is what the app
+      # asks for (see `plugins.updater` in tauri.conf.json), by `{os}-{arch}-{bundle}` as the updater plugin looks
+      # them up. The Mac's one app is both of its architectures.
       - name: Sign the bundles for the updater
         if: github.ref_type == 'tag'
         env:
@@ -187,45 +179,25 @@ jobs:
         working-directory: bundles
         run: |
           version=${GITHUB_REF_NAME#v}
-          app=Ooblin_${version}_universal.app.tar.gz
-          nsis=Ooblin_${version}_x64-setup.exe
-          msi=Ooblin_${version}_x64_en-US.msi
-          appimage_x64=Ooblin_${version}_amd64.AppImage
-          appimage_arm64=Ooblin_${version}_aarch64.AppImage
-          deb_x64=Ooblin_${version}_amd64.deb
-          deb_arm64=Ooblin_${version}_arm64.deb
-          rpm_x64=Ooblin-${version}-1.x86_64.rpm
-          rpm_arm64=Ooblin-${version}-1.aarch64.rpm
-
-          for bundle in "$app" "$nsis" "$msi" "$appimage_x64" "$appimage_arm64" "$deb_x64" "$deb_arm64" "$rpm_x64" "$rpm_arm64"; do
-            tauri signer sign --app-version "$version" --password "$TAURI_SIGNING_PRIVATE_KEY_PASSWORD" "$bundle"
-          done
-
-          entry() {
-            jq --null-input --arg url "https://github.com/$GITHUB_REPOSITORY/releases/download/$GITHUB_REF_NAME/$1" \
-              --rawfile signature "$1.sig" '{ url: $url, signature: ($signature | rtrimstr("\n")) }'
-          }
-          jq --null-input --arg version "$version" \
-            --argjson app "$(entry "$app")" --argjson nsis "$(entry "$nsis")" --argjson msi "$(entry "$msi")" \
-            --argjson appimage_x64 "$(entry "$appimage_x64")" --argjson appimage_arm64 "$(entry "$appimage_arm64")" \
-            --argjson deb_x64 "$(entry "$deb_x64")" --argjson deb_arm64 "$(entry "$deb_arm64")" \
-            --argjson rpm_x64 "$(entry "$rpm_x64")" --argjson rpm_arm64 "$(entry "$rpm_arm64")" \
-            '{
-              version: $version,
-              pub_date: (now | todate),
-              platforms: {
-                "darwin-aarch64-app": $app,
-                "darwin-x86_64-app": $app,
-                "windows-x86_64-nsis": $nsis,
-                "windows-x86_64-msi": $msi,
-                "linux-x86_64-appimage": $appimage_x64,
-                "linux-aarch64-appimage": $appimage_arm64,
-                "linux-x86_64-deb": $deb_x64,
-                "linux-aarch64-deb": $deb_arm64,
-                "linux-x86_64-rpm": $rpm_x64,
-                "linux-aarch64-rpm": $rpm_arm64
-              }
-            }' > latest.json
+          declare -A bundles=(
+            [darwin-aarch64-app]=Ooblin_${version}_universal.app.tar.gz
+            [darwin-x86_64-app]=Ooblin_${version}_universal.app.tar.gz
+            [windows-x86_64-nsis]=Ooblin_${version}_x64-setup.exe
+            [windows-x86_64-msi]=Ooblin_${version}_x64_en-US.msi
+            [linux-x86_64-appimage]=Ooblin_${version}_amd64.AppImage
+            [linux-aarch64-appimage]=Ooblin_${version}_aarch64.AppImage
+            [linux-x86_64-deb]=Ooblin_${version}_amd64.deb
+            [linux-aarch64-deb]=Ooblin_${version}_arm64.deb
+            [linux-x86_64-rpm]=Ooblin-${version}-1.x86_64.rpm
+            [linux-aarch64-rpm]=Ooblin-${version}-1.aarch64.rpm
+          )
+          for platform in "${!bundles[@]}"; do
+            bundle=${bundles[$platform]}
+            [ -e "$bundle.sig" ] || tauri signer sign --app-version "$version" --password "$TAURI_SIGNING_PRIVATE_KEY_PASSWORD" "$bundle"
+            jq --null-input --arg platform "$platform" --rawfile signature "$bundle.sig" \
+              --arg url "https://github.com/$GITHUB_REPOSITORY/releases/download/$GITHUB_REF_NAME/$bundle" \
+              '{ ($platform): { url: $url, signature: ($signature | rtrimstr("\n")) } }'
+          done | jq --slurp --arg version "$version" '{ version: $version, pub_date: (now | todate), platforms: add }' > latest.json
       # Deleting the release also deletes its assets and its tag (and the draft of a cancelled run). Creating it below
       # makes the tag again at this commit. We let the API do that as our token cannot push a tag without the
       # `workflows` permission.
@@ -243,7 +215,7 @@ jobs:
             gh release create unstable --target "$GITHUB_SHA" --prerelease --title Unstable \
               --notes "The latest build of main, $GITHUB_SHA. Untested." "${files[@]}"
           fi
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/checkout@v7.0.1
         if: github.ref_type == 'tag'
         with:
           ref: main
